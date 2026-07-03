@@ -1,0 +1,56 @@
+- generic [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]: Retivox
+      - paragraph [ref=e7]: Run every store. From anywhere.
+    - generic [ref=e8]:
+      - generic [ref=e9]: “
+      - paragraph [ref=e10]: Retivox has transformed how we manage our retail operations. Real-time insights and seamless sync across all locations.
+      - generic [ref=e11]:
+        - generic [ref=e12]: JK
+        - generic [ref=e13]:
+          - paragraph [ref=e14]: James Kamau
+          - paragraph [ref=e15]: Owner, Kamau Enterprises
+    - generic [ref=e17]:
+      - paragraph [ref=e18]: Why Retivox
+      - generic [ref=e19]:
+        - generic [ref=e20]:
+          - img [ref=e22]
+          - generic [ref=e24]: Real-time sales across all your branches
+        - generic [ref=e25]:
+          - img [ref=e27]
+          - generic [ref=e29]: Works offline — syncs automatically
+        - generic [ref=e30]:
+          - img [ref=e32]
+          - generic [ref=e34]: Built for growing businesses
+    - paragraph [ref=e35]: © 2025 Retivox. All rights reserved.
+  - generic [ref=e37]:
+    - generic [ref=e38]:
+      - heading "Welcome Back!" [level=1] [ref=e39]
+      - paragraph [ref=e40]: Sign in to access your dashboard and manage your stores.
+    - generic [ref=e41]:
+      - generic [ref=e42]:
+        - generic [ref=e43]: Email
+        - generic [ref=e44]:
+          - generic:
+            - img
+          - textbox "Email" [ref=e45]:
+            - /placeholder: Enter your email
+      - generic [ref=e46]:
+        - generic [ref=e47]:
+          - generic [ref=e48]: Password
+          - link "Forgot password?" [ref=e49] [cursor=pointer]:
+            - /url: /forgot-password
+        - generic [ref=e50]:
+          - generic:
+            - img
+          - textbox "Password" [ref=e51]:
+            - /placeholder: Enter your password
+          - button "Show password" [ref=e52]:
+            - img [ref=e53]
+      - button "Sign In" [ref=e57] [cursor=pointer]
+      - generic [ref=e60]: OR
+      - paragraph [ref=e62]:
+        - text: Don't have an account?
+        - link "Sign Up" [ref=e63] [cursor=pointer]:
+          - /url: /register

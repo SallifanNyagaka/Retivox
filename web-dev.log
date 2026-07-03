@@ -1,0 +1,34 @@
+
+> web@0.1.0 dev C:\Users\Dorcas\vscodeProjects\smartRetail\apps\web
+> next dev
+
+▲ Next.js 16.2.5 (Turbopack)
+- Local:         http://localhost:3000
+- Network:       http://192.168.1.187:3000
+- Environments: .env.local
+✓ Ready in 20.8s
+Creating turbopack project {
+  dir: 'C:\\Users\\Dorcas\\vscodeProjects\\smartRetail\\apps\\web',
+  testMode: true
+}
+⚠ Slow filesystem detected. The benchmark took 2122ms. If C:\Users\Dorcas\vscodeProjects\smartRetail\apps/web/.next/dev is a network drive, consider moving it to a local folder.
+See more: https://nextjs.org/docs/app/guides/local-development
+○ Compiling proxy ...
+
+○ Compiling /login ...
+ GET /login 200 in 12.6s (next.js: 7.5s, proxy.ts: 4.5s, application-code: 590ms)
+ GET /login 200 in 472ms (next.js: 26ms, proxy.ts: 31ms, application-code: 415ms)
+{"level":"info","message":"User logged in successfully","data":{"email":"nyagakasallifan@gmail.com","role":"owner"},"timestamp":"2026-06-29T08:46:02.304Z","environment":"development"}
+ GET /dashboard/owner 200 in 5.7s (next.js: 1052ms, proxy.ts: 218ms, application-code: 4.4s)
+ POST /login 303 in 7.9s (next.js: 14ms, proxy.ts: 1136ms, application-code: 6.8s)
+  └─ ƒ loginUser({"error":null,"success":false}, {}) in 932ms lib/auth/actions.ts
+ GET /dashboard/owner/branches 200 in 6.2s (next.js: 1386ms, proxy.ts: 1055ms, application-code: 3.7s)
+ GET /dashboard/owner/admins 200 in 5.7s (next.js: 2.6s, proxy.ts: 1166ms, application-code: 1897ms)
+✓ Finished filesystem cache database compaction in 37.9s
+○ Compiling /dashboard/owner/employees ...
+ GET /dashboard/owner/employees 200 in 18.1s (next.js: 15.5s, proxy.ts: 1057ms, application-code: 1516ms)
+ GET /dashboard/owner/admins 200 in 5.1s (next.js: 163ms, proxy.ts: 1128ms, application-code: 3.8s)
+{"level":"info","message":"Admin invite sent","data":{"businessId":"36abaf4e-1939-4d35-abc4-00e0b6af7463","email":"sallifanatandi20@gmail.com","actor":"56f09a0c-3f98-4a85-84f4-737ed01890c7"},"timestamp":"2026-06-29T08:48:27.212Z","environment":"development"}
+ POST /dashboard/owner/admins 200 in 5.2s (next.js: 193ms, proxy.ts: 1048ms, application-code: 3.9s)
+  └─ ƒ inviteAdmin({"error":null,"success":false}, {}) in 1795ms app/dashboard/owner/admins/actions.ts
+✓ Finished filesystem cache database compaction in 102s
