@@ -35,11 +35,17 @@ export default function DangerDeleteButton({ entityLabel, entityName, idField, i
   const router = useRouter()
   const previousPending = useRef(false)
   const [open, setOpen] = useState(false)
+  const [confirmationName, setConfirmationName] = useState('')
   const [state, formAction, isPending] = useActionState<FormState, FormData>(action, {
     error: null,
     success: false,
   })
   const { toast, toastState, dismiss } = useToast()
+  const normalizedConfirmationName = confirmationName.trim()
+  const normalizedEntityName = entityName.trim()
+  const isConfirmed = normalizedConfirmationName === normalizedEntityName
+  const lowerEntityLabel = entityLabel.toLowerCase()
+  const isBranchDelete = lowerEntityLabel === 'branch'
 
   useEffect(() => {
     let resetTimer: ReturnType<typeof setTimeout> | null = null
@@ -49,6 +55,7 @@ export default function DangerDeleteButton({ entityLabel, entityName, idField, i
         toast.success(state.message ?? `${entityLabel} deleted`)
         router.refresh()
         resetTimer = setTimeout(() => {
+          setConfirmationName('')
           setOpen(false)
         }, 0)
       } else if (state.error) {
@@ -69,6 +76,12 @@ export default function DangerDeleteButton({ entityLabel, entityName, idField, i
    */
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+
+    if (!isConfirmed) {
+      toast.error(`Type ${entityName} to confirm this delete.`)
+      return
+    }
+
     const formData = new FormData(event.currentTarget)
 
     startTransition(() => {
@@ -76,9 +89,15 @@ export default function DangerDeleteButton({ entityLabel, entityName, idField, i
     })
   }
 
+  const closeModal = () => {
+    if (isPending) return
+    setConfirmationName('')
+    setOpen(false)
+  }
+
   return (
     <>
-      {isPending && <LoadingOverlay message={`Deleting ${entityLabel.toLowerCase()}...`} />}
+      {isPending && <LoadingOverlay message={`Deleting ${lowerEntityLabel}...`} />}
       {toastState && (
         <Toast
           message={toastState.message}
@@ -92,12 +111,15 @@ export default function DangerDeleteButton({ entityLabel, entityName, idField, i
         type="button"
         className="btn-danger"
         style={{ padding: '5px 14px', borderRadius: 8, fontSize: 12 }}
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          setConfirmationName('')
+          setOpen(true)
+        }}
       >
         Delete
       </button>
 
-      <Modal isOpen={open} title={`Delete ${entityLabel.toLowerCase()}`} onClose={() => setOpen(false)}>
+      <Modal isOpen={open} title={`Delete ${lowerEntityLabel}`} onClose={closeModal}>
         <form onSubmit={onSubmit} className="flex flex-col gap-4">
           <input type="hidden" name={idField} value={idValue} />
 
@@ -113,16 +135,40 @@ export default function DangerDeleteButton({ entityLabel, entityName, idField, i
               This removes {entityName} from active operations.
             </p>
             <p style={{ marginTop: 6, marginBottom: 0, fontSize: 13, color: 'var(--color-danger)' }}>
-              Historical transactions and audit logs remain traceable.
+              {isBranchDelete
+                ? 'All active stock, employees, admins, damaged stock, and pending branch records will disappear with this branch.'
+                : `All active information added under this ${lowerEntityLabel} will be removed where it is safe to do so.`}
+            </p>
+            <p style={{ marginTop: 6, marginBottom: 0, fontSize: 13, color: 'var(--color-danger)' }}>
+              Historical transactions and audit logs remain traceable for reporting.
             </p>
           </div>
+
+          <label className="flex flex-col gap-2" style={{ fontSize: 13, color: 'var(--color-text-primary)' }}>
+            Type <strong>{entityName}</strong> to confirm
+            <input
+              name="confirmationName"
+              type="text"
+              value={confirmationName}
+              onChange={(event) => setConfirmationName(event.target.value)}
+              placeholder={entityName}
+              autoComplete="off"
+              style={{
+                border: `1px solid ${confirmationName && !isConfirmed ? 'var(--color-danger)' : 'var(--color-border)'}`,
+                borderRadius: 8,
+                padding: '10px 12px',
+                backgroundColor: 'var(--color-background)',
+                color: 'var(--color-text-primary)',
+              }}
+            />
+          </label>
 
           <label className="flex flex-col gap-2" style={{ fontSize: 13, color: 'var(--color-text-primary)' }}>
             Reason optional
             <textarea
               name="reason"
               rows={3}
-              placeholder={`Why are you deleting this ${entityLabel.toLowerCase()}?`}
+              placeholder={`Why are you deleting this ${lowerEntityLabel}?`}
               style={{
                 border: '1px solid var(--color-border)',
                 borderRadius: 8,
@@ -145,7 +191,7 @@ export default function DangerDeleteButton({ entityLabel, entityName, idField, i
               type="button"
               className="btn-outline"
               style={{ padding: '8px 16px', borderRadius: 8 }}
-              onClick={() => setOpen(false)}
+              onClick={closeModal}
               disabled={isPending}
             >
               Cancel
@@ -153,10 +199,15 @@ export default function DangerDeleteButton({ entityLabel, entityName, idField, i
             <button
               type="submit"
               className="btn-danger"
-              style={{ padding: '10px 20px', borderRadius: 8 }}
-              disabled={isPending}
+              style={{
+                padding: '10px 20px',
+                borderRadius: 8,
+                opacity: isConfirmed ? 1 : 0.55,
+                cursor: isConfirmed ? 'pointer' : 'not-allowed',
+              }}
+              disabled={isPending || !isConfirmed}
             >
-              {isPending ? `Deleting ${entityLabel.toLowerCase()}...` : `Delete ${entityLabel.toLowerCase()}`}
+              {isPending ? `Deleting ${lowerEntityLabel}...` : `Delete ${lowerEntityLabel}`}
             </button>
           </div>
         </form>
