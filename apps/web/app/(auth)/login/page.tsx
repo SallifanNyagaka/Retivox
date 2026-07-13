@@ -6,10 +6,51 @@
 
 'use client'
 
-import { useActionState, useState } from 'react'
+import { useActionState, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
+import { usePathname } from 'next/navigation'
 import { useFormStatus } from 'react-dom'
 import { loginUser, type FormState } from '../../../lib/auth/actions'
+
+type ReviewRole = 'owner' | 'admin' | 'employee'
+
+type LoginReview = {
+  id: string
+  role: ReviewRole
+  quote: string
+  reviewerName: string
+  reviewerTitle: string
+}
+
+const FALLBACK_REVIEWS: Record<ReviewRole, LoginReview[]> = {
+  owner: [
+    {
+      id: 'fallback-owner',
+      role: 'owner',
+      quote: 'Retivox gives me one clean view of every branch without waiting for end-of-day calls.',
+      reviewerName: 'James Kamau',
+      reviewerTitle: 'Owner, Kamau Enterprises',
+    },
+  ],
+  admin: [
+    {
+      id: 'fallback-admin',
+      role: 'admin',
+      quote: 'The admin dashboard helps me spot low stock and follow branch performance before small issues become expensive.',
+      reviewerName: 'Mercy Achieng',
+      reviewerTitle: 'Branch Admin, Green Basket Stores',
+    },
+  ],
+  employee: [
+    {
+      id: 'fallback-employee',
+      role: 'employee',
+      quote: 'Recording sales is quick, and damaged stock reporting is clear enough for busy counter work.',
+      reviewerName: 'Faith Njeri',
+      reviewerTitle: 'Sales Associate, Metro Mart',
+    },
+  ],
+}
 
 // ── Submit button with loading spinner ──
 function SubmitButton() {
@@ -88,7 +129,112 @@ function CheckIcon() {
   )
 }
 
+function LoginReviews({ defaultRole }: { defaultRole: ReviewRole }) {
+  const [reviews, setReviews] = useState<LoginReview[]>(FALLBACK_REVIEWS[defaultRole])
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    let ignore = false
+
+    async function loadReviews() {
+      try {
+        const response = await fetch(`/api/login-reviews?role=${defaultRole}`, { cache: 'no-store' })
+        const payload = (await response.json()) as { reviews?: LoginReview[] }
+        const nextReviews = payload.reviews && payload.reviews.length > 0 ? payload.reviews : FALLBACK_REVIEWS[defaultRole]
+
+        if (!ignore) {
+          setReviews(nextReviews)
+          if (scrollRef.current) {
+            scrollRef.current.scrollTop = 0
+          }
+        }
+      } catch {
+        if (!ignore) {
+          setReviews(FALLBACK_REVIEWS[defaultRole])
+        }
+      }
+    }
+
+    loadReviews()
+
+    return () => {
+      ignore = true
+    }
+  }, [defaultRole])
+
+  useEffect(() => {
+    const container = scrollRef.current
+    if (!container || reviews.length <= 1) return
+
+    const interval = window.setInterval(() => {
+      const nextTop = container.scrollTop + 132
+      const maxTop = container.scrollHeight - container.clientHeight
+
+      container.scrollTo({
+        top: nextTop >= maxTop ? 0 : nextTop,
+        behavior: 'smooth',
+      })
+    }, 3600)
+
+    return () => window.clearInterval(interval)
+  }, [reviews])
+
+  return (
+    <div style={{ marginTop: 24 }}>
+      <div
+        ref={scrollRef}
+        className="retivox-login-reviews"
+        style={{
+          maxHeight: 250,
+          overflowY: 'auto',
+          marginTop: 14,
+          paddingRight: 6,
+          scrollBehavior: 'smooth',
+        }}
+      >
+        {reviews.map((review) => (
+          <div
+            key={review.id}
+            style={{
+              border: '1px solid rgba(255,255,255,0.16)',
+              borderRadius: 18,
+              padding: 16,
+              marginBottom: 12,
+              backgroundColor: 'rgba(255,255,255,0.1)',
+              boxShadow: '0 18px 40px rgba(0,0,0,0.12)',
+            }}
+          >
+            <p style={{ margin: 0, fontSize: 15, fontWeight: 600, color: 'rgba(255,255,255,0.94)', lineHeight: 1.55 }}>
+              “{review.quote}”
+            </p>
+            <div className="flex items-center gap-3" style={{ marginTop: 14 }}>
+              <div
+                className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full text-sm font-bold text-white"
+                style={{ backgroundColor: 'rgba(255,255,255,0.2)' }}
+              >
+                {review.reviewerName
+                  .split(' ')
+                  .slice(0, 2)
+                  .map((part) => part.charAt(0))
+                  .join('')
+                  .toUpperCase()}
+              </div>
+              <div>
+                <p className="text-sm font-semibold text-white">{review.reviewerName}</p>
+                <p className="text-xs" style={{ color: 'rgba(255,255,255,0.62)' }}>
+                  {review.reviewerTitle}
+                </p>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export default function LoginPage() {
+  const pathname = usePathname()
   const [state, formAction] = useActionState<FormState, FormData>(loginUser, {
     error: null,
     success: false,
@@ -98,16 +244,22 @@ export default function LoginPage() {
   // Track field values to hide icons when text is present
   const [emailValue, setEmailValue] = useState('')
   const [passwordValue, setPasswordValue] = useState('')
+  const defaultReviewRole: ReviewRole = pathname.startsWith('/admin')
+    ? 'admin'
+    : pathname.startsWith('/employee')
+      ? 'employee'
+      : 'owner'
+  const currentYear = new Date().getFullYear()
 
   return (
-    <div className="min-h-screen w-full flex">
+    <div className="min-h-screen w-full flex flex-col lg:flex-row">
 
       {/* ── Left Panel — Brand (desktop only) ── */}
 <div
-  className="hidden lg:flex w-[480px] flex-col flex-shrink-0"
+  className="flex w-full flex-col flex-shrink-0 lg:w-[480px]"
   style={{
     background: 'linear-gradient(135deg, #0a5c42 0%, #0F7B5A 50%, #1a8a66 100%)',
-    padding: '40px 48px',
+    padding: '28px min(32px, 7vw)',
   }}
 >
   {/* Logo and tagline */}
@@ -123,11 +275,11 @@ export default function LoginPage() {
     </p>
   </div>
 
-  {/* Testimonial */}
-  <div style={{ marginTop: '36px' }}>
+  {/* Reviews */}
+  <div style={{ marginTop: '18px' }}>
     <div
       style={{
-        fontSize: '64px',
+        fontSize: '48px',
         fontWeight: '800',
         color: 'rgba(255,255,255,0.15)',
         lineHeight: '1',
@@ -136,34 +288,12 @@ export default function LoginPage() {
     >
       &ldquo;
     </div>
-    <p
-      style={{
-        fontSize: '17px',
-        fontWeight: '500',
-        color: 'rgba(255,255,255,0.92)',
-        lineHeight: '1.65',
-      }}
-    >
-      Retivox has transformed how we manage our retail operations. Real-time insights and seamless sync across all locations.
-    </p>
-    <div className="flex items-center gap-3 mt-5">
-      <div
-        className="w-10 h-10 rounded-full flex items-center justify-center text-sm font-bold text-white flex-shrink-0"
-        style={{ backgroundColor: 'rgba(255,255,255,0.2)' }}
-      >
-        JK
-      </div>
-      <div>
-        <p className="text-sm font-semibold text-white">James Kamau</p>
-        <p className="text-xs" style={{ color: 'rgba(255,255,255,0.55)' }}>
-          Owner, Kamau Enterprises
-        </p>
-      </div>
-    </div>
+    <LoginReviews defaultRole={defaultReviewRole} />
   </div>
 
   {/* Divider */}
   <div
+    className="hidden sm:block"
     style={{
       height: '1px',
       backgroundColor: 'rgba(255,255,255,0.12)',
@@ -173,7 +303,7 @@ export default function LoginPage() {
   />
 
   {/* Why Retivox */}
-  <div>
+  <div className="hidden sm:block">
     <p
       className="mb-4"
       style={{
@@ -208,7 +338,7 @@ export default function LoginPage() {
 
   {/* Copyright */}
   <p style={{ fontSize: '12px', color: 'rgba(255,255,255,0.3)', marginTop: 'auto', paddingTop: '32px' }}>
-    © 2025 Retivox. All rights reserved.
+    © {currentYear} Retivox. All rights reserved.
   </p>
 </div>
 
@@ -218,16 +348,6 @@ export default function LoginPage() {
         style={{ backgroundColor: 'var(--color-surface)' }}
       >
         <div className="w-full max-w-sm">
-
-          {/* Mobile logo — shown only when left panel is hidden */}
-          <div className="lg:hidden mb-8">
-            <span
-              className="font-extrabold"
-              style={{ fontSize: '22px', color: 'var(--color-primary)', letterSpacing: '-0.5px' }}
-            >
-              Retivox
-            </span>
-          </div>
 
           {/* Heading */}
           <div className="mb-8">

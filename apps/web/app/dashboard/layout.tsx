@@ -11,7 +11,6 @@ import { requireAuth, getUserProfile } from '../../lib/auth/helpers'
 import { createClient } from '../../lib/supabase/server'
 import { redirect } from 'next/navigation'
 import { Sidebar } from '../../components/dashboard/Sidebar'
-import DashboardClientPing from '../../components/dashboard/DashboardClientPing'
 import DashboardThemeProvider from '../../components/dashboard/DashboardThemeProvider'
 
 function RoleBadge({ role }: { role: string }) {
@@ -116,17 +115,6 @@ export default async function DashboardLayout({ children }: { children: ReactNod
           {/* Right — profile and role */}
           <div className="flex items-center gap-3">
             <span
-              aria-label="Dashboard shell status"
-              className="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium"
-              style={{
-                backgroundColor: 'var(--color-success-light)',
-                color: 'var(--color-success)',
-                border: '1px solid var(--color-success)',
-              }}
-            >
-              Shell ready
-            </span>
-            <span
               className="text-sm font-medium hidden sm:block"
               style={{ color: 'var(--color-text-primary)' }}
             >
@@ -148,7 +136,6 @@ export default async function DashboardLayout({ children }: { children: ReactNod
           {children}
         </main>
       </div>
-      <DashboardClientPing />
       </div>
     </DashboardThemeProvider>
   )

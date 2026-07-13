@@ -212,7 +212,9 @@ const adminNav: { section: string; items: NavItem[] }[] = [
 export function Sidebar({ role, businessName }: SidebarProps) {
   const pathname = usePathname()
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  const [collapsed, setCollapsed] = useState(false)
   const navGroups = role === 'admin' ? adminNav : ownerNav
+  const currentYear = new Date().getFullYear()
 
   return (
     <>
@@ -220,13 +222,14 @@ export function Sidebar({ role, businessName }: SidebarProps) {
       <aside
         className="hidden md:flex flex-col flex-shrink-0"
         style={{
-          width: '220px',
+          width: collapsed ? '76px' : '220px',
           backgroundColor: 'var(--color-surface)',
           borderRight: '1px solid var(--color-border)',
           height: '100vh',
           position: 'sticky',
           top: 0,
           overflowY: 'auto',
+          transition: 'width 160ms ease',
         }}
       >
         {/* Logo and business name */}
@@ -234,46 +237,70 @@ export function Sidebar({ role, businessName }: SidebarProps) {
           style={{
             flexShrink: 0,
             borderBottom: '1px solid var(--color-border)',
-            paddingLeft: '20px',
-            paddingRight: '20px',
+            paddingLeft: collapsed ? '12px' : '20px',
+            paddingRight: collapsed ? '12px' : '20px',
             paddingTop: '14px',
             paddingBottom: '14px',
           }}
         >
-          {/* Retivox wordmark */}
-          <span
-            style={{
-              fontSize: '20px',
-              fontWeight: 800,
-              color: 'var(--color-primary)',
-              letterSpacing: '-0.3px',
-              display: 'block',
-            }}
-          >
-            Retivox
-          </span>
+          <div className="flex items-center justify-between gap-2">
+            {/* Retivox wordmark */}
+            <span
+              title="Retivox"
+              style={{
+                fontSize: collapsed ? '18px' : '20px',
+                fontWeight: 800,
+                color: 'var(--color-primary)',
+                letterSpacing: '-0.3px',
+                display: 'block',
+              }}
+            >
+              {collapsed ? 'R' : 'Retivox'}
+            </span>
+            <button
+              type="button"
+              aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              onClick={() => setCollapsed((current) => !current)}
+              className="btn-outline"
+              style={{
+                width: 30,
+                height: 30,
+                padding: 0,
+                borderRadius: 8,
+                display: 'grid',
+                placeItems: 'center',
+                fontSize: 16,
+                lineHeight: 1,
+              }}
+            >
+              {collapsed ? '>' : '<'}
+            </button>
+          </div>
 
           {/* Business name below logo */}
-          <span
-            style={{
-              fontSize: '12px',
-              color: 'var(--color-text-muted)',
-              display: 'block',
-              marginTop: '2px',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {businessName}
-          </span>
+          {!collapsed && (
+            <span
+              style={{
+                fontSize: '12px',
+                color: 'var(--color-text-muted)',
+                display: 'block',
+                marginTop: '2px',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {businessName}
+            </span>
+          )}
         </div>
 
         {/* Nav groups */}
         <nav className="flex flex-col gap-1 flex-1" style={{ paddingLeft: '12px', paddingRight: '12px', paddingTop: '16px', paddingBottom: '16px' }}>
           {navGroups.map((group) => (
             <div key={group.section}>
-              {group.section && (
+              {group.section && !collapsed && (
                 <p
                   className="px-2"
                   style={{
@@ -295,8 +322,11 @@ export function Sidebar({ role, businessName }: SidebarProps) {
                   <Link
                     key={item.href}
                     href={item.href}
-                    className="flex items-center gap-2.5 rounded-lg transition-all duration-150"
+                    className="flex items-center rounded-lg transition-all duration-150"
+                    title={collapsed ? item.label : undefined}
                     style={{
+                      justifyContent: collapsed ? 'center' : 'flex-start',
+                      gap: collapsed ? 0 : '10px',
                       paddingLeft: '10px',
                       paddingRight: '10px',
                       paddingTop: '9px',
@@ -310,13 +340,26 @@ export function Sidebar({ role, businessName }: SidebarProps) {
                     }}
                   >
                     <span style={{ opacity: isActive ? 1 : 0.6 }}>{item.icon}</span>
-                    {item.label}
+                    {!collapsed && item.label}
                   </Link>
                 )
               })}
             </div>
           ))}
         </nav>
+
+        <p
+          style={{
+            margin: 0,
+            padding: collapsed ? '12px 8px' : '12px 20px',
+            borderTop: '1px solid var(--color-border)',
+            color: 'var(--color-text-muted)',
+            fontSize: 11,
+            textAlign: collapsed ? 'center' : 'left',
+          }}
+        >
+          {collapsed ? `© ${currentYear}` : `© ${currentYear} Retivox`}
+        </p>
       </aside>
 
       {/* Mobile bottom navigation — shows most important items only */}
@@ -456,6 +499,9 @@ export function Sidebar({ role, businessName }: SidebarProps) {
                 </div>
               ))}
             </nav>
+            <p style={{ margin: '16px 0 0', fontSize: 12, color: 'var(--color-text-muted)', textAlign: 'center' }}>
+              © {currentYear} Retivox. All rights reserved.
+            </p>
           </div>
         </div>
       )}

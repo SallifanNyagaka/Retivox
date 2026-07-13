@@ -11,6 +11,7 @@ import { redirect } from 'next/navigation'
 import { Badge } from '../../../components/ui/Badge'
 import { Card, CardHeader } from '../../../components/ui/Card'
 import { MetricCard } from '../../../components/dashboard/MetricCard'
+import TimeGreeting from '../../../components/dashboard/TimeGreeting'
 import { requireAuth } from '../../../lib/auth/helpers'
 import { getEmployeeProfile } from '../../../lib/employee/auth'
 import logger from '../../../lib/logger'
@@ -210,7 +211,7 @@ export default async function EmployeeDashboardPage() {
             className="font-bold"
             style={{ fontSize: 22, color: 'var(--color-text-primary)', letterSpacing: '-0.3px' }}
           >
-            My Workday
+            <TimeGreeting />
           </h1>
           <p style={{ fontSize: 14, color: 'var(--color-text-muted)', marginTop: 4 }}>
             {employeeProfile.name} at {employeeProfile.branchName}

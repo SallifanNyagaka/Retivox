@@ -15,6 +15,7 @@ import { GlobalRole } from '@smartretail/shared'
 import { Card, CardHeader } from '../../../components/ui/Card'
 import { Badge } from '../../../components/ui/Badge'
 import { MetricCard } from '../../../components/dashboard/MetricCard'
+import TimeGreeting from '../../../components/dashboard/TimeGreeting'
 
 /**
  * Business row used to read the active currency.
@@ -333,7 +334,7 @@ export default async function AdminDashboardPage() {
             letterSpacing: '-0.3px',
           }}
         >
-          Admin Dashboard
+          <TimeGreeting />
         </h1>
         <p style={{ fontSize: '14px', color: 'var(--color-text-muted)', marginTop: '4px' }}>
           Monitor branch performance, stock alerts, and sales activity.

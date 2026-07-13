@@ -17,6 +17,7 @@ import {
 } from '../../../lib/data/owner'
 import { createClient } from '../../../lib/supabase/server'
 import { MetricCard } from '../../../components/dashboard/MetricCard'
+import TimeGreeting from '../../../components/dashboard/TimeGreeting'
 import { Card, CardHeader } from '../../../components/ui/Card'
 import { Badge } from '../../../components/ui/Badge'
 
@@ -421,7 +422,7 @@ export default async function OwnerDashboardPage() {
             letterSpacing: '-0.3px',
           }}
         >
-          Good morning 👋
+          <TimeGreeting />
         </h1>
         <p style={{ fontSize: '14px', color: 'var(--color-text-muted)', marginTop: '4px' }}>
           Here&apos;s what&apos;s happening across your business today.

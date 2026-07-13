@@ -257,7 +257,7 @@ export async function inviteEmployee(_prevState: FormState, formData: FormData):
 
   try {
     const serviceClient = getServiceClient()
-    const redirectTo = `${process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'}/login`
+    const redirectTo = `${process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'}/employee/login`
 
     const { error: inviteError } = await serviceClient.auth.admin.inviteUserByEmail(email, {
       redirectTo,

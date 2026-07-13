@@ -34,6 +34,8 @@ export default async function EmployeeDashboardLayout({ children }: Props) {
     redirect('/account/deactivated')
   }
 
+  const currentYear = new Date().getFullYear()
+
   return (
     <div className="min-h-screen" style={{ backgroundColor: 'var(--color-background)' }}>
       <header
@@ -43,7 +45,7 @@ export default async function EmployeeDashboardLayout({ children }: Props) {
           borderBottom: '1px solid var(--color-border)',
         }}
       >
-        <div className="flex w-full max-w-2xl flex-col items-center justify-center gap-3 px-4 py-4 text-center sm:px-6">
+        <div className="flex w-full max-w-6xl flex-col items-center justify-center gap-3 px-4 py-4 text-center sm:px-6">
           {/* Employee identity and single branch assignment */}
           <div>
             <Link
@@ -90,10 +92,14 @@ export default async function EmployeeDashboardLayout({ children }: Props) {
       </header>
 
       <main className="flex w-full justify-center px-4 py-6 sm:px-6">
-        <div className="flex w-full max-w-2xl justify-center">
+        <div className="flex w-full max-w-6xl justify-center">
           <div className="w-full">{children}</div>
         </div>
       </main>
+
+      <footer className="px-4 pb-6 text-center" style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+        © {currentYear} Retivox. All rights reserved.
+      </footer>
     </div>
   )
 }

@@ -156,6 +156,7 @@ export default function RegisterPage() {
   const [country, setCountry] = useState('')
   const [currency, setCurrency] = useState('')
   const [timezone, setTimezone] = useState('')
+  const currentYear = new Date().getFullYear()
 
   // Redirect to owner dashboard after successful registration
   useEffect(() => {
@@ -273,7 +274,7 @@ export default function RegisterPage() {
         </div>
 
         <p style={{ fontSize: '12px', color: 'rgba(255,255,255,0.3)', marginTop: 'auto', paddingTop: '32px' }}>
-          © 2025 Retivox. All rights reserved.
+          © {currentYear} Retivox. All rights reserved.
         </p>
       </div>
 
