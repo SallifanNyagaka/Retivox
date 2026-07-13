@@ -235,3 +235,11 @@ body {
   font-weight: 500;
 }
 
+.retivox-login-reviews {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.retivox-login-reviews::-webkit-scrollbar {
+  display: none;
+}
