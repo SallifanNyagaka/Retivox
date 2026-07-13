@@ -213,6 +213,23 @@ function calculateLossNetLoss(loss: Pick<FinanceLossRow, 'gross_cost' | 'recover
   return Number.isFinite(calculatedNetLoss) ? calculatedNetLoss : toMoneyNumber(loss.net_loss)
 }
 
+async function getActiveFinanceBranchIds(businessId: string): Promise<string[]> {
+  const supabase = await createClient()
+  const { data, error } = await supabase
+    .from('branches')
+    .select('id')
+    .eq('business_id', businessId)
+    .eq('is_active', true)
+    .is('deleted_at', null)
+
+  if (error) {
+    logger.error('Owner finances active branch scope fetch failed', { businessId, error })
+    return []
+  }
+
+  return (data ?? []).map((branch) => branch.id)
+}
+
 
 function emptySummary(): FinanceSummary {
   return {
@@ -436,6 +453,15 @@ function buildSummary(
 
 async function getFinanceSummary(businessId: string, filters: FinancePageFilters): Promise<FinanceSummary> {
   const supabase = await createClient()
+  const activeBranchIds = await getActiveFinanceBranchIds(businessId)
+
+  if (filters.branchId && !activeBranchIds.includes(filters.branchId)) {
+    return emptySummary()
+  }
+
+  if (activeBranchIds.length === 0) {
+    return emptySummary()
+  }
 
   let transactionsQuery = supabase
       .from('transactions')
@@ -461,6 +487,7 @@ async function getFinanceSummary(businessId: string, filters: FinancePageFilters
       )
       .eq('business_id', businessId)
       .eq('status', 'verified')
+      .in('branch_id', activeBranchIds)
       .gte('recorded_at', filters.startDate.toISOString())
       .lte('recorded_at', filters.endDate.toISOString())
       .order('recorded_at', { ascending: false })
@@ -470,6 +497,7 @@ async function getFinanceSummary(businessId: string, filters: FinancePageFilters
       .from('finance_expenses')
       .select('id, branch_id, category, description, amount, incurred_on, branches(name)')
       .eq('business_id', businessId)
+      .or(`branch_id.in.(${activeBranchIds.join(',')}),branch_id.is.null`)
       .gte('incurred_on', filters.startDateOnly)
       .lte('incurred_on', filters.endDateOnly)
       .order('incurred_on', { ascending: false })
@@ -496,6 +524,7 @@ async function getFinanceSummary(businessId: string, filters: FinancePageFilters
       `
       )
       .eq('business_id', businessId)
+      .in('branch_id', activeBranchIds)
       .gte('created_at', filters.startDate.toISOString())
       .lte('created_at', filters.endDate.toISOString())
       .order('created_at', { ascending: false })
@@ -547,12 +576,17 @@ async function getFinanceSummary(businessId: string, filters: FinancePageFilters
   }
 
   const stockCosts = ((stockCostsResponse.data ?? []) as FinanceStockCostRow[]).filter((row) => {
+    const deliveryItem = normalizeJoinedOne(row.supplier_delivery_items)
+    const delivery = normalizeJoinedOne(deliveryItem?.supplier_deliveries ?? null)
+
+    if (!delivery?.to_branch_id || !activeBranchIds.includes(delivery.to_branch_id)) {
+      return false
+    }
+
     if (!filters.branchId) {
       return true
     }
 
-    const deliveryItem = normalizeJoinedOne(row.supplier_delivery_items)
-    const delivery = normalizeJoinedOne(deliveryItem?.supplier_deliveries ?? null)
     return delivery?.to_branch_id === filters.branchId
   })
 
@@ -664,7 +698,8 @@ async function getFinanceFormOptions(businessId: string): Promise<{ branches: Br
     return { branches: [], lossProducts: [] }
   }
 
-  const stockRows = (stockResponse.data ?? []) as RawFinanceStockRow[]
+  const activeBranchIds = new Set((branchesResponse.data ?? []).map((branch) => branch.id as string))
+  const stockRows = ((stockResponse.data ?? []) as RawFinanceStockRow[]).filter((row) => activeBranchIds.has(row.branch_id))
   const productIds = Array.from(new Set(stockRows.map((row) => row.product_id)))
   let uomsByProduct = new Map<string, LossProductOption['uom_options']>()
   const latestStockCostsByBranchProduct = new Map<string, LatestStockCost>()

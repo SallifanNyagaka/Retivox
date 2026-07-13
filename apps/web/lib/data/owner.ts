@@ -57,6 +57,34 @@ function getAlertProductId(row: StockAlertRow): string {
   return normalizeJoin(row.products)[0]?.id ?? ''
 }
 
+async function getActiveBranchIds(businessId: string): Promise<string[]> {
+  const supabase = await createClient()
+
+  try {
+    const { data } = await runSoftDeleteAwareQuery<{ id: string }>(
+      () =>
+        supabase
+          .from('branches')
+          .select('id')
+          .eq('business_id', businessId)
+          .eq('is_active', true)
+          .is('deleted_at', null),
+      () =>
+        supabase
+          .from('branches')
+          .select('id')
+          .eq('business_id', businessId)
+          .eq('is_active', true),
+      { table: 'branches', businessId, page: 'owner_active_branch_scope' }
+    )
+
+    return (data ?? []).map((branch) => branch.id)
+  } catch (error) {
+    logger.error('Failed to fetch active branch scope', { businessId, error })
+    return []
+  }
+}
+
 /**
  * Fetches summary metrics for the owner dashboard.
  * Returns total revenue, transaction count and pending approvals for today.
@@ -71,11 +99,18 @@ export async function getOwnerMetrics(businessId: string) {
 
   try {
     // Total revenue today — sum of verified payments
+    const activeBranchIds = await getActiveBranchIds(businessId)
+
+    if (activeBranchIds.length === 0) {
+      return { totalRevenue: 0, txCount: 0, pendingApprovals: 0 }
+    }
+
     const { data: revenueData } = await supabase
       .from('payments')
-      .select('amount')
+      .select('amount, transactions!inner(branch_id)')
       .eq('business_id', businessId)
       .eq('status', 'verified')
+      .in('transactions.branch_id', activeBranchIds)
       .gte('payment_at', todayStart)
 
     const totalRevenue = revenueData?.reduce((sum, p) => sum + Number(p.amount), 0) ?? 0
@@ -85,21 +120,24 @@ export async function getOwnerMetrics(businessId: string) {
       .from('transactions')
       .select('id', { count: 'exact', head: true })
       .eq('business_id', businessId)
+      .in('branch_id', activeBranchIds)
       .gte('recorded_at', todayStart)
 
     // Pending payments verification
     const { count: pendingPayments } = await supabase
       .from('payments')
-      .select('id', { count: 'exact', head: true })
+      .select('id, transactions!inner(branch_id)', { count: 'exact', head: true })
       .eq('business_id', businessId)
       .eq('status', 'pending_verify')
+      .in('transactions.branch_id', activeBranchIds)
 
     // Pending price change requests
     const { count: pendingPrices } = await supabase
       .from('price_change_requests')
-      .select('id', { count: 'exact', head: true })
+      .select('id, branch_product_prices!inner(branch_id)', { count: 'exact', head: true })
       .eq('business_id', businessId)
       .eq('status', 'pending_approval')
+      .in('branch_product_prices.branch_id', activeBranchIds)
 
     return {
       totalRevenue,
@@ -123,6 +161,8 @@ export async function getBranchSummaries(businessId: string) {
   const todayStart = today.toISOString()
 
   try {
+    const activeBranchIds = await getActiveBranchIds(businessId)
+
     // Get all branches
     const { data: branches } = await runSoftDeleteAwareQuery<{
       id: string
@@ -148,6 +188,7 @@ export async function getBranchSummaries(businessId: string) {
     )
 
     if (!branches) return []
+    if (activeBranchIds.length === 0) return branches.map((branch) => ({ ...branch, todayRevenue: 0 }))
 
     // Get today's revenue per branch
     const { data: payments } = await supabase
@@ -155,6 +196,7 @@ export async function getBranchSummaries(businessId: string) {
       .select('amount, transaction_id, transactions!inner(branch_id)')
       .eq('business_id', businessId)
       .eq('status', 'verified')
+      .in('transactions.branch_id', activeBranchIds)
       .gte('payment_at', todayStart)
 
     // Calculate revenue per branch
@@ -183,6 +225,12 @@ export async function getStockAlerts(businessId: string, branchIds?: string[], l
   const supabase = await createClient()
 
   try {
+    const activeBranchIds = branchIds && branchIds.length > 0 ? branchIds : await getActiveBranchIds(businessId)
+
+    if (activeBranchIds.length === 0) {
+      return []
+    }
+
     let stockQuery = supabase
       .from('branch_stock')
       .select(`
@@ -195,10 +243,8 @@ export async function getStockAlerts(businessId: string, branchIds?: string[], l
         branches!inner(name)
       `)
       .eq('business_id', businessId)
-
-    if (branchIds && branchIds.length > 0) {
-      stockQuery = stockQuery.in('branch_id', branchIds)
-    }
+      .in('branch_id', activeBranchIds)
+      .is('branches.deleted_at', null)
 
     const { data, error } = await stockQuery.order('quantity_on_hand', { ascending: true }).limit(100)
 
@@ -295,6 +341,12 @@ export async function getPendingApprovals(businessId: string) {
   const supabase = await createClient()
 
   try {
+    const activeBranchIds = await getActiveBranchIds(businessId)
+
+    if (activeBranchIds.length === 0) {
+      return { payments: [], prices: [] }
+    }
+
     // Pending payment verifications
     const { data: pendingPayments } = await supabase
       .from('payments')
@@ -309,6 +361,7 @@ export async function getPendingApprovals(businessId: string) {
       `)
       .eq('business_id', businessId)
       .eq('status', 'pending_verify')
+      .in('transactions.branch_id', activeBranchIds)
       .order('payment_at', { ascending: false })
       .limit(5)
 
@@ -328,6 +381,7 @@ export async function getPendingApprovals(businessId: string) {
       `)
       .eq('business_id', businessId)
       .eq('status', 'pending_approval')
+      .in('branch_product_prices.branch_id', activeBranchIds)
       .order('requested_at', { ascending: false })
       .limit(5)
 
@@ -348,6 +402,12 @@ export async function getRecentTransactions(businessId: string) {
   const supabase = await createClient()
 
   try {
+    const activeBranchIds = await getActiveBranchIds(businessId)
+
+    if (activeBranchIds.length === 0) {
+      return []
+    }
+
     const { data } = await supabase
       .from('transactions')
       .select(`
@@ -359,6 +419,8 @@ export async function getRecentTransactions(businessId: string) {
         users!inner(name)
       `)
       .eq('business_id', businessId)
+      .in('branch_id', activeBranchIds)
+      .is('branches.deleted_at', null)
       .order('recorded_at', { ascending: false })
       .limit(10)
 
@@ -376,6 +438,12 @@ export async function getBranchStock(businessId: string) {
   const supabase = await createClient()
 
   try {
+    const activeBranchIds = await getActiveBranchIds(businessId)
+
+    if (activeBranchIds.length === 0) {
+      return []
+    }
+
     const { data } = await supabase
       .from('branch_stock')
       .select(`
@@ -391,6 +459,8 @@ export async function getBranchStock(businessId: string) {
         branches!inner(id, name)
       `)
       .eq('business_id', businessId)
+      .in('branch_id', activeBranchIds)
+      .is('branches.deleted_at', null)
       .order('branch_id', { ascending: true })
 
     return data ?? []
@@ -407,10 +477,22 @@ export async function getStockMetrics(businessId: string) {
   const supabase = await createClient()
 
   try {
+    const activeBranchIds = await getActiveBranchIds(businessId)
+
+    if (activeBranchIds.length === 0) {
+      return {
+        totalSkus: 0,
+        lowStockCount: 0,
+        outOfStockCount: 0,
+        branchesWithAlerts: 0,
+      }
+    }
+
     const { data: stockData } = await supabase
       .from('branch_stock')
       .select('quantity_on_hand, low_stock_threshold, branch_id')
       .eq('business_id', businessId)
+      .in('branch_id', activeBranchIds)
 
     if (!stockData) {
       return {

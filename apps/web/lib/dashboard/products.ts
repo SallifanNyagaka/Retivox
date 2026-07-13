@@ -250,6 +250,7 @@ export async function getAdminProductDashboardData(userId: string, businessId: s
       .eq('business_id', businessId)
       .in('branch_id', adminBranchIds)
       .in('product_id', productIds)
+      .is('branches.deleted_at', null)
       .order('branch_id', { ascending: true })
       .range(0, 499)
 

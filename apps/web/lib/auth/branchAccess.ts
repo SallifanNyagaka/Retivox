@@ -165,6 +165,7 @@ async function getImplicitOwnerBranchRoles(userId: string): Promise<UserBranchRo
       .from('branches')
       .select('id')
       .eq('business_id', profile.business_id)
+      .is('deleted_at', null)
       .order('id', { ascending: true })) as {
       data: BranchIdRow[] | null
       error: SupabaseAccessError | null

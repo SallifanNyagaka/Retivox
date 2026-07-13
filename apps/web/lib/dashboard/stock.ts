@@ -422,6 +422,7 @@ export async function getStockDashboardData(userId: string, businessId: string):
         )
         .eq('business_id', businessId)
         .in('branch_id', branchIds)
+        .is('branches.deleted_at', null)
         .order('branch_id', { ascending: true })
         .range(0, 49),
       supabase.rpc('dashboard_stock_metrics', {
@@ -503,6 +504,7 @@ export async function getStockDashboardData(userId: string, businessId: string):
         )
         .eq('business_id', businessId)
         .in('to_branch_id', branchIds)
+        .is('branches.deleted_at', null)
         .order('recorded_at', { ascending: false })
         .range(0, 49),
       supabase
@@ -524,6 +526,7 @@ export async function getStockDashboardData(userId: string, businessId: string):
         )
         .eq('business_id', businessId)
         .in('branch_id', branchIds)
+        .is('branches.deleted_at', null)
         .eq('status', 'pending_approval')
         .order('requested_at', { ascending: false })
         .range(0, 49),
