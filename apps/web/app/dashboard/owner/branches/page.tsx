@@ -126,10 +126,10 @@ export default async function BranchesPage({
   const transactionResponse = await supabase
     .rpc('owner_branch_transaction_counts')
 
-  // Fetch admin assignments per branch (joined user active flag)
+  // Fetch admin assignments per branch (only live users count as assigned)
   const adminRolesResponse = await supabase
     .from('user_branch_roles')
-    .select('branch_id, users!user_branch_roles_user_id_fkey(is_active)')
+    .select('branch_id, is_active, users!user_branch_roles_user_id_fkey(is_active, deleted_at)')
     .eq('business_id', businessId)
     .eq('role', 'admin')
 
@@ -147,7 +147,11 @@ export default async function BranchesPage({
 
   const branches = (branchesResponse.data ?? []) as Branch[]
   const transactionCounts = (transactionResponse.data ?? []) as BranchTransactionCountRow[]
-  const adminRoles = (adminRolesResponse.data ?? []) as { branch_id: string; users?: { is_active: boolean }[] }[]
+  const adminRoles = (adminRolesResponse.data ?? []) as {
+    branch_id: string
+    is_active: boolean
+    users?: { is_active: boolean; deleted_at: string | null }[]
+  }[]
   const transactionCountMap: Record<string, number> = {}
   transactionCounts.forEach((transaction) => {
     transactionCountMap[transaction.branchId] = transaction.count
@@ -179,7 +183,8 @@ export default async function BranchesPage({
   const adminCountMap: Record<string, number> = {}
   adminRoles.forEach((r) => {
     const branchId = r.branch_id
-    const active = r.users?.[0]?.is_active ?? true
+    const user = r.users?.[0]
+    const active = r.is_active !== false && user?.is_active === true && user.deleted_at === null
     if (!adminCountMap[branchId]) adminCountMap[branchId] = 0
     if (active) adminCountMap[branchId] += 1
   })

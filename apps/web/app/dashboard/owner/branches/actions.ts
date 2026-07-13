@@ -33,6 +33,21 @@ const getString = (formData: FormData, key: string): string => {
   return typeof v === 'string' ? v.trim() : ''
 }
 
+function revalidateBranchRoutes() {
+  revalidatePath('/dashboard/owner/branches')
+  revalidatePath('/dashboard/owner/admins')
+  revalidatePath('/dashboard/owner/employees')
+  revalidatePath('/dashboard/owner/stock')
+  revalidatePath('/dashboard/owner/transfers')
+  revalidatePath('/dashboard/owner/finances')
+  revalidatePath('/dashboard/admin/employees')
+  revalidatePath('/dashboard/admin/stock')
+  revalidatePath('/dashboard/admin/damaged-stock')
+  revalidatePath('/dashboard/employee')
+  revalidatePath('/dashboard/employee/damaged-stock')
+  revalidatePath('/dashboard/employee/transactions/new')
+}
+
 /**
  * Adds a new branch for the current owner's business.
  * Validates with Zod and uses the request's authenticated session.
@@ -81,7 +96,7 @@ export async function addBranch(prevState: FormState, formData: FormData): Promi
       new_value: { name, location, branch_type: branchType },
     })
 
-    revalidatePath('/dashboard/owner/branches')
+    revalidateBranchRoutes()
 
     logger.info('Branch created', { businessId, branchId: insertData.id, actor: profile.id })
 
@@ -156,7 +171,7 @@ export async function toggleBranchStatus(prevState: FormState, formData: FormDat
       new_value: { is_active: isActive },
     })
 
-    revalidatePath('/dashboard/owner/branches')
+    revalidateBranchRoutes()
 
     logger.info('Branch status toggled', { branchId, isActive, actor: profile.id })
 
@@ -255,7 +270,7 @@ export async function importBranches(_prevState: FormState, formData: FormData):
       return { error: auditError.message ?? 'Unable to write audit logs', success: false }
     }
 
-    revalidatePath('/dashboard/owner/branches')
+    revalidateBranchRoutes()
     logger.info('Branches imported', { businessId, count: insertedBranches.length, actor: profile.id })
 
     return {
@@ -303,7 +318,7 @@ export async function deleteBranch(_prevState: FormState, formData: FormData): P
         .maybeSingle(),
       supabase
         .from('user_branch_roles')
-        .select('id', { count: 'exact', head: true })
+        .select('id, is_active, users!user_branch_roles_user_id_fkey(id, global_role, is_active, deleted_at)')
         .eq('business_id', businessId)
         .eq('branch_id', branchId),
       supabase
@@ -327,7 +342,17 @@ export async function deleteBranch(_prevState: FormState, formData: FormData): P
       return { error: `${branch.name} is already deleted`, success: false }
     }
 
-    if ((roleResponse.count ?? 0) > 0) {
+    const liveAssignedUsers = (roleResponse.data ?? []).filter((role) => {
+      const user = Array.isArray(role.users) ? role.users[0] : role.users
+      return (
+        role.is_active !== false &&
+        user?.deleted_at === null &&
+        user?.is_active === true &&
+        (user.global_role === 'admin' || user.global_role === 'employee')
+      )
+    })
+
+    if (liveAssignedUsers.length > 0) {
       return { error: 'Move assigned admins/employees away from this branch before deleting it', success: false }
     }
 
@@ -369,7 +394,7 @@ export async function deleteBranch(_prevState: FormState, formData: FormData): P
       return { error: auditError.message ?? 'Branch deleted, but audit log failed', success: false }
     }
 
-    revalidatePath('/dashboard/owner/branches')
+    revalidateBranchRoutes()
     logger.info('Branch soft-deleted', { businessId, branchId, actor: profile.id })
     return { error: null, success: true, message: 'Branch deleted successfully.' }
   } catch (error: unknown) {

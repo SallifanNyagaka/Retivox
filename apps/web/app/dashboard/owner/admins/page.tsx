@@ -21,6 +21,10 @@ import type {
   UserBranchRoleRow,
 } from './types'
 
+type ActiveAwareBranchRoleRow = UserBranchRoleRow & {
+  is_active?: boolean | null
+}
+
 /**
  * Owner admins page server component.
  */
@@ -52,7 +56,7 @@ export default async function AdminsPage() {
       await Promise.all([
         supabase
           .from('user_branch_roles')
-          .select('id, user_id, branch_id, role, assigned_at')
+          .select('id, user_id, branch_id, role, assigned_at, is_active')
           .eq('business_id', businessId),
         supabase
           .from('employee_transfers')
@@ -116,7 +120,7 @@ export default async function AdminsPage() {
 
     const users = (usersResponse.data ?? []) as AdminUserRow[]
     branches = (branchesResponse.data ?? []) as BranchRow[]
-    const roles = (rolesResponse.data ?? []) as UserBranchRoleRow[]
+    const roles = (rolesResponse.data ?? []) as ActiveAwareBranchRoleRow[]
     const transfers = (transfersResponse.error ? [] : transfersResponse.data ?? []) as EmployeeTransferRow[]
     currency = businessResponse.data?.currency ?? ''
 
@@ -136,7 +140,7 @@ export default async function AdminsPage() {
 
     const adminAssignedBranchIds = new Set(
       roles
-        .filter((role) => userMap[role.user_id]?.global_role === 'admin')
+        .filter((role) => role.is_active !== false && userMap[role.user_id]?.global_role === 'admin')
         .map((role) => role.branch_id)
     )
 
@@ -145,7 +149,7 @@ export default async function AdminsPage() {
       .filter((user) => user.global_role === 'admin')
       .map((user) => {
         const assignedBranchIds = roles
-          .filter((role) => role.user_id === user.id)
+          .filter((role) => role.user_id === user.id && role.is_active !== false)
           .map((role) => role.branch_id)
 
         return {
@@ -159,9 +163,11 @@ export default async function AdminsPage() {
     ownerAccount = ownerUser
       ? {
           ...ownerUser,
-          assignedBranchIds: roles.filter((role) => role.user_id === ownerUser.id).map((role) => role.branch_id),
+          assignedBranchIds: roles
+            .filter((role) => role.user_id === ownerUser.id && role.is_active !== false)
+            .map((role) => role.branch_id),
           assignedBranchNames: roles
-            .filter((role) => role.user_id === ownerUser.id)
+            .filter((role) => role.user_id === ownerUser.id && role.is_active !== false)
             .map((role) => branchMap[role.branch_id])
             .filter(Boolean),
         }

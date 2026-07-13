@@ -49,7 +49,10 @@ function revalidateProductRoutes() {
   revalidatePath('/dashboard/admin/products')
   revalidatePath('/dashboard/owner/stock')
   revalidatePath('/dashboard/admin/stock')
+  revalidatePath('/dashboard/owner/finances')
+  revalidatePath('/dashboard/admin/damaged-stock')
   revalidatePath('/dashboard/employee')
+  revalidatePath('/dashboard/employee/damaged-stock')
   revalidatePath('/dashboard/employee/transactions')
   revalidatePath('/dashboard/employee/transactions/new')
 }

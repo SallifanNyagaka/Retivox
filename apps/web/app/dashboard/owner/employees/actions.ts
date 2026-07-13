@@ -544,6 +544,22 @@ export async function deactivateEmployee(_prevState: FormState, formData: FormDa
       return { error: updateError.message ?? 'Unable to deactivate employee', success: false }
     }
 
+    const { error: roleUpdateError } = await supabase
+      .from('user_branch_roles')
+      .update({
+        is_active: isActive,
+        deactivated_at: isActive ? null : new Date().toISOString(),
+        deactivated_by: isActive ? null : profile.id,
+      })
+      .eq('business_id', businessId)
+      .eq('user_id', userId)
+      .eq('role', 'employee')
+
+    if (roleUpdateError) {
+      logger.error('deactivateEmployee: branch role sync failed', { businessId, userId, error: roleUpdateError })
+      return { error: roleUpdateError.message ?? 'Employee status changed, but branch access did not sync', success: false }
+    }
+
     const { error: auditError } = await supabase.from('audit_logs').insert({
       business_id: businessId,
       actor_id: profile.id,
@@ -560,6 +576,8 @@ export async function deactivateEmployee(_prevState: FormState, formData: FormDa
     }
 
     revalidatePath('/dashboard/owner/employees')
+    revalidatePath('/dashboard/owner/branches')
+    revalidatePath('/dashboard/admin/employees')
     logger.info('Employee status changed', { businessId, userId, isActive, actor: profile.id })
     return { error: null, success: true }
   } catch (error: unknown) {
@@ -837,11 +855,13 @@ export async function deleteEmployee(_prevState: FormState, formData: FormData):
       return { error: `${employee.name} is already deleted`, success: false }
     }
 
+    const deletedAt = new Date().toISOString()
+
     const { error: updateError } = await supabase
       .from('users')
       .update({
         is_active: false,
-        deleted_at: new Date().toISOString(),
+        deleted_at: deletedAt,
         deleted_by: profile.id,
         delete_reason: validation.data.reason ?? null,
       })
@@ -851,6 +871,22 @@ export async function deleteEmployee(_prevState: FormState, formData: FormData):
     if (updateError) {
       logger.error('deleteEmployee: update failed', { businessId, userId: employee.id, error: updateError })
       return { error: updateError.message ?? 'Unable to delete employee', success: false }
+    }
+
+    const { error: roleUpdateError } = await supabase
+      .from('user_branch_roles')
+      .update({
+        is_active: false,
+        deactivated_at: deletedAt,
+        deactivated_by: profile.id,
+      })
+      .eq('business_id', businessId)
+      .eq('user_id', employee.id)
+      .eq('role', 'employee')
+
+    if (roleUpdateError) {
+      logger.error('deleteEmployee: branch role sync failed', { businessId, userId: employee.id, error: roleUpdateError })
+      return { error: roleUpdateError.message ?? 'Employee deleted, but branch access did not sync', success: false }
     }
 
     const { error: auditError } = await supabase.from('audit_logs').insert({
@@ -875,6 +911,8 @@ export async function deleteEmployee(_prevState: FormState, formData: FormData):
     }
 
     revalidatePath('/dashboard/owner/employees')
+    revalidatePath('/dashboard/owner/branches')
+    revalidatePath('/dashboard/admin/employees')
     logger.info('Employee soft-deleted', { businessId, userId: employee.id, actor: profile.id })
     return { error: null, success: true, message: 'Employee deleted successfully.' }
   } catch (error: unknown) {

@@ -14,7 +14,7 @@ import { createClient } from '../../../../lib/supabase/server'
 import { requireRole } from '../../../../lib/auth/helpers'
 import logger from '../../../../lib/logger'
 import { getSpreadsheetValue, parseSpreadsheetFile } from '../../../../lib/spreadsheets/workbooks'
-import type { AdminUserRow, BranchRow, UserBranchRoleRow } from './types'
+import type { AdminUserRow, BranchRow } from './types'
 
 /**
  * Standard server-action response used by the admins workflow.
@@ -100,14 +100,43 @@ function getServiceClient() {
 /**
  * Builds a map of users keyed by ID from a user row list.
  */
-function buildUserMap(users: AdminUserRow[]) {
-  const map: Record<string, AdminUserRow> = {}
+type AdminAssignmentUser = {
+  id: string
+  global_role: string
+  is_active?: boolean | null
+  deleted_at?: string | null
+}
+
+type AdminAssignmentRole = {
+  user_id: string
+  branch_id: string
+  is_active?: boolean | null
+}
+
+function buildUserMap(users: AdminAssignmentUser[]) {
+  const map: Record<string, AdminAssignmentUser> = {}
 
   users.forEach((user) => {
     map[user.id] = user
   })
 
   return map
+}
+
+function isLiveAdminAssignment(
+  role: AdminAssignmentRole,
+  userMap: Record<string, AdminAssignmentUser>,
+  excludedUserId?: string
+) {
+  const user = userMap[role.user_id]
+
+  return (
+    role.user_id !== excludedUserId &&
+    role.is_active !== false &&
+    user?.global_role === 'admin' &&
+    user.is_active !== false &&
+    user.deleted_at == null
+  )
 }
 
 /**
@@ -149,8 +178,8 @@ export async function addAdmin(_prevState: FormState, formData: FormData): Promi
 
   try {
     const [businessUsersResponse, businessRolesResponse, branchResponse] = await Promise.all([
-      supabase.from('users').select('id, global_role').eq('business_id', businessId),
-      supabase.from('user_branch_roles').select('user_id, branch_id').eq('business_id', businessId),
+      supabase.from('users').select('id, global_role, is_active, deleted_at').eq('business_id', businessId),
+      supabase.from('user_branch_roles').select('user_id, branch_id, is_active').eq('business_id', businessId),
       supabase.from('branches').select('id').eq('business_id', businessId).in('id', branchIds),
     ])
 
@@ -174,11 +203,11 @@ export async function addAdmin(_prevState: FormState, formData: FormData): Promi
       return { error: 'One or more selected branches are invalid', success: false }
     }
 
-    const users = (businessUsersResponse.data ?? []) as AdminUserRow[]
+    const users = (businessUsersResponse.data ?? []) as AdminAssignmentUser[]
     const userMap = buildUserMap(users)
     const takenBranchIds = new Set(
-      ((businessRolesResponse.data ?? []) as UserBranchRoleRow[])
-        .filter((role) => userMap[role.user_id]?.global_role === 'admin')
+      ((businessRolesResponse.data ?? []) as AdminAssignmentRole[])
+        .filter((role) => isLiveAdminAssignment(role, userMap))
         .map((role) => role.branch_id)
     )
 
@@ -379,8 +408,8 @@ export async function updateAdminBranches(_prevState: FormState, formData: FormD
         .eq('id', userId)
         .maybeSingle(),
       supabase.from('branches').select('id').eq('business_id', businessId).in('id', branchIds),
-      supabase.from('user_branch_roles').select('user_id, branch_id').eq('business_id', businessId),
-      supabase.from('users').select('id, global_role').eq('business_id', businessId),
+      supabase.from('user_branch_roles').select('user_id, branch_id, is_active').eq('business_id', businessId),
+      supabase.from('users').select('id, global_role, is_active, deleted_at').eq('business_id', businessId),
     ])
 
     if (userResponse.error) {
@@ -417,13 +446,13 @@ export async function updateAdminBranches(_prevState: FormState, formData: FormD
       return { error: 'One or more selected branches are invalid', success: false }
     }
 
-    const userMap = buildUserMap((usersResponse.data ?? []) as AdminUserRow[])
-    const existingRoles = (roleResponse.data ?? []) as UserBranchRoleRow[]
+    const userMap = buildUserMap((usersResponse.data ?? []) as AdminAssignmentUser[])
+    const existingRoles = (roleResponse.data ?? []) as AdminAssignmentRole[]
     const currentBranchIds = existingRoles.filter((role) => role.user_id === userId).map((role) => role.branch_id)
 
     const takenByOtherAdmins = new Set(
       existingRoles
-        .filter((role) => role.user_id !== userId && userMap[role.user_id]?.global_role === 'admin')
+        .filter((role) => isLiveAdminAssignment(role, userMap, userId))
         .map((role) => role.branch_id)
     )
 
@@ -528,9 +557,9 @@ export async function transferAdmin(_prevState: FormState, formData: FormData): 
         .eq('business_id', businessId)
         .eq('id', userId)
         .maybeSingle(),
-      supabase.from('user_branch_roles').select('user_id, branch_id').eq('business_id', businessId),
+      supabase.from('user_branch_roles').select('user_id, branch_id, is_active').eq('business_id', businessId),
       supabase.from('branches').select('id').eq('business_id', businessId).in('id', [fromBranchId, toBranchId]),
-      supabase.from('users').select('id, global_role').eq('business_id', businessId),
+      supabase.from('users').select('id, global_role, is_active, deleted_at').eq('business_id', businessId),
     ])
 
     if (userResponse.error) {
@@ -567,8 +596,8 @@ export async function transferAdmin(_prevState: FormState, formData: FormData): 
       return { error: 'One or more selected branches are invalid', success: false }
     }
 
-    const userMap = buildUserMap((usersResponse.data ?? []) as AdminUserRow[])
-    const existingRoles = (roleResponse.data ?? []) as UserBranchRoleRow[]
+    const userMap = buildUserMap((usersResponse.data ?? []) as AdminAssignmentUser[])
+    const existingRoles = (roleResponse.data ?? []) as AdminAssignmentRole[]
     const currentBranchIds = existingRoles.filter((role) => role.user_id === userId).map((role) => role.branch_id)
 
     if (!currentBranchIds.includes(fromBranchId)) {
@@ -577,7 +606,7 @@ export async function transferAdmin(_prevState: FormState, formData: FormData): 
 
     const takenByOtherAdmins = new Set(
       existingRoles
-        .filter((role) => role.user_id !== userId && userMap[role.user_id]?.global_role === 'admin')
+        .filter((role) => isLiveAdminAssignment(role, userMap, userId))
         .map((role) => role.branch_id)
     )
 
@@ -713,6 +742,22 @@ export async function deactivateAdmin(userId: string, isActive: boolean): Promis
       return { error: updateError.message ?? 'Unable to deactivate admin', success: false }
     }
 
+    const { error: roleUpdateError } = await supabase
+      .from('user_branch_roles')
+      .update({
+        is_active: isActive,
+        deactivated_at: isActive ? null : new Date().toISOString(),
+        deactivated_by: isActive ? null : profile.id,
+      })
+      .eq('business_id', businessId)
+      .eq('user_id', userId)
+      .eq('role', 'admin')
+
+    if (roleUpdateError) {
+      logger.error('deactivateAdmin: branch role sync failed', { businessId, userId, error: roleUpdateError })
+      return { error: roleUpdateError.message ?? 'Admin status changed, but branch access did not sync', success: false }
+    }
+
     const { error: auditError } = await supabase.from('audit_logs').insert({
       business_id: businessId,
       actor_id: profile.id,
@@ -729,6 +774,7 @@ export async function deactivateAdmin(userId: string, isActive: boolean): Promis
     }
 
     revalidatePath('/dashboard/owner/admins')
+    revalidatePath('/dashboard/owner/branches')
     logger.info('Admin status changed', { businessId, userId, isActive, actor: profile.id })
     return { error: null, success: true }
   } catch (error: unknown) {
@@ -844,8 +890,8 @@ export async function importAdmins(_prevState: FormState, formData: FormData): P
     }
 
     const [existingUsersResponse, existingRolesResponse, uploadedEmailResponse] = await Promise.all([
-      supabase.from('users').select('id, global_role').eq('business_id', businessId),
-      supabase.from('user_branch_roles').select('user_id, branch_id').eq('business_id', businessId),
+      supabase.from('users').select('id, global_role, is_active, deleted_at').eq('business_id', businessId),
+      supabase.from('user_branch_roles').select('user_id, branch_id, is_active').eq('business_id', businessId),
       supabase.from('users').select('email').eq('business_id', businessId).in('email', uploadedEmails),
     ])
 
@@ -869,10 +915,10 @@ export async function importAdmins(_prevState: FormState, formData: FormData): P
       return { error: `A user with email ${existingEmail} already exists`, success: false }
     }
 
-    const userMap = buildUserMap((existingUsersResponse.data ?? []) as AdminUserRow[])
+    const userMap = buildUserMap((existingUsersResponse.data ?? []) as AdminAssignmentUser[])
     const takenBranchIds = new Set(
-      ((existingRolesResponse.data ?? []) as UserBranchRoleRow[])
-        .filter((role) => userMap[role.user_id]?.global_role === 'admin')
+      ((existingRolesResponse.data ?? []) as AdminAssignmentRole[])
+        .filter((role) => isLiveAdminAssignment(role, userMap))
         .map((role) => role.branch_id)
     )
     const conflictingBranchId = uploadedBranchIds.find((branchId) => takenBranchIds.has(branchId))
@@ -1062,11 +1108,13 @@ export async function deleteAdmin(_prevState: FormState, formData: FormData): Pr
       return { error: `${admin.name} is already deleted`, success: false }
     }
 
+    const deletedAt = new Date().toISOString()
+
     const { error: updateError } = await supabase
       .from('users')
       .update({
         is_active: false,
-        deleted_at: new Date().toISOString(),
+        deleted_at: deletedAt,
         deleted_by: profile.id,
         delete_reason: validation.data.reason ?? null,
       })
@@ -1076,6 +1124,22 @@ export async function deleteAdmin(_prevState: FormState, formData: FormData): Pr
     if (updateError) {
       logger.error('deleteAdmin: update failed', { businessId, userId: admin.id, error: updateError })
       return { error: updateError.message ?? 'Unable to delete admin', success: false }
+    }
+
+    const { error: roleUpdateError } = await supabase
+      .from('user_branch_roles')
+      .update({
+        is_active: false,
+        deactivated_at: deletedAt,
+        deactivated_by: profile.id,
+      })
+      .eq('business_id', businessId)
+      .eq('user_id', admin.id)
+      .eq('role', 'admin')
+
+    if (roleUpdateError) {
+      logger.error('deleteAdmin: branch role sync failed', { businessId, userId: admin.id, error: roleUpdateError })
+      return { error: roleUpdateError.message ?? 'Admin deleted, but branch access did not sync', success: false }
     }
 
     const { error: auditError } = await supabase.from('audit_logs').insert({
@@ -1100,6 +1164,7 @@ export async function deleteAdmin(_prevState: FormState, formData: FormData): Pr
     }
 
     revalidatePath('/dashboard/owner/admins')
+    revalidatePath('/dashboard/owner/branches')
     logger.info('Admin soft-deleted', { businessId, userId: admin.id, actor: profile.id })
     return { error: null, success: true, message: 'Admin deleted successfully.' }
   } catch (error: unknown) {

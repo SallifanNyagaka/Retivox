@@ -107,6 +107,7 @@ function getServiceClient() {
 function revalidateEmployeeDashboards() {
   revalidatePath('/dashboard/admin/employees')
   revalidatePath('/dashboard/owner/employees')
+  revalidatePath('/dashboard/owner/branches')
 }
 
 /**
