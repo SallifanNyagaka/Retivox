@@ -17,8 +17,8 @@ import Toast from '../../../../components/ui/Toast'
 import LoadingOverlay from '../../../../components/ui/LoadingOverlay'
 import { applyDashboardTheme, getDashboardThemeKey } from '../../../../components/dashboard/DashboardThemeProvider'
 import { useToast } from '../../../../lib/hooks/useToast'
-import { changePassword, logoutFromSettings, updateBusinessProfile } from './actions'
-import type { BusinessSettingsRow, FormState, SubscriptionRow, UserProfileRow } from './types'
+import { addLoginReview, changePassword, logoutFromSettings, setLoginReviewActive, updateBusinessProfile } from './actions'
+import type { BusinessSettingsRow, FormState, LoginReviewRow, SubscriptionRow, UserProfileRow } from './types'
 
 /**
  * Props for the settings page client.
@@ -27,6 +27,7 @@ type Props = {
   business: BusinessSettingsRow
   ownerProfile: UserProfileRow
   subscription: SubscriptionRow | null
+  loginReviews: LoginReviewRow[]
 }
 
 /**
@@ -48,6 +49,12 @@ const PLAN_OPTIONS: PlanOption[] = [
   { key: 'growth', label: 'Growth', monthlyAmount: 5000, branchLimit: 'Up to 10 branches' },
   { key: 'enterprise', label: 'Enterprise', monthlyAmount: 12000, branchLimit: 'Unlimited branches' },
 ]
+
+const REVIEW_ROLE_LABELS: Record<LoginReviewRow['role'], string> = {
+  owner: 'Owner',
+  admin: 'Admin',
+  employee: 'Employee',
+}
 
 /**
  * Shared input styling for settings forms.
@@ -420,6 +427,244 @@ function AccountSecuritySection({ ownerProfile }: { ownerProfile: UserProfileRow
 }
 
 /**
+ * Login review management shown to owners.
+ */
+function LoginReviewsSection({ reviews }: { reviews: LoginReviewRow[] }) {
+  const router = useRouter()
+  const [role, setRole] = useState<LoginReviewRow['role']>('owner')
+  const [reviewerName, setReviewerName] = useState('')
+  const [reviewerTitle, setReviewerTitle] = useState('')
+  const [quote, setQuote] = useState('')
+  const [sortOrder, setSortOrder] = useState('100')
+  const { toast, toastState, dismiss } = useToast()
+  const [state, action, isPending] = useActionState<FormState, FormData>(addLoginReview, {
+    error: null,
+    success: false,
+  })
+  const previousPending = useRef(isPending)
+
+  useEffect(() => {
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null
+
+    if (previousPending.current && !isPending) {
+      if (state.success) {
+        toast.success('Login review added')
+        setReviewerName('')
+        setReviewerTitle('')
+        setQuote('')
+        setSortOrder('100')
+        refreshTimer = setTimeout(() => {
+          router.refresh()
+        }, 0)
+      } else if (state.error) {
+        toast.error(state.error)
+      }
+    }
+
+    previousPending.current = isPending
+    return () => {
+      if (refreshTimer) {
+        clearTimeout(refreshTimer)
+      }
+    }
+  }, [isPending, router, state.error, state.success, toast])
+
+  const onSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    const formData = new FormData()
+    formData.set('role', role)
+    formData.set('reviewerName', reviewerName)
+    formData.set('reviewerTitle', reviewerTitle)
+    formData.set('quote', quote)
+    formData.set('sortOrder', sortOrder)
+
+    startTransition(() => {
+      action(formData)
+    })
+  }
+
+  return (
+    <>
+      {isPending && <LoadingOverlay message="Adding login review..." />}
+      {toastState && (
+        <Toast
+          message={toastState.message}
+          type={toastState.type}
+          duration={toastState.duration}
+          onDismiss={dismiss}
+        />
+      )}
+
+      <Card padding="md">
+        <CardHeader title="Login reviews" />
+        <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 0, marginBottom: 16 }}>
+          Add role-specific reviews shown on the login page before users sign in.
+        </p>
+
+        <form onSubmit={onSubmit}>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <label style={{ fontSize: 13 }}>
+              <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>
+                Review for
+              </span>
+              <select
+                value={role}
+                onChange={(event) => setRole(event.target.value as LoginReviewRow['role'])}
+                required
+                style={inputStyle}
+              >
+                <option value="owner">Owner login</option>
+                <option value="admin">Admin login</option>
+                <option value="employee">Employee login</option>
+              </select>
+            </label>
+
+            <label style={{ fontSize: 13 }}>
+              <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>
+                Sort order
+              </span>
+              <input
+                type="number"
+                min="0"
+                max="10000"
+                value={sortOrder}
+                onChange={(event) => setSortOrder(event.target.value)}
+                style={inputStyle}
+              />
+            </label>
+
+            <label style={{ fontSize: 13 }}>
+              <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>
+                Reviewer name
+              </span>
+              <input
+                value={reviewerName}
+                onChange={(event) => setReviewerName(event.target.value)}
+                required
+                style={inputStyle}
+              />
+            </label>
+
+            <label style={{ fontSize: 13 }}>
+              <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>
+                Reviewer title
+              </span>
+              <input
+                value={reviewerTitle}
+                onChange={(event) => setReviewerTitle(event.target.value)}
+                required
+                placeholder="Owner, Branch Admin, Employee..."
+                style={inputStyle}
+              />
+            </label>
+          </div>
+
+          <label style={{ display: 'block', fontSize: 13, marginTop: 14 }}>
+            <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>
+              Review
+            </span>
+            <textarea
+              value={quote}
+              onChange={(event) => setQuote(event.target.value)}
+              required
+              rows={4}
+              maxLength={600}
+              style={{
+                ...inputStyle,
+                height: 'auto',
+                minHeight: 104,
+                paddingTop: 10,
+                resize: 'vertical',
+              }}
+            />
+          </label>
+
+          {state.error && (
+            <div
+              style={{
+                backgroundColor: 'var(--color-danger-light)',
+                border: '1px solid var(--color-danger)',
+                color: 'var(--color-danger)',
+                borderRadius: 8,
+                padding: '12px 14px',
+                fontSize: 13,
+                marginTop: 14,
+              }}
+            >
+              {state.error}
+            </div>
+          )}
+
+          <button
+            type="submit"
+            className="btn-primary"
+            disabled={isPending}
+            style={{ padding: '10px 20px', borderRadius: 8, marginTop: 16, opacity: isPending ? 0.8 : 1 }}
+          >
+            {isPending ? 'Adding review...' : 'Add review'}
+          </button>
+        </form>
+
+        <div style={{ borderTop: '1px solid var(--color-border)', marginTop: 20, paddingTop: 18 }}>
+          <p style={{ fontSize: 14, fontWeight: 600, color: 'var(--color-text-primary)', marginTop: 0 }}>
+            Existing reviews
+          </p>
+
+          {reviews.length === 0 ? (
+            <p style={{ fontSize: 13, color: 'var(--color-text-muted)', margin: 0 }}>
+              No reviews have been added yet.
+            </p>
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {reviews.map((review) => (
+                <div
+                  key={review.id}
+                  className="rounded-xl"
+                  style={{
+                    border: '1px solid var(--color-border)',
+                    backgroundColor: 'var(--color-background)',
+                    padding: 14,
+                  }}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <Badge variant={review.is_active ? 'success' : 'muted'}>
+                      {review.is_active ? 'Active' : 'Hidden'}
+                    </Badge>
+                    <Badge variant="info">{REVIEW_ROLE_LABELS[review.role]}</Badge>
+                  </div>
+                  <p style={{ fontSize: 14, color: 'var(--color-text-primary)', lineHeight: 1.55, marginTop: 12 }}>
+                    &ldquo;{review.quote}&rdquo;
+                  </p>
+                  <p style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-primary)', marginBottom: 2 }}>
+                    {review.reviewer_name}
+                  </p>
+                  <p style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 0 }}>
+                    {review.reviewer_title} · Sort {review.sort_order}
+                  </p>
+
+                  <form action={setLoginReviewActive}>
+                    <input type="hidden" name="reviewId" value={review.id} />
+                    <input type="hidden" name="isActive" value={review.is_active ? 'false' : 'true'} />
+                    <button
+                      type="submit"
+                      className={review.is_active ? 'btn-outline' : 'btn-primary'}
+                      style={{ padding: '8px 14px', borderRadius: 8, marginTop: 10 }}
+                    >
+                      {review.is_active ? 'Hide review' : 'Show review'}
+                    </button>
+                  </form>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </Card>
+    </>
+  )
+}
+
+/**
  * Subscription section showing the current plan and future plan options.
  */
 function SubscriptionSection({
@@ -637,7 +882,7 @@ function DangerZoneSection() {
 /**
  * Owner settings dashboard client component.
  */
-export default function SettingsPageClient({ business, ownerProfile, subscription }: Props) {
+export default function SettingsPageClient({ business, ownerProfile, subscription, loginReviews }: Props) {
   return (
     <div className="flex flex-col gap-6" data-currency={business.currency}>
       {/* Page header */}
@@ -659,6 +904,7 @@ export default function SettingsPageClient({ business, ownerProfile, subscriptio
 
       <BusinessProfileSection business={business} />
       <AccountSecuritySection ownerProfile={ownerProfile} />
+      <LoginReviewsSection reviews={loginReviews} />
       <SubscriptionSection business={business} subscription={subscription} />
       <AppearanceSection userId={ownerProfile.id} />
       <DangerZoneSection />

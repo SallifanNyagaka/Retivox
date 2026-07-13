@@ -35,12 +35,33 @@ const changePasswordSchema = z
     path: ['confirmPassword'],
   })
 
+const loginReviewSchema = z.object({
+  role: z.enum(['owner', 'admin', 'employee']),
+  quote: z.string().min(10, 'Review must be at least 10 characters').max(600, 'Review is too long'),
+  reviewerName: z.string().min(2, 'Reviewer name is required').max(120, 'Reviewer name is too long'),
+  reviewerTitle: z.string().min(2, 'Reviewer title is required').max(160, 'Reviewer title is too long'),
+  sortOrder: z.coerce.number().int().min(0).max(10000).default(100),
+})
+
+const loginReviewStatusSchema = z.object({
+  reviewId: z.string().uuid(),
+  isActive: z.enum(['true', 'false']).transform((value) => value === 'true'),
+})
+
 /**
  * Safely reads a trimmed string value from FormData.
  */
 function getString(formData: FormData, key: string): string {
   const value = formData.get(key)
   return typeof value === 'string' ? value.trim() : ''
+}
+
+function revalidateReviewSurfaces() {
+  revalidatePath('/dashboard/owner/settings')
+  revalidatePath('/login')
+  revalidatePath('/admin/login')
+  revalidatePath('/employee/login')
+  revalidatePath('/api/login-reviews')
 }
 
 /**
@@ -223,6 +244,113 @@ export async function changePassword(_prevState: FormState, formData: FormData):
   } catch (error: unknown) {
     logger.error('changePassword: unexpected error', { businessId, userId: profile.id, error })
     return { success: false, error: error instanceof Error ? error.message : 'Server error' }
+  }
+}
+
+/**
+ * Adds a role-specific review shown on the login page.
+ */
+export async function addLoginReview(_prevState: FormState, formData: FormData): Promise<FormState> {
+  const validation = loginReviewSchema.safeParse({
+    role: getString(formData, 'role'),
+    quote: getString(formData, 'quote'),
+    reviewerName: getString(formData, 'reviewerName'),
+    reviewerTitle: getString(formData, 'reviewerTitle'),
+    sortOrder: getString(formData, 'sortOrder') || '100',
+  })
+
+  if (!validation.success) {
+    return { success: false, error: validation.error.errors[0]?.message ?? 'Invalid review details' }
+  }
+
+  const profile = await requireRole([GlobalRole.Owner])
+
+  try {
+    const supabase = await createClient()
+    const { role, quote, reviewerName, reviewerTitle, sortOrder } = validation.data
+
+    const { data, error } = await supabase
+      .from('login_reviews')
+      .insert({
+        role,
+        quote,
+        reviewer_name: reviewerName,
+        reviewer_title: reviewerTitle,
+        sort_order: sortOrder,
+        is_active: true,
+      })
+      .select('id')
+      .single()
+
+    if (error) {
+      logger.error('addLoginReview: insert failed', { actor: profile.id, error })
+      return { success: false, error: error.message ?? 'Unable to add review' }
+    }
+
+    const businessId = profile.business_id
+    if (businessId) {
+      const { error: auditError } = await supabase.from('audit_logs').insert({
+        business_id: businessId,
+        actor_id: profile.id,
+        entity_type: 'login_review',
+        entity_id: data.id,
+        action: 'created',
+        old_value: null,
+        new_value: {
+          role,
+          reviewer_name: reviewerName,
+          reviewer_title: reviewerTitle,
+          sort_order: sortOrder,
+        },
+      })
+
+      if (auditError) {
+        logger.error('addLoginReview: audit insert failed', { actor: profile.id, reviewId: data.id, error: auditError })
+      }
+    }
+
+    revalidateReviewSurfaces()
+    return { success: true, error: null }
+  } catch (error: unknown) {
+    logger.error('addLoginReview: unexpected error', { actor: profile.id, error })
+    return { success: false, error: error instanceof Error ? error.message : 'Server error' }
+  }
+}
+
+/**
+ * Shows or hides an existing login review without deleting it.
+ */
+export async function setLoginReviewActive(formData: FormData): Promise<void> {
+  const validation = loginReviewStatusSchema.safeParse({
+    reviewId: getString(formData, 'reviewId'),
+    isActive: getString(formData, 'isActive'),
+  })
+
+  if (!validation.success) {
+    return
+  }
+
+  const profile = await requireRole([GlobalRole.Owner])
+
+  try {
+    const supabase = await createClient()
+    const { error } = await supabase
+      .from('login_reviews')
+      .update({ is_active: validation.data.isActive })
+      .eq('id', validation.data.reviewId)
+
+    if (error) {
+      logger.error('setLoginReviewActive: update failed', {
+        actor: profile.id,
+        reviewId: validation.data.reviewId,
+        error,
+      })
+      return
+    }
+
+    revalidateReviewSurfaces()
+  } catch (error: unknown) {
+    logger.error('setLoginReviewActive: unexpected error', { actor: profile.id, error })
   }
 }
 

@@ -11,7 +11,7 @@ import { createClient } from '../../../../lib/supabase/server'
 import logger from '../../../../lib/logger'
 import { Card } from '../../../../components/ui/Card'
 import SettingsPageClient from './SettingsPageClient'
-import type { BusinessSettingsRow, SubscriptionRow, UserProfileRow } from './types'
+import type { BusinessSettingsRow, LoginReviewRow, SubscriptionRow, UserProfileRow } from './types'
 
 /**
  * Owner settings page server component.
@@ -27,12 +27,13 @@ export default async function SettingsPage() {
   let business: BusinessSettingsRow | null = null
   let ownerProfile: UserProfileRow | null = null
   let subscription: SubscriptionRow | null = null
+  let loginReviews: LoginReviewRow[] = []
   let pageError: string | null = null
 
   try {
     const supabase = await createClient()
 
-    const [businessResponse, ownerResponse, subscriptionResponse] = await Promise.all([
+    const [businessResponse, ownerResponse, subscriptionResponse, reviewsResponse] = await Promise.all([
       supabase
         .from('businesses')
         .select('id, name, country, currency, timezone, subscription_plan, subscription_status')
@@ -49,6 +50,12 @@ export default async function SettingsPage() {
         .select('id, plan, status, branch_count, monthly_amount, currency, current_period_end')
         .eq('business_id', businessId)
         .maybeSingle(),
+      supabase
+        .from('login_reviews')
+        .select('id, role, quote, reviewer_name, reviewer_title, sort_order, is_active, created_at')
+        .order('role', { ascending: true })
+        .order('sort_order', { ascending: true })
+        .order('created_at', { ascending: false }),
     ])
 
     if (businessResponse.error) {
@@ -63,9 +70,14 @@ export default async function SettingsPage() {
       throw subscriptionResponse.error
     }
 
+    if (reviewsResponse.error) {
+      throw reviewsResponse.error
+    }
+
     business = businessResponse.data as BusinessSettingsRow
     ownerProfile = ownerResponse.data as UserProfileRow
     subscription = (subscriptionResponse.data ?? null) as SubscriptionRow | null
+    loginReviews = (reviewsResponse.data ?? []) as LoginReviewRow[]
   } catch (error: unknown) {
     logger.error('SettingsPage data fetch failed', { businessId, error })
     pageError = error instanceof Error ? error.message : 'Unable to load settings'
@@ -99,5 +111,12 @@ export default async function SettingsPage() {
     )
   }
 
-  return <SettingsPageClient business={business} ownerProfile={ownerProfile} subscription={subscription} />
+  return (
+    <SettingsPageClient
+      business={business}
+      ownerProfile={ownerProfile}
+      subscription={subscription}
+      loginReviews={loginReviews}
+    />
+  )
 }

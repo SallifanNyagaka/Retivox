@@ -42,6 +42,20 @@ export type SubscriptionRow = {
 }
 
 /**
+ * Review row displayed on the role-specific login panels.
+ */
+export type LoginReviewRow = {
+  id: string
+  role: 'owner' | 'admin' | 'employee'
+  quote: string
+  reviewer_name: string
+  reviewer_title: string
+  sort_order: number
+  is_active: boolean
+  created_at: string
+}
+
+/**
  * Standard form state returned by settings server actions.
  */
 export type FormState = {
