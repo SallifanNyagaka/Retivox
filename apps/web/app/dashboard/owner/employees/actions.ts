@@ -810,7 +810,7 @@ export async function importEmployees(_prevState: FormState, formData: FormData)
 }
 
 /**
- * Soft-deletes an employee account while preserving transaction and audit history.
+ * Hard-deletes an employee account while preserving audit history.
  */
 export async function deleteEmployee(_prevState: FormState, formData: FormData): Promise<FormState> {
   const validation = deleteEmployeeSchema.safeParse({
@@ -855,65 +855,28 @@ export async function deleteEmployee(_prevState: FormState, formData: FormData):
       return { error: `${employee.name} is already deleted`, success: false }
     }
 
-    const deletedAt = new Date().toISOString()
-
-    const { error: updateError } = await supabase
-      .from('users')
-      .update({
-        is_active: false,
-        deleted_at: deletedAt,
-        deleted_by: profile.id,
-        delete_reason: validation.data.reason ?? null,
-      })
-      .eq('business_id', businessId)
-      .eq('id', employee.id)
-
-    if (updateError) {
-      logger.error('deleteEmployee: update failed', { businessId, userId: employee.id, error: updateError })
-      return { error: updateError.message ?? 'Unable to delete employee', success: false }
-    }
-
-    const { error: roleUpdateError } = await supabase
-      .from('user_branch_roles')
-      .update({
-        is_active: false,
-        deactivated_at: deletedAt,
-        deactivated_by: profile.id,
-      })
-      .eq('business_id', businessId)
-      .eq('user_id', employee.id)
-      .eq('role', 'employee')
-
-    if (roleUpdateError) {
-      logger.error('deleteEmployee: branch role sync failed', { businessId, userId: employee.id, error: roleUpdateError })
-      return { error: roleUpdateError.message ?? 'Employee deleted, but branch access did not sync', success: false }
-    }
-
-    const { error: auditError } = await supabase.from('audit_logs').insert({
-      business_id: businessId,
-      actor_id: profile.id,
-      entity_type: 'user',
-      entity_id: employee.id,
-      action: 'deleted',
-      old_value: {
-        global_role: employee.global_role,
-        name: employee.name,
-        email: employee.email,
-        phone: employee.phone,
-        is_active: employee.is_active,
-      },
-      new_value: { deleted_at: true, reason: validation.data.reason ?? null },
+    const { error: deleteError } = await supabase.rpc('owner_hard_delete_staff_user', {
+      p_user_id: employee.id,
+      p_reason: validation.data.reason ?? null,
     })
 
-    if (auditError) {
-      logger.error('deleteEmployee: audit insert failed', { businessId, userId: employee.id, error: auditError })
-      return { error: auditError.message ?? 'Employee deleted, but audit log failed', success: false }
+    if (deleteError) {
+      logger.error('deleteEmployee: hard delete RPC failed', { businessId, userId: employee.id, error: deleteError })
+      return { error: deleteError.message ?? 'Unable to delete employee', success: false }
+    }
+
+    const serviceClient = getServiceClient()
+    const { error: authDeleteError } = await serviceClient.auth.admin.deleteUser(employee.id)
+
+    if (authDeleteError && !authDeleteError.message.toLowerCase().includes('not found')) {
+      logger.error('deleteEmployee: auth user cleanup failed', { businessId, userId: employee.id, error: authDeleteError })
+      return { error: authDeleteError.message ?? 'Employee deleted from app data, but auth cleanup failed', success: false }
     }
 
     revalidatePath('/dashboard/owner/employees')
     revalidatePath('/dashboard/owner/branches')
     revalidatePath('/dashboard/admin/employees')
-    logger.info('Employee soft-deleted', { businessId, userId: employee.id, actor: profile.id })
+    logger.info('Employee hard-deleted', { businessId, userId: employee.id, actor: profile.id })
     return { error: null, success: true, message: 'Employee deleted successfully.' }
   } catch (error: unknown) {
     logger.error('deleteEmployee: unexpected error', { businessId, error })

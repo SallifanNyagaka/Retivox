@@ -1,0 +1,51 @@
+/**
+ * Sync hook for Retivox mobile.
+ *
+ * Automatically schedules queue processing when the device comes online and
+ * exposes manual sync controls for settings/profile screens.
+ */
+
+import { useCallback, useEffect } from 'react'
+import { runWatermelonSync } from '../lib/watermelon/sync'
+import { scheduleSyncQueueProcessing } from '../lib/sync/processor'
+import { useAuthStore } from '../store/authStore'
+import { useSyncStore } from '../store/syncStore'
+import { useOnlineStatus } from './useOnlineStatus'
+import { handleError } from '../utils/errorHandler'
+
+/**
+ * Exposes sync state and actions.
+ *
+ * @returns Sync state and manual trigger.
+ */
+export function useSync() {
+  const onlineStatus = useOnlineStatus()
+  const profile = useAuthStore((state) => state.user)
+  const syncState = useSyncStore()
+
+  const triggerSync = useCallback(async () => {
+    if (!profile) return
+
+    syncState.setSyncing(true)
+    try {
+      await runWatermelonSync(profile)
+    } catch (error) {
+      handleError('useSync.triggerSync', error)
+    } finally {
+      syncState.setSyncing(false)
+    }
+  }, [profile, syncState])
+
+  useEffect(() => {
+    if (onlineStatus.isOnline) {
+      scheduleSyncQueueProcessing()
+    }
+  }, [onlineStatus.isOnline])
+
+  return {
+    ...syncState,
+    isOnline: onlineStatus.isOnline,
+    connectionType: onlineStatus.connectionType,
+    triggerSync,
+  }
+}

@@ -1063,7 +1063,7 @@ export async function importAdmins(_prevState: FormState, formData: FormData): P
 }
 
 /**
- * Soft-deletes an admin account while preserving audit actor history.
+ * Hard-deletes an admin account while preserving audit actor history.
  */
 export async function deleteAdmin(_prevState: FormState, formData: FormData): Promise<FormState> {
   const validation = deleteAdminSchema.safeParse({
@@ -1108,64 +1108,27 @@ export async function deleteAdmin(_prevState: FormState, formData: FormData): Pr
       return { error: `${admin.name} is already deleted`, success: false }
     }
 
-    const deletedAt = new Date().toISOString()
-
-    const { error: updateError } = await supabase
-      .from('users')
-      .update({
-        is_active: false,
-        deleted_at: deletedAt,
-        deleted_by: profile.id,
-        delete_reason: validation.data.reason ?? null,
-      })
-      .eq('business_id', businessId)
-      .eq('id', admin.id)
-
-    if (updateError) {
-      logger.error('deleteAdmin: update failed', { businessId, userId: admin.id, error: updateError })
-      return { error: updateError.message ?? 'Unable to delete admin', success: false }
-    }
-
-    const { error: roleUpdateError } = await supabase
-      .from('user_branch_roles')
-      .update({
-        is_active: false,
-        deactivated_at: deletedAt,
-        deactivated_by: profile.id,
-      })
-      .eq('business_id', businessId)
-      .eq('user_id', admin.id)
-      .eq('role', 'admin')
-
-    if (roleUpdateError) {
-      logger.error('deleteAdmin: branch role sync failed', { businessId, userId: admin.id, error: roleUpdateError })
-      return { error: roleUpdateError.message ?? 'Admin deleted, but branch access did not sync', success: false }
-    }
-
-    const { error: auditError } = await supabase.from('audit_logs').insert({
-      business_id: businessId,
-      actor_id: profile.id,
-      entity_type: 'user',
-      entity_id: admin.id,
-      action: 'deleted',
-      old_value: {
-        global_role: admin.global_role,
-        name: admin.name,
-        email: admin.email,
-        phone: admin.phone,
-        is_active: admin.is_active,
-      },
-      new_value: { deleted_at: true, reason: validation.data.reason ?? null },
+    const { error: deleteError } = await supabase.rpc('owner_hard_delete_staff_user', {
+      p_user_id: admin.id,
+      p_reason: validation.data.reason ?? null,
     })
 
-    if (auditError) {
-      logger.error('deleteAdmin: audit insert failed', { businessId, userId: admin.id, error: auditError })
-      return { error: auditError.message ?? 'Admin deleted, but audit log failed', success: false }
+    if (deleteError) {
+      logger.error('deleteAdmin: hard delete RPC failed', { businessId, userId: admin.id, error: deleteError })
+      return { error: deleteError.message ?? 'Unable to delete admin', success: false }
+    }
+
+    const serviceClient = getServiceClient()
+    const { error: authDeleteError } = await serviceClient.auth.admin.deleteUser(admin.id)
+
+    if (authDeleteError && !authDeleteError.message.toLowerCase().includes('not found')) {
+      logger.error('deleteAdmin: auth user cleanup failed', { businessId, userId: admin.id, error: authDeleteError })
+      return { error: authDeleteError.message ?? 'Admin deleted from app data, but auth cleanup failed', success: false }
     }
 
     revalidatePath('/dashboard/owner/admins')
     revalidatePath('/dashboard/owner/branches')
-    logger.info('Admin soft-deleted', { businessId, userId: admin.id, actor: profile.id })
+    logger.info('Admin hard-deleted', { businessId, userId: admin.id, actor: profile.id })
     return { error: null, success: true, message: 'Admin deleted successfully.' }
   } catch (error: unknown) {
     logger.error('deleteAdmin: unexpected error', { businessId, error })
