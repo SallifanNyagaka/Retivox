@@ -7,6 +7,7 @@
 
 import type { Metadata, Viewport } from 'next'
 import type { ReactNode } from 'react'
+import NavigationPendingProvider from '../components/navigation/NavigationPendingProvider'
 import './globals.css'
 
 export const metadata: Metadata = {
@@ -39,7 +40,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           color: 'var(--color-text-primary)',
         }}
       >
-        {children}
+        <NavigationPendingProvider>{children}</NavigationPendingProvider>
       </body>
     </html>
   )
