@@ -357,7 +357,7 @@ export async function getPendingApprovals(businessId: string) {
         cash_deposit_code,
         mpesa_ref_code,
         payment_at,
-        transactions!inner(branch_id, employee_id, branches!inner(name), users!inner(name))
+        transactions!inner(branch_id, employee_id, branches!inner(name), users(name))
       `)
       .eq('business_id', businessId)
       .eq('status', 'pending_verify')
@@ -376,8 +376,7 @@ export async function getPendingApprovals(businessId: string) {
         branch_product_prices!inner(
           products!inner(name),
           branches!inner(name)
-        ),
-        users!inner(name)
+        )
       `)
       .eq('business_id', businessId)
       .eq('status', 'pending_approval')
@@ -416,7 +415,7 @@ export async function getRecentTransactions(businessId: string) {
         status,
         recorded_at,
         branches!inner(name),
-        users!inner(name)
+        users(name)
       `)
       .eq('business_id', businessId)
       .in('branch_id', activeBranchIds)

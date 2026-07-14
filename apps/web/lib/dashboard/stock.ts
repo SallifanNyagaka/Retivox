@@ -136,8 +136,8 @@ type RawDeliveryEditRequestRow = Omit<
   StockDeliveryEditRequestRow,
   'branch_name' | 'requested_by_name' | 'supplier_name' | 'reference_code'
 > & {
+  requested_by: string | null
   branches: BranchStockBranch | BranchStockBranch[] | null
-  users: { name: string } | Array<{ name: string }> | null
   supplier_deliveries: { supplier_name: string; reference_code: string | null } | Array<{ supplier_name: string; reference_code: string | null }> | null
 }
 
@@ -366,16 +366,18 @@ function normalizeDeliveryRows(rows: RawSupplierDeliveryRow[]): StockDeliveryRow
   })
 }
 
-function normalizeDeliveryEditRequestRows(rows: RawDeliveryEditRequestRow[]): StockDeliveryEditRequestRow[] {
+function normalizeDeliveryEditRequestRows(
+  rows: RawDeliveryEditRequestRow[],
+  requesterNamesById: Map<string, string>
+): StockDeliveryEditRequestRow[] {
   return rows.map((row) => {
     const branch = normalizeJoin(row.branches)?.[0]
-    const requester = normalizeJoin(row.users)?.[0]
     const delivery = normalizeJoin(row.supplier_deliveries)?.[0]
 
     return {
       ...row,
       branch_name: branch?.name ?? 'Unknown branch',
-      requested_by_name: requester?.name ?? 'Unknown user',
+      requested_by_name: row.requested_by ? requesterNamesById.get(row.requested_by) ?? 'Deleted user' : 'Deleted user',
       supplier_name: delivery?.supplier_name ?? 'Unknown supplier',
       reference_code: delivery?.reference_code ?? null,
     }
@@ -514,13 +516,13 @@ export async function getStockDashboardData(userId: string, businessId: string):
           id,
           delivery_id,
           branch_id,
+          requested_by,
           old_value,
           new_value,
           reason,
           requested_at,
           status,
           branches!inner(id, name),
-          users!supplier_delivery_edit_requests_requested_by_fkey(name),
           supplier_deliveries!inner(supplier_name, reference_code)
         `
         )
@@ -563,6 +565,7 @@ export async function getStockDashboardData(userId: string, businessId: string):
     const metricsRows = (metricsResponse.data ?? []) as StockMetricsRpcRow[]
     const stockRows = (stockResponse.data ?? []) as RawBranchStockRow[]
     const productOptionRows = (productsResponse.data ?? []) as RawStockProductOption[]
+    const deliveryEditRequestRows = (deliveryEditRequestsResponse.data ?? []) as RawDeliveryEditRequestRow[]
     const productIds = Array.from(
       new Set([
         ...stockRows.map((row) => normalizeJoin(row.products)?.[0]?.id).filter((productId): productId is string => Boolean(productId)),
@@ -570,6 +573,7 @@ export async function getStockDashboardData(userId: string, businessId: string):
       ])
     )
     let uomsByProduct = new Map<string, StockUOMOption[]>()
+    let requesterNamesById = new Map<string, string>()
 
     if (productIds.length > 0) {
       const uomResponse = await supabase
@@ -596,6 +600,24 @@ export async function getStockDashboardData(userId: string, businessId: string):
       uomsByProduct = groupUOMLinksByProduct((uomResponse.data ?? []) as RawProductUOMLinkRow[])
     }
 
+    const requesterIds = Array.from(
+      new Set(deliveryEditRequestRows.map((row) => row.requested_by).filter((requesterId): requesterId is string => Boolean(requesterId)))
+    )
+
+    if (requesterIds.length > 0) {
+      const requestersResponse = await supabase
+        .from('users')
+        .select('id, name')
+        .eq('business_id', businessId)
+        .in('id', requesterIds)
+
+      if (requestersResponse.error) {
+        throw requestersResponse.error
+      }
+
+      requesterNamesById = new Map((requestersResponse.data ?? []).map((user) => [user.id, user.name]))
+    }
+
     const normalizedRows = normalizeStockRows(stockRows, uomsByProduct)
 
     return {
@@ -605,7 +627,7 @@ export async function getStockDashboardData(userId: string, businessId: string):
       products: mapProductOptions(productOptionRows, uomsByProduct),
       movements: (movementsResponse.data ?? []) as StockMovementRow[],
       deliveries: normalizeDeliveryRows((deliveriesResponse.data ?? []) as RawSupplierDeliveryRow[]),
-      deliveryEditRequests: normalizeDeliveryEditRequestRows((deliveryEditRequestsResponse.data ?? []) as RawDeliveryEditRequestRow[]),
+      deliveryEditRequests: normalizeDeliveryEditRequestRows(deliveryEditRequestRows, requesterNamesById),
     }
   } catch (error: unknown) {
     logger.error('getStockDashboardData failed', { userId, businessId, error })

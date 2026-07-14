@@ -259,14 +259,14 @@ export default async function AdminDashboardPage() {
         ? await Promise.all([
             supabase
               .from('transactions')
-              .select('id, branch_id, total_amount, status, recorded_at, users!inner(name), branches!inner(name)')
+              .select('id, branch_id, total_amount, status, recorded_at, users(name), branches!inner(name)')
               .eq('business_id', businessId)
               .in('branch_id', branchIds)
               .gte('recorded_at', todayStart)
               .order('recorded_at', { ascending: false }),
             supabase
               .from('transactions')
-              .select('id, branch_id, total_amount, status, recorded_at, users!inner(name), branches!inner(name)')
+              .select('id, branch_id, total_amount, status, recorded_at, users(name), branches!inner(name)')
               .eq('business_id', businessId)
               .in('branch_id', branchIds)
               .order('recorded_at', { ascending: false })
@@ -458,7 +458,7 @@ export default async function AdminDashboardPage() {
                             {branch?.name ?? 'Unknown branch'}
                           </td>
                           <td style={{ padding: '12px', fontSize: '13px', color: 'var(--color-text-primary)' }}>
-                            {employee?.name ?? 'Unknown employee'}
+                            {employee?.name ?? 'Deleted employee'}
                           </td>
                           <td style={{ padding: '12px', fontSize: '13px', color: 'var(--color-text-primary)' }}>
                             {formatMoney(Number(transaction.total_amount), currency)}
