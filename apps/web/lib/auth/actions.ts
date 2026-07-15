@@ -23,6 +23,7 @@ import {
   GlobalRole,
 } from '@smartretail/shared'
 import logger from '../logger'
+import { recordLoginAttempt } from '../platform/auth'
 
 /**
  * Form state returned by all server actions to the client.
@@ -235,23 +236,45 @@ export async function loginUser(
   if (signInError || !signInData?.user) {
     // Never expose the real error — generic message for security
     logger.warn('Failed login attempt', { email })
+    await recordLoginAttempt({
+      email,
+      surface: 'tenant',
+      success: false,
+      failureReason: 'Invalid email or password',
+    })
     return { error: 'Invalid email or password', success: false }
   }
 
   // Fetch user profile to get role and active status
   const { data: profileData, error: profileError } = await supabase
     .from('users')
-    .select('global_role, is_active')
+    .select('business_id, global_role, is_active')
     .eq('id', signInData.user.id)
     .maybeSingle()
 
   if (profileError || !profileData || profileData.is_active === false || !profileData.global_role) {
     await supabase.auth.signOut()
     logger.warn('Login blocked — profile missing or inactive', { email })
+    await recordLoginAttempt({
+      businessId: profileData?.business_id ?? null,
+      email,
+      attemptedRole: profileData?.global_role ?? null,
+      surface: 'tenant',
+      success: false,
+      failureReason: 'Account not found or deactivated',
+    })
     return { error: 'Account not found or deactivated', success: false }
   }
 
   logger.info('User logged in successfully', { email, role: profileData.global_role })
+
+  await recordLoginAttempt({
+    businessId: profileData.business_id,
+    email,
+    attemptedRole: profileData.global_role,
+    surface: 'tenant',
+    success: true,
+  })
 
   const routes: Record<GlobalRole, string> = {
     owner: '/dashboard/owner',

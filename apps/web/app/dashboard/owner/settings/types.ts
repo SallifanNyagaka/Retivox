@@ -68,7 +68,10 @@ export type LoginReviewRow = {
   reviewer_title: string
   sort_order: number
   is_active: boolean
+  status: 'pending' | 'approved' | 'rejected'
+  review_note: string | null
   created_at: string
+  approved_at: string | null
 }
 
 /**

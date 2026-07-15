@@ -17,7 +17,7 @@ import Toast from '../../../../components/ui/Toast'
 import LoadingOverlay from '../../../../components/ui/LoadingOverlay'
 import { applyDashboardTheme, getDashboardThemeKey } from '../../../../components/dashboard/DashboardThemeProvider'
 import { useToast } from '../../../../lib/hooks/useToast'
-import { addLoginReview, changePassword, logoutFromSettings, setLoginReviewActive, submitSubscriptionPayment, updateBusinessProfile } from './actions'
+import { changePassword, initiateSubscriptionStkPush, logoutFromSettings, submitOwnerLoginReview, submitSubscriptionPayment, updateBusinessProfile } from './actions'
 import type { BusinessSettingsRow, FormState, LoginReviewRow, SubscriptionPaymentRequestRow, SubscriptionRow, UserProfileRow } from './types'
 
 /**
@@ -50,12 +50,6 @@ const PLAN_OPTIONS: PlanOption[] = [
   { key: 'growth', label: 'Growth', monthlyAmount: 5000, branchLimit: 'Up to 10 branches' },
   { key: 'enterprise', label: 'Enterprise', monthlyAmount: 12000, branchLimit: 'Unlimited branches' },
 ]
-
-const REVIEW_ROLE_LABELS: Record<LoginReviewRow['role'], string> = {
-  owner: 'Owner',
-  admin: 'Admin',
-  employee: 'Employee',
-}
 
 /**
  * Shared input styling for settings forms.
@@ -440,18 +434,27 @@ function AccountSecuritySection({ ownerProfile }: { ownerProfile: UserProfileRow
   )
 }
 
+function reviewStatusBadgeVariant(status: LoginReviewRow['status']) {
+  if (status === 'approved') return 'success'
+  if (status === 'rejected') return 'danger'
+  return 'warning'
+}
+
+function reviewStatusLabel(status: LoginReviewRow['status']) {
+  if (status === 'approved') return 'Approved'
+  if (status === 'rejected') return 'Rejected'
+  return 'Pending approval'
+}
+
 /**
- * Login review management shown to owners.
+ * Owner review submission shown in settings.
  */
 function LoginReviewsSection({ reviews }: { reviews: LoginReviewRow[] }) {
   const router = useRouter()
-  const [role, setRole] = useState<LoginReviewRow['role']>('owner')
-  const [reviewerName, setReviewerName] = useState('')
   const [reviewerTitle, setReviewerTitle] = useState('')
   const [quote, setQuote] = useState('')
-  const [sortOrder, setSortOrder] = useState('100')
   const { toast, toastState, dismiss } = useToast()
-  const [state, action, isPending] = useActionState<FormState, FormData>(addLoginReview, {
+  const [state, action, isPending] = useActionState<FormState, FormData>(submitOwnerLoginReview, {
     error: null,
     success: false,
   })
@@ -462,11 +465,9 @@ function LoginReviewsSection({ reviews }: { reviews: LoginReviewRow[] }) {
 
     if (previousPending.current && !isPending) {
       if (state.success) {
-        toast.success('Login review added')
-        setReviewerName('')
+        toast.success('Review submitted for platform approval')
         setReviewerTitle('')
         setQuote('')
-        setSortOrder('100')
         refreshTimer = setTimeout(() => {
           router.refresh()
         }, 0)
@@ -487,11 +488,8 @@ function LoginReviewsSection({ reviews }: { reviews: LoginReviewRow[] }) {
     event.preventDefault()
 
     const formData = new FormData()
-    formData.set('role', role)
-    formData.set('reviewerName', reviewerName)
     formData.set('reviewerTitle', reviewerTitle)
     formData.set('quote', quote)
-    formData.set('sortOrder', sortOrder)
 
     startTransition(() => {
       action(formData)
@@ -500,7 +498,7 @@ function LoginReviewsSection({ reviews }: { reviews: LoginReviewRow[] }) {
 
   return (
     <>
-      {isPending && <LoadingOverlay message="Adding login review..." />}
+      {isPending && <LoadingOverlay message="Submitting review..." />}
       {toastState && (
         <Toast
           message={toastState.message}
@@ -511,64 +509,22 @@ function LoginReviewsSection({ reviews }: { reviews: LoginReviewRow[] }) {
       )}
 
       <Card padding="md">
-        <CardHeader title="Login reviews" />
+        <CardHeader title="My login review" />
         <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 0, marginBottom: 16 }}>
-          Add role-specific reviews shown on the login page before users sign in.
+          Share a short owner review. It appears on the owner login page only after the Retivox platform team approves it.
         </p>
 
         <form onSubmit={onSubmit}>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <label style={{ fontSize: 13 }}>
               <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>
-                Review for
-              </span>
-              <select
-                value={role}
-                onChange={(event) => setRole(event.target.value as LoginReviewRow['role'])}
-                required
-                style={inputStyle}
-              >
-                <option value="owner">Owner login</option>
-                <option value="admin">Admin login</option>
-                <option value="employee">Employee login</option>
-              </select>
-            </label>
-
-            <label style={{ fontSize: 13 }}>
-              <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>
-                Sort order
-              </span>
-              <input
-                type="number"
-                min="0"
-                max="10000"
-                value={sortOrder}
-                onChange={(event) => setSortOrder(event.target.value)}
-                style={inputStyle}
-              />
-            </label>
-
-            <label style={{ fontSize: 13 }}>
-              <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>
-                Reviewer name
-              </span>
-              <input
-                value={reviewerName}
-                onChange={(event) => setReviewerName(event.target.value)}
-                required
-                style={inputStyle}
-              />
-            </label>
-
-            <label style={{ fontSize: 13 }}>
-              <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>
-                Reviewer title
+                Your display title
               </span>
               <input
                 value={reviewerTitle}
                 onChange={(event) => setReviewerTitle(event.target.value)}
                 required
-                placeholder="Owner, Branch Admin, Employee..."
+                placeholder="Owner, Founder, Retail operator..."
                 style={inputStyle}
               />
             </label>
@@ -616,18 +572,18 @@ function LoginReviewsSection({ reviews }: { reviews: LoginReviewRow[] }) {
             disabled={isPending}
             style={{ padding: '10px 20px', borderRadius: 8, marginTop: 16, opacity: isPending ? 0.8 : 1 }}
           >
-            {isPending ? 'Adding review...' : 'Add review'}
+            {isPending ? 'Submitting review...' : 'Submit review for approval'}
           </button>
         </form>
 
         <div style={{ borderTop: '1px solid var(--color-border)', marginTop: 20, paddingTop: 18 }}>
           <p style={{ fontSize: 14, fontWeight: 600, color: 'var(--color-text-primary)', marginTop: 0 }}>
-            Existing reviews
+            My submitted reviews
           </p>
 
           {reviews.length === 0 ? (
             <p style={{ fontSize: 13, color: 'var(--color-text-muted)', margin: 0 }}>
-              No reviews have been added yet.
+              You have not submitted a review yet.
             </p>
           ) : (
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -642,10 +598,12 @@ function LoginReviewsSection({ reviews }: { reviews: LoginReviewRow[] }) {
                   }}
                 >
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <Badge variant={review.is_active ? 'success' : 'muted'}>
-                      {review.is_active ? 'Active' : 'Hidden'}
+                    <Badge variant={reviewStatusBadgeVariant(review.status)}>
+                      {reviewStatusLabel(review.status)}
                     </Badge>
-                    <Badge variant="info">{REVIEW_ROLE_LABELS[review.role]}</Badge>
+                    {review.status === 'approved' && (
+                      <Badge variant="info">Visible on owner login</Badge>
+                    )}
                   </div>
                   <p style={{ fontSize: 14, color: 'var(--color-text-primary)', lineHeight: 1.55, marginTop: 12 }}>
                     &ldquo;{review.quote}&rdquo;
@@ -654,20 +612,29 @@ function LoginReviewsSection({ reviews }: { reviews: LoginReviewRow[] }) {
                     {review.reviewer_name}
                   </p>
                   <p style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 0 }}>
-                    {review.reviewer_title} · Sort {review.sort_order}
+                    {review.reviewer_title} - Submitted {formatDateLabel(review.created_at)}
                   </p>
 
-                  <form action={setLoginReviewActive}>
-                    <input type="hidden" name="reviewId" value={review.id} />
-                    <input type="hidden" name="isActive" value={review.is_active ? 'false' : 'true'} />
-                    <button
-                      type="submit"
-                      className={review.is_active ? 'btn-outline' : 'btn-primary'}
-                      style={{ padding: '8px 14px', borderRadius: 8, marginTop: 10 }}
+                  {review.approved_at && (
+                    <p style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 6, marginBottom: 0 }}>
+                      Approved {formatDateLabel(review.approved_at)}
+                    </p>
+                  )}
+                  {review.review_note && (
+                    <p
+                      style={{
+                        border: '1px solid var(--color-border)',
+                        borderRadius: 8,
+                        color: 'var(--color-text-muted)',
+                        fontSize: 12,
+                        lineHeight: 1.5,
+                        marginTop: 10,
+                        padding: '8px 10px',
+                      }}
                     >
-                      {review.is_active ? 'Hide review' : 'Show review'}
-                    </button>
-                  </form>
+                      Platform note: {review.review_note}
+                    </p>
+                  )}
                 </div>
               ))}
             </div>
@@ -694,12 +661,18 @@ function SubscriptionSection({
   const [paymentMethod, setPaymentMethod] = useState<SubscriptionPaymentRequestRow['payment_method']>('mpesa_manual')
   const [referenceCode, setReferenceCode] = useState('')
   const [payerPhone, setPayerPhone] = useState('')
+  const [stkPhone, setStkPhone] = useState('')
   const { toast, toastState, dismiss } = useToast()
   const [state, action, isPending] = useActionState<FormState, FormData>(submitSubscriptionPayment, {
     error: null,
     success: false,
   })
+  const [stkState, stkAction, isStkPending] = useActionState<FormState, FormData>(initiateSubscriptionStkPush, {
+    error: null,
+    success: false,
+  })
   const previousPending = useRef(isPending)
+  const previousStkPending = useRef(isStkPending)
   const activePlan = subscription?.plan ?? business.subscription_plan
   const activeStatus = subscription?.status ?? business.subscription_status
   const activeCurrency = subscription?.currency ?? business.currency
@@ -728,6 +701,29 @@ function SubscriptionSection({
     }
   }, [isPending, router, state.error, state.success, toast])
 
+  useEffect(() => {
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null
+
+    if (previousStkPending.current && !isStkPending) {
+      if (stkState.success) {
+        toast.success('M-Pesa prompt sent. Complete it on your phone.')
+        setStkPhone('')
+        refreshTimer = setTimeout(() => {
+          router.refresh()
+        }, 0)
+      } else if (stkState.error) {
+        toast.error(stkState.error)
+      }
+    }
+
+    previousStkPending.current = isStkPending
+    return () => {
+      if (refreshTimer) {
+        clearTimeout(refreshTimer)
+      }
+    }
+  }, [isStkPending, router, stkState.error, stkState.success, toast])
+
   const onSubmitPayment = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
 
@@ -741,9 +737,20 @@ function SubscriptionSection({
     })
   }
 
+  const onSubmitStk = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    const formData = new FormData()
+    formData.set('phone', stkPhone)
+
+    startTransition(() => {
+      stkAction(formData)
+    })
+  }
+
   return (
     <>
-    {isPending && <LoadingOverlay message="Submitting payment reference..." />}
+    {(isPending || isStkPending) && <LoadingOverlay message={isStkPending ? 'Sending M-Pesa prompt...' : 'Submitting payment reference...'} />}
     {toastState && (
       <Toast
         message={toastState.message}
@@ -840,6 +847,54 @@ function SubscriptionSection({
             </p>
           </div>
           <Badge variant="info">Manual verification</Badge>
+        </div>
+
+        <form
+          onSubmit={onSubmitStk}
+          className="rounded-xl"
+          style={{
+            border: '1px solid var(--color-success)',
+            backgroundColor: 'var(--color-success-light)',
+            padding: 14,
+            marginTop: 16,
+          }}
+        >
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_auto] md:items-end">
+            <label style={{ fontSize: 13 }}>
+              <span style={{ display: 'block', marginBottom: 6, fontWeight: 700, color: 'var(--color-text-primary)' }}>
+                Pay with M-Pesa STK Push
+              </span>
+              <input
+                value={stkPhone}
+                onChange={(event) => setStkPhone(event.target.value)}
+                placeholder="07XXXXXXXX"
+                required
+                style={inputStyle}
+              />
+            </label>
+            <button
+              type="submit"
+              className="btn-success"
+              disabled={isStkPending}
+              style={{ padding: '11px 18px', borderRadius: 8, opacity: isStkPending ? 0.8 : 1 }}
+            >
+              {isStkPending ? 'Sending...' : `Pay ${formatMoney(Number(subscription?.monthly_amount ?? 200), activeCurrency)}`}
+            </button>
+          </div>
+          {stkState.error && (
+            <p style={{ margin: '10px 0 0', fontSize: 13, color: 'var(--color-danger)' }}>
+              {stkState.error}
+            </p>
+          )}
+          <p style={{ margin: '10px 0 0', fontSize: 12, color: 'var(--color-text-muted)' }}>
+            You will receive an M-Pesa prompt on this phone. After payment, Daraja confirms it automatically.
+          </p>
+        </form>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 16 }}>
+          <div style={{ height: 1, backgroundColor: 'var(--color-border)', flex: 1 }} />
+          <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>Manual fallback</span>
+          <div style={{ height: 1, backgroundColor: 'var(--color-border)', flex: 1 }} />
         </div>
 
         <form onSubmit={onSubmitPayment} style={{ marginTop: 16 }}>

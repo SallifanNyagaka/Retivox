@@ -12,7 +12,9 @@ import { z } from 'zod'
 import { createBusinessSchema, GlobalRole } from '@smartretail/shared'
 import { requireRole } from '../../../../lib/auth/helpers'
 import { createClient } from '../../../../lib/supabase/server'
+import { createServiceRoleClient } from '../../../../lib/supabase/admin'
 import logger from '../../../../lib/logger'
+import { initiateDarajaStkPush, normalizeKenyanPhone } from '../../../../lib/payments/daraja'
 import type { BusinessSettingsRow, FormState, UserProfileRow } from './types'
 
 /**
@@ -36,16 +38,8 @@ const changePasswordSchema = z
   })
 
 const loginReviewSchema = z.object({
-  role: z.enum(['owner', 'admin', 'employee']),
   quote: z.string().min(10, 'Review must be at least 10 characters').max(600, 'Review is too long'),
-  reviewerName: z.string().min(2, 'Reviewer name is required').max(120, 'Reviewer name is too long'),
-  reviewerTitle: z.string().min(2, 'Reviewer title is required').max(160, 'Reviewer title is too long'),
-  sortOrder: z.coerce.number().int().min(0).max(10000).default(100),
-})
-
-const loginReviewStatusSchema = z.object({
-  reviewId: z.string().uuid(),
-  isActive: z.enum(['true', 'false']).transform((value) => value === 'true'),
+  reviewerTitle: z.string().min(2, 'Review title is required').max(160, 'Review title is too long'),
 })
 
 const subscriptionPaymentSchema = z.object({
@@ -54,20 +48,16 @@ const subscriptionPaymentSchema = z.object({
   payerPhone: z.string().max(32, 'Phone number is too long').optional(),
 })
 
+const darajaPaymentSchema = z.object({
+  phone: z.string().min(9, 'Enter the M-Pesa phone number').max(20, 'Phone number is too long'),
+})
+
 /**
  * Safely reads a trimmed string value from FormData.
  */
 function getString(formData: FormData, key: string): string {
   const value = formData.get(key)
   return typeof value === 'string' ? value.trim() : ''
-}
-
-function revalidateReviewSurfaces() {
-  revalidatePath('/dashboard/owner/settings')
-  revalidatePath('/login')
-  revalidatePath('/admin/login')
-  revalidatePath('/employee/login')
-  revalidatePath('/api/login-reviews')
 }
 
 /**
@@ -254,15 +244,12 @@ export async function changePassword(_prevState: FormState, formData: FormData):
 }
 
 /**
- * Adds a role-specific review shown on the login page.
+ * Submits the current owner's login review for platform approval.
  */
-export async function addLoginReview(_prevState: FormState, formData: FormData): Promise<FormState> {
+export async function submitOwnerLoginReview(_prevState: FormState, formData: FormData): Promise<FormState> {
   const validation = loginReviewSchema.safeParse({
-    role: getString(formData, 'role'),
     quote: getString(formData, 'quote'),
-    reviewerName: getString(formData, 'reviewerName'),
     reviewerTitle: getString(formData, 'reviewerTitle'),
-    sortOrder: getString(formData, 'sortOrder') || '100',
   })
 
   if (!validation.success) {
@@ -273,90 +260,22 @@ export async function addLoginReview(_prevState: FormState, formData: FormData):
 
   try {
     const supabase = await createClient()
-    const { role, quote, reviewerName, reviewerTitle, sortOrder } = validation.data
-
-    const { data, error } = await supabase
-      .from('login_reviews')
-      .insert({
-        role,
-        quote,
-        reviewer_name: reviewerName,
-        reviewer_title: reviewerTitle,
-        sort_order: sortOrder,
-        is_active: true,
-      })
-      .select('id')
-      .single()
+    const { quote, reviewerTitle } = validation.data
+    const { error } = await supabase.rpc('owner_submit_login_review', {
+      p_quote: quote,
+      p_reviewer_title: reviewerTitle,
+    })
 
     if (error) {
-      logger.error('addLoginReview: insert failed', { actor: profile.id, error })
-      return { success: false, error: error.message ?? 'Unable to add review' }
+      logger.error('submitOwnerLoginReview: insert failed', { actor: profile.id, error })
+      return { success: false, error: error.message ?? 'Unable to submit review' }
     }
 
-    const businessId = profile.business_id
-    if (businessId) {
-      const { error: auditError } = await supabase.from('audit_logs').insert({
-        business_id: businessId,
-        actor_id: profile.id,
-        entity_type: 'login_review',
-        entity_id: data.id,
-        action: 'created',
-        old_value: null,
-        new_value: {
-          role,
-          reviewer_name: reviewerName,
-          reviewer_title: reviewerTitle,
-          sort_order: sortOrder,
-        },
-      })
-
-      if (auditError) {
-        logger.error('addLoginReview: audit insert failed', { actor: profile.id, reviewId: data.id, error: auditError })
-      }
-    }
-
-    revalidateReviewSurfaces()
+    revalidatePath('/dashboard/owner/settings')
     return { success: true, error: null }
   } catch (error: unknown) {
-    logger.error('addLoginReview: unexpected error', { actor: profile.id, error })
+    logger.error('submitOwnerLoginReview: unexpected error', { actor: profile.id, error })
     return { success: false, error: error instanceof Error ? error.message : 'Server error' }
-  }
-}
-
-/**
- * Shows or hides an existing login review without deleting it.
- */
-export async function setLoginReviewActive(formData: FormData): Promise<void> {
-  const validation = loginReviewStatusSchema.safeParse({
-    reviewId: getString(formData, 'reviewId'),
-    isActive: getString(formData, 'isActive'),
-  })
-
-  if (!validation.success) {
-    return
-  }
-
-  const profile = await requireRole([GlobalRole.Owner])
-
-  try {
-    const supabase = await createClient()
-    const { error } = await supabase
-      .from('login_reviews')
-      .update({ is_active: validation.data.isActive })
-      .eq('id', validation.data.reviewId)
-
-    if (error) {
-      logger.error('setLoginReviewActive: update failed', {
-        actor: profile.id,
-        reviewId: validation.data.reviewId,
-        error,
-      })
-      return
-    }
-
-    revalidateReviewSurfaces()
-  } catch (error: unknown) {
-    logger.error('setLoginReviewActive: unexpected error', { actor: profile.id, error })
   }
 }
 
@@ -401,6 +320,146 @@ export async function submitSubscriptionPayment(_prevState: FormState, formData:
   } catch (error: unknown) {
     logger.error('submitSubscriptionPayment: unexpected error', { businessId, userId: profile.id, error })
     return { success: false, error: error instanceof Error ? error.message : 'Server error' }
+  }
+}
+
+/**
+ * Initiates an M-Pesa STK Push for the current owner subscription.
+ */
+export async function initiateSubscriptionStkPush(_prevState: FormState, formData: FormData): Promise<FormState> {
+  const validation = darajaPaymentSchema.safeParse({
+    phone: getString(formData, 'phone'),
+  })
+
+  if (!validation.success) {
+    return { success: false, error: validation.error.errors[0]?.message ?? 'Invalid phone number' }
+  }
+
+  const profile = await requireRole([GlobalRole.Owner])
+  const businessId = profile.business_id
+
+  if (!businessId) {
+    logger.error('initiateSubscriptionStkPush: missing business id', { userId: profile.id })
+    return { success: false, error: 'Business context missing' }
+  }
+
+  let normalizedPhone = ''
+
+  try {
+    normalizedPhone = normalizeKenyanPhone(validation.data.phone)
+  } catch (error: unknown) {
+    return { success: false, error: error instanceof Error ? error.message : 'Invalid phone number' }
+  }
+
+  const serviceClient = createServiceRoleClient()
+  let paymentRequestId: string | null = null
+
+  try {
+    const existingSubscriptionResponse = await serviceClient
+      .from('subscriptions')
+      .select('id, monthly_amount, currency')
+      .eq('business_id', businessId)
+      .maybeSingle()
+
+    if (existingSubscriptionResponse.error) {
+      logger.error('initiateSubscriptionStkPush: subscription lookup failed', { businessId, error: existingSubscriptionResponse.error })
+      return { success: false, error: existingSubscriptionResponse.error.message ?? 'Unable to load subscription payment' }
+    }
+
+    const subscriptionResponse = existingSubscriptionResponse.data
+      ? existingSubscriptionResponse
+      : await serviceClient
+          .from('subscriptions')
+          .insert({
+            business_id: businessId,
+            plan: 'starter',
+            status: 'active',
+            branch_count: 1,
+            monthly_amount: 200,
+            currency: 'KES',
+            payment_provider: 'daraja',
+          })
+          .select('id, monthly_amount, currency')
+          .single()
+
+    const subscriptionData = subscriptionResponse.data
+    const subscriptionError = subscriptionResponse.error
+
+    if (subscriptionError || !subscriptionData) {
+      logger.error('initiateSubscriptionStkPush: subscription upsert failed', { businessId, error: subscriptionError })
+      return { success: false, error: subscriptionError?.message ?? 'Unable to prepare subscription payment' }
+    }
+
+    const amount = Math.max(1, Number(subscriptionData.monthly_amount ?? 200))
+    const currency = String(subscriptionData.currency ?? 'KES')
+    const referenceCode = `STK-${Date.now()}`
+
+    const { data: paymentData, error: paymentError } = await serviceClient
+      .from('subscription_payment_requests')
+      .insert({
+        business_id: businessId,
+        subscription_id: subscriptionData.id,
+        submitted_by: profile.id,
+        amount,
+        currency,
+        payment_method: 'mpesa_manual',
+        reference_code: referenceCode,
+        payer_phone: normalizedPhone,
+        status: 'pending',
+        provider: 'daraja',
+      })
+      .select('id')
+      .single()
+
+    if (paymentError || !paymentData) {
+      logger.error('initiateSubscriptionStkPush: payment request insert failed', { businessId, error: paymentError })
+      return { success: false, error: paymentError?.message ?? 'Unable to create payment request' }
+    }
+
+    paymentRequestId = paymentData.id
+
+    const response = await initiateDarajaStkPush({
+      phone: normalizedPhone,
+      amount,
+      accountReference: 'RETIVOX',
+      transactionDescription: 'Retivox subscription',
+    })
+
+    if (!response.CheckoutRequestID) {
+      throw new Error(response.ResponseDescription ?? 'Daraja did not return a checkout request id')
+    }
+
+    const { error: updateError } = await serviceClient
+      .from('subscription_payment_requests')
+      .update({
+        provider_merchant_request_id: response.MerchantRequestID ?? null,
+        provider_checkout_request_id: response.CheckoutRequestID,
+        provider_result_description: response.CustomerMessage ?? response.ResponseDescription ?? null,
+        raw_provider_payload: response,
+      })
+      .eq('id', paymentRequestId)
+
+    if (updateError) {
+      throw new Error(updateError.message)
+    }
+
+    revalidatePath('/dashboard/owner/settings')
+    return { success: true, error: null }
+  } catch (error: unknown) {
+    if (paymentRequestId) {
+      await serviceClient
+        .from('subscription_payment_requests')
+        .update({
+          status: 'rejected',
+          provider_result_description: error instanceof Error ? error.message : 'STK Push failed',
+          review_note: error instanceof Error ? error.message : 'STK Push failed',
+          reviewed_at: new Date().toISOString(),
+        })
+        .eq('id', paymentRequestId)
+    }
+
+    logger.error('initiateSubscriptionStkPush: failed', { businessId, userId: profile.id, error })
+    return { success: false, error: error instanceof Error ? error.message : 'Unable to send M-Pesa prompt' }
   }
 }
 

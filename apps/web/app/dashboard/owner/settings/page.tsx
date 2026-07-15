@@ -54,12 +54,9 @@ export default async function SettingsPage() {
       supabase.rpc('owner_my_subscription_payment_requests', {
         p_limit: 10,
       }),
-      supabase
-        .from('login_reviews')
-        .select('id, role, quote, reviewer_name, reviewer_title, sort_order, is_active, created_at')
-        .order('role', { ascending: true })
-        .order('sort_order', { ascending: true })
-        .order('created_at', { ascending: false }),
+      supabase.rpc('owner_my_login_reviews', {
+        p_limit: 10,
+      }),
     ])
 
     if (businessResponse.error) {
