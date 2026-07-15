@@ -173,13 +173,17 @@ export async function registerBusinessAndOwner(
     }
   }
 
-  // Insert trial subscription
+  // Insert starter subscription. Payment collection starts manually in owner settings.
   const { error: subscriptionError } = await adminClient.from('subscriptions').insert({
     business_id: businessId,
-    plan: 'trial',
+    plan: 'starter',
     status: 'active',
     branch_count: 1,
-    monthly_amount: 0,
+    monthly_amount: 200,
+    currency: 'KES',
+    payment_provider: 'manual',
+    current_period_start: new Date().toISOString(),
+    current_period_end: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
   })
 
   if (subscriptionError) {

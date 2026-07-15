@@ -42,6 +42,22 @@ export type SubscriptionRow = {
 }
 
 /**
+ * Manual subscription payment request submitted by an owner.
+ */
+export type SubscriptionPaymentRequestRow = {
+  id: string
+  amount: number
+  currency: string
+  payment_method: 'mpesa_manual' | 'bank_transfer' | 'cash_deposit' | 'other'
+  reference_code: string
+  payer_phone: string | null
+  status: 'pending' | 'verified' | 'rejected'
+  review_note: string | null
+  submitted_at: string
+  reviewed_at: string | null
+}
+
+/**
  * Review row displayed on the role-specific login panels.
  */
 export type LoginReviewRow = {

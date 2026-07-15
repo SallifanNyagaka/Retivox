@@ -48,6 +48,12 @@ const loginReviewStatusSchema = z.object({
   isActive: z.enum(['true', 'false']).transform((value) => value === 'true'),
 })
 
+const subscriptionPaymentSchema = z.object({
+  paymentMethod: z.enum(['mpesa_manual', 'bank_transfer', 'cash_deposit', 'other']),
+  referenceCode: z.string().min(3, 'Payment reference must be at least 3 characters').max(80, 'Payment reference is too long'),
+  payerPhone: z.string().max(32, 'Phone number is too long').optional(),
+})
+
 /**
  * Safely reads a trimmed string value from FormData.
  */
@@ -351,6 +357,50 @@ export async function setLoginReviewActive(formData: FormData): Promise<void> {
     revalidateReviewSurfaces()
   } catch (error: unknown) {
     logger.error('setLoginReviewActive: unexpected error', { actor: profile.id, error })
+  }
+}
+
+/**
+ * Submits a manual rental payment reference for Retivox verification.
+ */
+export async function submitSubscriptionPayment(_prevState: FormState, formData: FormData): Promise<FormState> {
+  const validation = subscriptionPaymentSchema.safeParse({
+    paymentMethod: getString(formData, 'paymentMethod') || 'mpesa_manual',
+    referenceCode: getString(formData, 'referenceCode'),
+    payerPhone: getString(formData, 'payerPhone') || undefined,
+  })
+
+  if (!validation.success) {
+    return { success: false, error: validation.error.errors[0]?.message ?? 'Invalid payment details' }
+  }
+
+  const profile = await requireRole([GlobalRole.Owner])
+  const businessId = profile.business_id
+
+  if (!businessId) {
+    logger.error('submitSubscriptionPayment: missing business id', { userId: profile.id })
+    return { success: false, error: 'Business context missing' }
+  }
+
+  try {
+    const supabase = await createClient()
+    const { error } = await supabase.rpc('owner_submit_subscription_payment', {
+      p_reference_code: validation.data.referenceCode,
+      p_payment_method: validation.data.paymentMethod,
+      p_payer_phone: validation.data.payerPhone ?? null,
+    })
+
+    if (error) {
+      logger.error('submitSubscriptionPayment: rpc failed', { businessId, userId: profile.id, error })
+      return { success: false, error: error.message ?? 'Unable to submit payment reference' }
+    }
+
+    revalidatePath('/dashboard/owner/settings')
+    logger.info('Subscription payment request submitted', { businessId, userId: profile.id })
+    return { success: true, error: null }
+  } catch (error: unknown) {
+    logger.error('submitSubscriptionPayment: unexpected error', { businessId, userId: profile.id, error })
+    return { success: false, error: error instanceof Error ? error.message : 'Server error' }
   }
 }
 

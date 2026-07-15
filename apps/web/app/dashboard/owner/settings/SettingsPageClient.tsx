@@ -17,8 +17,8 @@ import Toast from '../../../../components/ui/Toast'
 import LoadingOverlay from '../../../../components/ui/LoadingOverlay'
 import { applyDashboardTheme, getDashboardThemeKey } from '../../../../components/dashboard/DashboardThemeProvider'
 import { useToast } from '../../../../lib/hooks/useToast'
-import { addLoginReview, changePassword, logoutFromSettings, setLoginReviewActive, updateBusinessProfile } from './actions'
-import type { BusinessSettingsRow, FormState, LoginReviewRow, SubscriptionRow, UserProfileRow } from './types'
+import { addLoginReview, changePassword, logoutFromSettings, setLoginReviewActive, submitSubscriptionPayment, updateBusinessProfile } from './actions'
+import type { BusinessSettingsRow, FormState, LoginReviewRow, SubscriptionPaymentRequestRow, SubscriptionRow, UserProfileRow } from './types'
 
 /**
  * Props for the settings page client.
@@ -27,6 +27,7 @@ type Props = {
   business: BusinessSettingsRow
   ownerProfile: UserProfileRow
   subscription: SubscriptionRow | null
+  subscriptionPaymentRequests: SubscriptionPaymentRequestRow[]
   loginReviews: LoginReviewRow[]
 }
 
@@ -45,7 +46,7 @@ type PlanOption = {
  */
 const PLAN_OPTIONS: PlanOption[] = [
   { key: 'trial', label: 'Trial', monthlyAmount: 0, branchLimit: 'Free starter workspace' },
-  { key: 'starter', label: 'Starter', monthlyAmount: 2000, branchLimit: 'Up to 3 branches' },
+  { key: 'starter', label: 'Starter', monthlyAmount: 200, branchLimit: 'MVP rental plan' },
   { key: 'growth', label: 'Growth', monthlyAmount: 5000, branchLimit: 'Up to 10 branches' },
   { key: 'enterprise', label: 'Enterprise', monthlyAmount: 12000, branchLimit: 'Unlimited branches' },
 ]
@@ -106,6 +107,19 @@ function formatStatusLabel(status: string) {
     .split('_')
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(' ')
+}
+
+function getPaymentMethodLabel(method: SubscriptionPaymentRequestRow['payment_method']) {
+  if (method === 'mpesa_manual') return 'M-Pesa'
+  if (method === 'bank_transfer') return 'Bank transfer'
+  if (method === 'cash_deposit') return 'Cash deposit'
+  return 'Other'
+}
+
+function getPaymentStatusVariant(status: SubscriptionPaymentRequestRow['status']): 'success' | 'warning' | 'danger' | 'muted' {
+  if (status === 'verified') return 'success'
+  if (status === 'rejected') return 'danger'
+  return 'warning'
 }
 
 /**
@@ -670,15 +684,74 @@ function LoginReviewsSection({ reviews }: { reviews: LoginReviewRow[] }) {
 function SubscriptionSection({
   business,
   subscription,
+  paymentRequests,
 }: {
   business: BusinessSettingsRow
   subscription: SubscriptionRow | null
+  paymentRequests: SubscriptionPaymentRequestRow[]
 }) {
+  const router = useRouter()
+  const [paymentMethod, setPaymentMethod] = useState<SubscriptionPaymentRequestRow['payment_method']>('mpesa_manual')
+  const [referenceCode, setReferenceCode] = useState('')
+  const [payerPhone, setPayerPhone] = useState('')
+  const { toast, toastState, dismiss } = useToast()
+  const [state, action, isPending] = useActionState<FormState, FormData>(submitSubscriptionPayment, {
+    error: null,
+    success: false,
+  })
+  const previousPending = useRef(isPending)
   const activePlan = subscription?.plan ?? business.subscription_plan
   const activeStatus = subscription?.status ?? business.subscription_status
-  const activeCurrency = business.currency
+  const activeCurrency = subscription?.currency ?? business.currency
+
+  useEffect(() => {
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null
+
+    if (previousPending.current && !isPending) {
+      if (state.success) {
+        toast.success('Payment reference submitted for verification')
+        setReferenceCode('')
+        setPayerPhone('')
+        refreshTimer = setTimeout(() => {
+          router.refresh()
+        }, 0)
+      } else if (state.error) {
+        toast.error(state.error)
+      }
+    }
+
+    previousPending.current = isPending
+    return () => {
+      if (refreshTimer) {
+        clearTimeout(refreshTimer)
+      }
+    }
+  }, [isPending, router, state.error, state.success, toast])
+
+  const onSubmitPayment = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    const formData = new FormData()
+    formData.set('paymentMethod', paymentMethod)
+    formData.set('referenceCode', referenceCode)
+    formData.set('payerPhone', payerPhone)
+
+    startTransition(() => {
+      action(formData)
+    })
+  }
 
   return (
+    <>
+    {isPending && <LoadingOverlay message="Submitting payment reference..." />}
+    {toastState && (
+      <Toast
+        message={toastState.message}
+        type={toastState.type}
+        duration={toastState.duration}
+        onDismiss={dismiss}
+      />
+    )}
     <Card padding="md">
       <CardHeader title="Subscription" />
       <div
@@ -747,7 +820,151 @@ function SubscriptionSection({
           )
         })}
       </div>
+
+      <div
+        className="rounded-xl"
+        style={{
+          border: '1px solid var(--color-border)',
+          backgroundColor: 'var(--color-background)',
+          padding: 16,
+          marginTop: 18,
+        }}
+      >
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p style={{ fontSize: 15, fontWeight: 700, color: 'var(--color-text-primary)', margin: 0 }}>
+              Submit rental payment
+            </p>
+            <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 6 }}>
+              Pay {formatMoney(Number(subscription?.monthly_amount ?? 200), activeCurrency)} for this month, then enter the transaction reference here.
+            </p>
+          </div>
+          <Badge variant="info">Manual verification</Badge>
+        </div>
+
+        <form onSubmit={onSubmitPayment} style={{ marginTop: 16 }}>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <label style={{ fontSize: 13 }}>
+              <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>
+                Payment method
+              </span>
+              <select
+                value={paymentMethod}
+                onChange={(event) => setPaymentMethod(event.target.value as SubscriptionPaymentRequestRow['payment_method'])}
+                style={inputStyle}
+              >
+                <option value="mpesa_manual">M-Pesa</option>
+                <option value="bank_transfer">Bank transfer</option>
+                <option value="cash_deposit">Cash deposit</option>
+                <option value="other">Other</option>
+              </select>
+            </label>
+
+            <label style={{ fontSize: 13 }}>
+              <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>
+                Reference code
+              </span>
+              <input
+                value={referenceCode}
+                onChange={(event) => setReferenceCode(event.target.value.toUpperCase())}
+                placeholder="e.g. QG12ABC345"
+                required
+                style={inputStyle}
+              />
+            </label>
+
+            <label style={{ fontSize: 13 }}>
+              <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>
+                Phone / payer note
+              </span>
+              <input
+                value={payerPhone}
+                onChange={(event) => setPayerPhone(event.target.value)}
+                placeholder="Optional"
+                style={inputStyle}
+              />
+            </label>
+          </div>
+
+          {state.error && (
+            <div
+              style={{
+                backgroundColor: 'var(--color-danger-light)',
+                border: '1px solid var(--color-danger)',
+                color: 'var(--color-danger)',
+                borderRadius: 8,
+                padding: '12px 14px',
+                fontSize: 13,
+                marginTop: 14,
+              }}
+            >
+              {state.error}
+            </div>
+          )}
+
+          <button
+            type="submit"
+            className="btn-primary"
+            disabled={isPending}
+            style={{ padding: '10px 20px', borderRadius: 8, marginTop: 16, opacity: isPending ? 0.8 : 1 }}
+          >
+            {isPending ? 'Submitting...' : 'Submit payment reference'}
+          </button>
+        </form>
+      </div>
+
+      <div style={{ borderTop: '1px solid var(--color-border)', marginTop: 20, paddingTop: 18 }}>
+        <p style={{ fontSize: 14, fontWeight: 700, color: 'var(--color-text-primary)', marginTop: 0 }}>
+          Recent payment references
+        </p>
+        {paymentRequests.length === 0 ? (
+          <p style={{ fontSize: 13, color: 'var(--color-text-muted)', margin: 0 }}>
+            No rental payment references have been submitted yet.
+          </p>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderSpacing: 0 }}>
+              <thead>
+                <tr style={{ textAlign: 'left' }}>
+                  {['Date', 'Method', 'Reference', 'Amount', 'Status'].map((heading) => (
+                    <th key={heading} style={{ padding: 12, fontSize: 12, color: 'var(--color-text-muted)' }}>
+                      {heading}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {paymentRequests.map((request, index) => (
+                  <tr
+                    key={request.id}
+                    style={{ backgroundColor: index % 2 === 0 ? 'var(--color-background)' : 'var(--color-surface)' }}
+                  >
+                    <td style={{ padding: 12, fontSize: 13, color: 'var(--color-text-primary)' }}>
+                      {formatDateLabel(request.submitted_at)}
+                    </td>
+                    <td style={{ padding: 12, fontSize: 13, color: 'var(--color-text-primary)' }}>
+                      {getPaymentMethodLabel(request.payment_method)}
+                    </td>
+                    <td style={{ padding: 12, fontSize: 13, color: 'var(--color-text-primary)' }}>
+                      {request.reference_code}
+                    </td>
+                    <td style={{ padding: 12, fontSize: 13, color: 'var(--color-text-primary)' }}>
+                      {formatMoney(Number(request.amount), request.currency)}
+                    </td>
+                    <td style={{ padding: 12 }}>
+                      <Badge variant={getPaymentStatusVariant(request.status)}>
+                        {formatStatusLabel(request.status)}
+                      </Badge>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </Card>
+    </>
   )
 }
 
@@ -882,7 +1099,7 @@ function DangerZoneSection() {
 /**
  * Owner settings dashboard client component.
  */
-export default function SettingsPageClient({ business, ownerProfile, subscription, loginReviews }: Props) {
+export default function SettingsPageClient({ business, ownerProfile, subscription, subscriptionPaymentRequests, loginReviews }: Props) {
   return (
     <div className="flex flex-col gap-6" data-currency={business.currency}>
       {/* Page header */}
@@ -905,7 +1122,7 @@ export default function SettingsPageClient({ business, ownerProfile, subscriptio
       <BusinessProfileSection business={business} />
       <AccountSecuritySection ownerProfile={ownerProfile} />
       <LoginReviewsSection reviews={loginReviews} />
-      <SubscriptionSection business={business} subscription={subscription} />
+      <SubscriptionSection business={business} subscription={subscription} paymentRequests={subscriptionPaymentRequests} />
       <AppearanceSection userId={ownerProfile.id} />
       <DangerZoneSection />
     </div>
