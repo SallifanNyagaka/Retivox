@@ -24,6 +24,7 @@ import {
 } from '@smartretail/shared'
 import logger from '../logger'
 import { recordLoginAttempt } from '../platform/auth'
+import { createServiceRoleClient } from '../supabase/admin'
 
 /**
  * Form state returned by all server actions to the client.
@@ -264,6 +265,31 @@ export async function loginUser(
       failureReason: 'Account not found or deactivated',
     })
     return { error: 'Account not found or deactivated', success: false }
+  }
+
+  const serviceClient = createServiceRoleClient()
+  const { data: businessStatus } = await serviceClient
+    .from('businesses')
+    .select('is_active, platform_status, subscription_status')
+    .eq('id', profileData.business_id)
+    .maybeSingle()
+
+  if (
+    businessStatus &&
+    (businessStatus.is_active === false ||
+      businessStatus.platform_status === 'deactivated' ||
+      businessStatus.platform_status === 'deletion_scheduled')
+  ) {
+    await supabase.auth.signOut()
+    await recordLoginAttempt({
+      businessId: profileData.business_id,
+      email,
+      attemptedRole: profileData.global_role,
+      surface: 'tenant',
+      success: false,
+      failureReason: 'Business account deactivated by platform',
+    })
+    return { error: 'This business account has been deactivated. Contact Retivox support.', success: false }
   }
 
   logger.info('User logged in successfully', { email, role: profileData.global_role })

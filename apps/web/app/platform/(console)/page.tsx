@@ -1,4 +1,6 @@
 import Link from 'next/link'
+import type { ReactNode } from 'react'
+import { Building2, CreditCard, Moon, ShieldAlert, Tags } from 'lucide-react'
 import { Badge } from '../../../components/ui/Badge'
 import { Card, CardHeader } from '../../../components/ui/Card'
 import { createServiceRoleClient } from '../../../lib/supabase/admin'
@@ -49,7 +51,10 @@ function statusVariant(status: string): 'success' | 'warning' | 'danger' | 'mute
 
 export default async function PlatformOverviewPage() {
   const serviceClient = createServiceRoleClient()
-  const [businessesResponse, subscriptionsResponse, paymentsResponse, attemptsResponse] = await Promise.all([
+  const [businessCountResponse, businessesResponse, subscriptionsResponse, paymentsResponse, attemptsResponse] = await Promise.all([
+    serviceClient
+      .from('businesses')
+      .select('id', { count: 'exact', head: true }),
     serviceClient
       .from('businesses')
       .select('id, name, subscription_plan, subscription_status, created_at')
@@ -77,32 +82,39 @@ export default async function PlatformOverviewPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h1 style={{ margin: 0, fontSize: 24, fontWeight: 900, color: 'var(--color-text-primary)' }}>
-          Platform overview
-        </h1>
-        <p style={{ margin: '6px 0 0', fontSize: 14, color: 'var(--color-text-muted)' }}>
-          Operate Retivox subscriptions, businesses, payments, and security activity.
+      <section
+        className="rounded-3xl"
+        style={{
+          background: 'linear-gradient(135deg, #17201c 0%, #315342 62%, #d6a143 150%)',
+          color: '#fff8ec',
+          padding: 30,
+          boxShadow: '0 24px 70px rgba(23,32,28,0.2)',
+        }}
+      >
+        <p style={{ margin: 0, color: 'rgba(255,248,236,0.72)', fontSize: 12, fontWeight: 850, textTransform: 'uppercase' }}>
+          Retivox operations
         </p>
-      </div>
+        <h1 style={{ margin: '10px 0 0', fontSize: 36, fontWeight: 950, letterSpacing: '-0.055em' }}>
+          Platform command center
+        </h1>
+        <p style={{ margin: '10px 0 0', maxWidth: 760, fontSize: 14, lineHeight: 1.7, color: 'rgba(255,248,236,0.76)' }}>
+          Manage tenant accounts, package pricing, payment receiving details, dormant-account cleanup, login security, and published owner testimonials.
+        </p>
+      </section>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
-        <Card>
-          <p style={{ margin: 0, fontSize: 12, color: 'var(--color-text-muted)' }}>Businesses</p>
-          <p style={{ margin: '8px 0 0', fontSize: 26, fontWeight: 900, color: 'var(--color-text-primary)' }}>{businesses.length}</p>
-        </Card>
-        <Card>
-          <p style={{ margin: 0, fontSize: 12, color: 'var(--color-text-muted)' }}>MRR snapshot</p>
-          <p style={{ margin: '8px 0 0', fontSize: 26, fontWeight: 900, color: 'var(--color-text-primary)' }}>{formatMoney(monthlyTotal, 'KES')}</p>
-        </Card>
-        <Card>
-          <p style={{ margin: 0, fontSize: 12, color: 'var(--color-text-muted)' }}>Recent payments</p>
-          <p style={{ margin: '8px 0 0', fontSize: 26, fontWeight: 900, color: 'var(--color-text-primary)' }}>{payments.length}</p>
-        </Card>
-        <Card>
-          <p style={{ margin: 0, fontSize: 12, color: 'var(--color-text-muted)' }}>Failed logins</p>
-          <p style={{ margin: '8px 0 0', fontSize: 26, fontWeight: 900, color: 'var(--color-text-primary)' }}>{attemptsResponse.count ?? 0}</p>
-        </Card>
+        <MetricCard label="Businesses" value={businessCountResponse.count ?? businesses.length} />
+        <MetricCard label="MRR snapshot" value={formatMoney(monthlyTotal, 'KES')} />
+        <MetricCard label="Recent payments" value={payments.length} />
+        <MetricCard label="Failed logins" value={attemptsResponse.count ?? 0} />
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
+        <QuickAction href="/platform/businesses" label="Businesses" icon={<Building2 size={18} />} />
+        <QuickAction href="/platform/pricing" label="Pricing" icon={<Tags size={18} />} />
+        <QuickAction href="/platform/payments" label="M-Pesa" icon={<CreditCard size={18} />} />
+        <QuickAction href="/platform/dormant" label="Dormancy" icon={<Moon size={18} />} />
+        <QuickAction href="/platform/login-attempts" label="Security" icon={<ShieldAlert size={18} />} />
       </div>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
@@ -147,5 +159,36 @@ export default async function PlatformOverviewPage() {
         </Card>
       </div>
     </div>
+  )
+}
+
+function MetricCard({ label, value }: { label: string; value: string | number }) {
+  return (
+    <Card padding="md">
+      <p style={{ margin: 0, fontSize: 11, color: 'var(--color-text-muted)', fontWeight: 850, textTransform: 'uppercase' }}>{label}</p>
+      <p style={{ margin: '8px 0 0', fontSize: 28, fontWeight: 950, color: 'var(--color-text-primary)', letterSpacing: '-0.04em' }}>{value}</p>
+    </Card>
+  )
+}
+
+function QuickAction({ href, label, icon }: { href: string; label: string; icon: ReactNode }) {
+  return (
+    <Link
+      href={href}
+      className="flex items-center justify-between rounded-2xl"
+      style={{
+        backgroundColor: 'rgba(255,255,255,0.72)',
+        border: '1px solid rgba(31,45,39,0.1)',
+        color: '#24332c',
+        fontSize: 13,
+        fontWeight: 850,
+        padding: '14px 16px',
+        textDecoration: 'none',
+        boxShadow: '0 12px 34px rgba(31,45,39,0.08)',
+      }}
+    >
+      {label}
+      {icon}
+    </Link>
   )
 }

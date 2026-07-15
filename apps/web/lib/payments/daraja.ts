@@ -12,6 +12,8 @@
  * - DARAJA_TRANSACTION_TYPE=CustomerPayBillOnline
  */
 
+import { createServiceRoleClient } from '../supabase/admin'
+
 export type DarajaStkPushResponse = {
   MerchantRequestID?: string
   CheckoutRequestID?: string
@@ -32,25 +34,64 @@ type DarajaConfig = {
   transactionType: string
 }
 
-function getDarajaConfig(): DarajaConfig {
+type PlatformPaymentSettingsRow = {
+  environment: 'sandbox' | 'production'
+  business_shortcode: string
+  account_reference: string
+  transaction_type: string
+  callback_url: string
+  consumer_key: string | null
+  consumer_secret: string | null
+  passkey: string | null
+}
+
+async function getPlatformDarajaSettings(): Promise<PlatformPaymentSettingsRow | null> {
+  try {
+    const serviceClient = createServiceRoleClient()
+    const { data, error } = await serviceClient
+      .from('platform_payment_settings')
+      .select('environment, business_shortcode, account_reference, transaction_type, callback_url, consumer_key, consumer_secret, passkey')
+      .eq('provider', 'daraja')
+      .eq('is_active', true)
+      .order('updated_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    if (error) {
+      return null
+    }
+
+    return data as PlatformPaymentSettingsRow | null
+  } catch {
+    return null
+  }
+}
+
+async function getDarajaConfig(): Promise<DarajaConfig> {
+  const settings = await getPlatformDarajaSettings()
   const consumerKey = process.env.DARAJA_CONSUMER_KEY
   const consumerSecret = process.env.DARAJA_CONSUMER_SECRET
   const shortcode = process.env.DARAJA_SHORTCODE
   const passkey = process.env.DARAJA_PASSKEY
   const callbackUrl = process.env.DARAJA_CALLBACK_URL
+  const resolvedConsumerKey = settings?.consumer_key || consumerKey
+  const resolvedConsumerSecret = settings?.consumer_secret || consumerSecret
+  const resolvedShortcode = settings?.business_shortcode || shortcode
+  const resolvedPasskey = settings?.passkey || passkey
+  const resolvedCallbackUrl = settings?.callback_url || callbackUrl
 
-  if (!consumerKey || !consumerSecret || !shortcode || !passkey || !callbackUrl) {
-    throw new Error('Daraja is not configured. Add DARAJA_CONSUMER_KEY, DARAJA_CONSUMER_SECRET, DARAJA_SHORTCODE, DARAJA_PASSKEY, and DARAJA_CALLBACK_URL.')
+  if (!resolvedConsumerKey || !resolvedConsumerSecret || !resolvedShortcode || !resolvedPasskey || !resolvedCallbackUrl) {
+    throw new Error('Daraja is not configured. Add it in Platform > M-Pesa or set DARAJA_CONSUMER_KEY, DARAJA_CONSUMER_SECRET, DARAJA_SHORTCODE, DARAJA_PASSKEY, and DARAJA_CALLBACK_URL.')
   }
 
   return {
-    consumerKey,
-    consumerSecret,
-    shortcode,
-    passkey,
-    callbackUrl,
-    environment: process.env.DARAJA_ENV === 'production' ? 'production' : 'sandbox',
-    transactionType: process.env.DARAJA_TRANSACTION_TYPE || 'CustomerPayBillOnline',
+    consumerKey: resolvedConsumerKey,
+    consumerSecret: resolvedConsumerSecret,
+    shortcode: resolvedShortcode,
+    passkey: resolvedPasskey,
+    callbackUrl: resolvedCallbackUrl,
+    environment: settings?.environment ?? (process.env.DARAJA_ENV === 'production' ? 'production' : 'sandbox'),
+    transactionType: settings?.transaction_type || process.env.DARAJA_TRANSACTION_TYPE || 'CustomerPayBillOnline',
   }
 }
 
@@ -111,7 +152,7 @@ export async function initiateDarajaStkPush(input: {
   accountReference: string
   transactionDescription: string
 }): Promise<DarajaStkPushResponse> {
-  const config = getDarajaConfig()
+  const config = await getDarajaConfig()
   const baseUrl = getBaseUrl(config.environment)
   const accessToken = await getAccessToken(config)
   const timestamp = getTimestamp()
