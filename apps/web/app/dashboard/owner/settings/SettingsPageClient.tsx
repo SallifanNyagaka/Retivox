@@ -104,6 +104,7 @@ function formatStatusLabel(status: string) {
 }
 
 function getPaymentMethodLabel(method: SubscriptionPaymentRequestRow['payment_method']) {
+  if (method === 'mpesa_stk') return 'M-Pesa STK Push'
   if (method === 'mpesa_manual') return 'M-Pesa'
   if (method === 'bank_transfer') return 'Bank transfer'
   if (method === 'cash_deposit') return 'Cash deposit'
@@ -843,7 +844,7 @@ function SubscriptionSection({
               Submit rental payment
             </p>
             <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 6 }}>
-              Pay {formatMoney(Number(subscription?.monthly_amount ?? 200), activeCurrency)} for this month, then enter the transaction reference here.
+              Pay {formatMoney(Number(subscription?.monthly_amount ?? 200), activeCurrency)} for this month with an M-Pesa PayBill prompt or submit a manual reference.
             </p>
           </div>
           <Badge variant="info">Manual verification</Badge>
@@ -862,7 +863,7 @@ function SubscriptionSection({
           <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_auto] md:items-end">
             <label style={{ fontSize: 13 }}>
               <span style={{ display: 'block', marginBottom: 6, fontWeight: 700, color: 'var(--color-text-primary)' }}>
-                Pay with M-Pesa STK Push
+                Pay with M-Pesa PayBill prompt
               </span>
               <input
                 value={stkPhone}
@@ -887,7 +888,7 @@ function SubscriptionSection({
             </p>
           )}
           <p style={{ margin: '10px 0 0', fontSize: 12, color: 'var(--color-text-muted)' }}>
-            You will receive an M-Pesa prompt on this phone. After payment, Daraja confirms it automatically.
+            You will receive a Lipa na M-Pesa PayBill prompt on this phone. After payment, Daraja confirms it automatically.
           </p>
         </form>
 
@@ -970,7 +971,7 @@ function SubscriptionSection({
 
       <div style={{ borderTop: '1px solid var(--color-border)', marginTop: 20, paddingTop: 18 }}>
         <p style={{ fontSize: 14, fontWeight: 700, color: 'var(--color-text-primary)', marginTop: 0 }}>
-          Recent payment references
+          Recent subscription payments
         </p>
         {paymentRequests.length === 0 ? (
           <p style={{ fontSize: 13, color: 'var(--color-text-muted)', margin: 0 }}>
@@ -981,7 +982,7 @@ function SubscriptionSection({
             <table style={{ width: '100%', borderSpacing: 0 }}>
               <thead>
                 <tr style={{ textAlign: 'left' }}>
-                  {['Date', 'Method', 'Reference', 'Amount', 'Status'].map((heading) => (
+                  {['Date', 'Method', 'Reference / Receipt', 'Amount', 'Status'].map((heading) => (
                     <th key={heading} style={{ padding: 12, fontSize: 12, color: 'var(--color-text-muted)' }}>
                       {heading}
                     </th>
@@ -1001,10 +1002,17 @@ function SubscriptionSection({
                       {getPaymentMethodLabel(request.payment_method)}
                     </td>
                     <td style={{ padding: 12, fontSize: 13, color: 'var(--color-text-primary)' }}>
-                      {request.reference_code}
+                      <span style={{ display: 'block', fontWeight: 700 }}>
+                        {request.provider_receipt_number ?? request.reference_code}
+                      </span>
+                      {request.provider_checkout_request_id && (
+                        <span style={{ display: 'block', color: 'var(--color-text-muted)', fontSize: 11, marginTop: 3 }}>
+                          Checkout {request.provider_checkout_request_id}
+                        </span>
+                      )}
                     </td>
                     <td style={{ padding: 12, fontSize: 13, color: 'var(--color-text-primary)' }}>
-                      {formatMoney(Number(request.amount), request.currency)}
+                      {formatMoney(Number(request.provider_paid_amount ?? request.amount), request.currency)}
                     </td>
                     <td style={{ padding: 12 }}>
                       <Badge variant={getPaymentStatusVariant(request.status)}>

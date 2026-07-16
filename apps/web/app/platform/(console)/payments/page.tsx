@@ -139,6 +139,52 @@ export default async function PlatformPaymentsPage() {
           </div>
         </Card>
       </div>
+
+      <Card padding="md">
+        <CardHeader title="PayBill prompt flow" action={<Badge variant="info">Step by step</Badge>} />
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
+          {[
+            ['1', 'Save PayBill', 'Set shortcode, account reference, callback URL, and Daraja credentials.'],
+            ['2', 'Owner enters phone', 'The owner types a Kenyan phone number in subscription settings.'],
+            ['3', 'Token + password', 'Retivox gets OAuth token and builds the Daraja timestamp password.'],
+            ['4', 'STK request', 'Daraja receives BusinessShortCode, PartyB, AccountReference, and amount.'],
+            ['5', 'Callback verifies', 'Safaricom posts the result to /api/daraja/stk-callback and Retivox marks paid or failed.'],
+          ].map(([step, title, body]) => (
+            <div
+              key={step}
+              className="rounded-2xl"
+              style={{
+                backgroundColor: 'var(--color-background)',
+                border: '1px solid var(--color-border)',
+                padding: 14,
+              }}
+            >
+              <div
+                style={{
+                  alignItems: 'center',
+                  backgroundColor: '#24332c',
+                  borderRadius: 999,
+                  color: '#fff8ec',
+                  display: 'inline-flex',
+                  fontSize: 12,
+                  fontWeight: 900,
+                  height: 28,
+                  justifyContent: 'center',
+                  width: 28,
+                }}
+              >
+                {step}
+              </div>
+              <p style={{ margin: '10px 0 4px', color: 'var(--color-text-primary)', fontSize: 14, fontWeight: 850 }}>
+                {title}
+              </p>
+              <p style={{ margin: 0, color: 'var(--color-text-muted)', fontSize: 12, lineHeight: 1.55 }}>
+                {body}
+              </p>
+            </div>
+          ))}
+        </div>
+      </Card>
     </div>
   )
 }

@@ -48,13 +48,18 @@ export type SubscriptionPaymentRequestRow = {
   id: string
   amount: number
   currency: string
-  payment_method: 'mpesa_manual' | 'bank_transfer' | 'cash_deposit' | 'other'
+  payment_method: 'mpesa_stk' | 'mpesa_manual' | 'bank_transfer' | 'cash_deposit' | 'other'
   reference_code: string
   payer_phone: string | null
   status: 'pending' | 'verified' | 'rejected'
   review_note: string | null
   submitted_at: string
   reviewed_at: string | null
+  provider_checkout_request_id: string | null
+  provider_receipt_number: string | null
+  provider_paid_amount: number | null
+  provider_phone_number: string | null
+  provider_result_description: string | null
 }
 
 /**

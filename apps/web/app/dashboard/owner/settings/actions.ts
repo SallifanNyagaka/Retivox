@@ -14,7 +14,7 @@ import { requireRole } from '../../../../lib/auth/helpers'
 import { createClient } from '../../../../lib/supabase/server'
 import { createServiceRoleClient } from '../../../../lib/supabase/admin'
 import logger from '../../../../lib/logger'
-import { initiateDarajaStkPush, normalizeKenyanPhone } from '../../../../lib/payments/daraja'
+import { getDarajaPromptConfiguration, initiateDarajaStkPush, normalizeKenyanPhone } from '../../../../lib/payments/daraja'
 import type { BusinessSettingsRow, FormState, UserProfileRow } from './types'
 
 /**
@@ -390,6 +390,7 @@ export async function initiateSubscriptionStkPush(_prevState: FormState, formDat
       return { success: false, error: subscriptionError?.message ?? 'Unable to prepare subscription payment' }
     }
 
+    const promptConfig = await getDarajaPromptConfiguration()
     const amount = Math.max(1, Number(subscriptionData.monthly_amount ?? 200))
     const currency = String(subscriptionData.currency ?? 'KES')
     const referenceCode = `STK-${Date.now()}`
@@ -402,11 +403,12 @@ export async function initiateSubscriptionStkPush(_prevState: FormState, formDat
         submitted_by: profile.id,
         amount,
         currency,
-        payment_method: 'mpesa_manual',
+        payment_method: 'mpesa_stk',
         reference_code: referenceCode,
         payer_phone: normalizedPhone,
         status: 'pending',
         provider: 'daraja',
+        provider_result_description: `STK Push queued for PayBill ${promptConfig.shortcode}, account ${promptConfig.accountReference}`,
       })
       .select('id')
       .single()
@@ -421,7 +423,7 @@ export async function initiateSubscriptionStkPush(_prevState: FormState, formDat
     const response = await initiateDarajaStkPush({
       phone: normalizedPhone,
       amount,
-      accountReference: 'RETIVOX',
+      accountReference: promptConfig.accountReference,
       transactionDescription: 'Retivox subscription',
     })
 
@@ -434,7 +436,7 @@ export async function initiateSubscriptionStkPush(_prevState: FormState, formDat
       .update({
         provider_merchant_request_id: response.MerchantRequestID ?? null,
         provider_checkout_request_id: response.CheckoutRequestID,
-        provider_result_description: response.CustomerMessage ?? response.ResponseDescription ?? null,
+        provider_result_description: response.CustomerMessage ?? response.ResponseDescription ?? `STK Push sent to ${normalizedPhone}`,
         raw_provider_payload: response,
       })
       .eq('id', paymentRequestId)

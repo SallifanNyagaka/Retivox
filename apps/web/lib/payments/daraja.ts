@@ -32,6 +32,7 @@ type DarajaConfig = {
   callbackUrl: string
   environment: 'sandbox' | 'production'
   transactionType: string
+  accountReference: string
 }
 
 type PlatformPaymentSettingsRow = {
@@ -92,6 +93,19 @@ async function getDarajaConfig(): Promise<DarajaConfig> {
     callbackUrl: resolvedCallbackUrl,
     environment: settings?.environment ?? (process.env.DARAJA_ENV === 'production' ? 'production' : 'sandbox'),
     transactionType: settings?.transaction_type || process.env.DARAJA_TRANSACTION_TYPE || 'CustomerPayBillOnline',
+    accountReference: settings?.account_reference || process.env.DARAJA_ACCOUNT_REFERENCE || 'RETIVOX',
+  }
+}
+
+export async function getDarajaPromptConfiguration() {
+  const config = await getDarajaConfig()
+
+  return {
+    environment: config.environment,
+    shortcode: config.shortcode,
+    transactionType: config.transactionType,
+    accountReference: config.accountReference,
+    callbackUrl: config.callbackUrl,
   }
 }
 
@@ -149,7 +163,7 @@ async function getAccessToken(config: DarajaConfig) {
 export async function initiateDarajaStkPush(input: {
   phone: string
   amount: number
-  accountReference: string
+  accountReference?: string
   transactionDescription: string
 }): Promise<DarajaStkPushResponse> {
   const config = await getDarajaConfig()
@@ -176,7 +190,7 @@ export async function initiateDarajaStkPush(input: {
       PartyB: config.shortcode,
       PhoneNumber: phone,
       CallBackURL: config.callbackUrl,
-      AccountReference: input.accountReference.slice(0, 12),
+      AccountReference: (input.accountReference || config.accountReference).slice(0, 12),
       TransactionDesc: input.transactionDescription.slice(0, 64),
     }),
     cache: 'no-store',

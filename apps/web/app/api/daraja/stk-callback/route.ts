@@ -8,9 +8,18 @@ type DarajaCallbackPayload = {
       CheckoutRequestID?: string
       ResultCode?: number
       ResultDesc?: string
-      CallbackMetadata?: unknown
+      CallbackMetadata?: {
+        Item?: Array<{
+          Name?: string
+          Value?: string | number
+        }>
+      }
     }
   }
+}
+
+function getMetadataValue(payload: DarajaCallbackPayload, name: string) {
+  return payload.Body?.stkCallback?.CallbackMetadata?.Item?.find((item) => item.Name === name)?.Value ?? null
 }
 
 export async function POST(request: Request) {
@@ -40,6 +49,21 @@ export async function POST(request: Request) {
 
     if (error) {
       throw error
+    }
+
+    const receiptNumber = getMetadataValue(payload, 'MpesaReceiptNumber')
+    const paidAmount = getMetadataValue(payload, 'Amount')
+    const phoneNumber = getMetadataValue(payload, 'PhoneNumber')
+
+    if (Number(callback.ResultCode ?? 1) === 0) {
+      await serviceClient
+        .from('subscription_payment_requests')
+        .update({
+          provider_receipt_number: receiptNumber ? String(receiptNumber) : null,
+          provider_paid_amount: paidAmount ? Number(paidAmount) : null,
+          provider_phone_number: phoneNumber ? String(phoneNumber) : null,
+        })
+        .eq('provider_checkout_request_id', callback.CheckoutRequestID)
     }
 
     return NextResponse.json({ ResultCode: 0, ResultDesc: 'Accepted' })
