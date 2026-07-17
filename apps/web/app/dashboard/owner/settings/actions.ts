@@ -50,6 +50,7 @@ const subscriptionPaymentSchema = z.object({
 
 const darajaPaymentSchema = z.object({
   phone: z.string().min(9, 'Enter the M-Pesa phone number').max(20, 'Phone number is too long'),
+  amount: z.coerce.number().int('Payment amount must be a whole number').positive('Payment amount must be greater than zero'),
 })
 
 /**
@@ -329,6 +330,7 @@ export async function submitSubscriptionPayment(_prevState: FormState, formData:
 export async function initiateSubscriptionStkPush(_prevState: FormState, formData: FormData): Promise<FormState> {
   const validation = darajaPaymentSchema.safeParse({
     phone: getString(formData, 'phone'),
+    amount: getString(formData, 'amount'),
   })
 
   if (!validation.success) {
@@ -391,7 +393,7 @@ export async function initiateSubscriptionStkPush(_prevState: FormState, formDat
     }
 
     const promptConfig = await getDarajaPromptConfiguration()
-    const amount = Math.max(1, Number(subscriptionData.monthly_amount ?? 200))
+    const amount = validation.data.amount
     const currency = String(subscriptionData.currency ?? 'KES')
     const referenceCode = `STK-${Date.now()}`
 

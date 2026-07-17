@@ -22,6 +22,40 @@ function getMetadataValue(payload: DarajaCallbackPayload, name: string) {
   return payload.Body?.stkCallback?.CallbackMetadata?.Item?.find((item) => item.Name === name)?.Value ?? null
 }
 
+function maskPhoneNumber(value: string | number | null) {
+  if (!value) return null
+  const phone = String(value)
+
+  if (phone.length <= 6) return '***'
+
+  return `${phone.slice(0, 3)}***${phone.slice(-3)}`
+}
+
+function sanitizeCallbackPayload(payload: DarajaCallbackPayload): DarajaCallbackPayload {
+  return {
+    ...payload,
+    Body: payload.Body
+      ? {
+          ...payload.Body,
+          stkCallback: payload.Body.stkCallback
+            ? {
+                ...payload.Body.stkCallback,
+                CallbackMetadata: payload.Body.stkCallback.CallbackMetadata
+                  ? {
+                      Item: payload.Body.stkCallback.CallbackMetadata.Item?.map((item) => (
+                        item.Name === 'PhoneNumber'
+                          ? { ...item, Value: maskPhoneNumber(item.Value ?? null) ?? undefined }
+                          : item
+                      )),
+                    }
+                  : undefined,
+              }
+            : undefined,
+        }
+      : undefined,
+  }
+}
+
 export async function POST(request: Request) {
   let payload: DarajaCallbackPayload
 
@@ -44,7 +78,7 @@ export async function POST(request: Request) {
       p_merchant_request_id: callback.MerchantRequestID ?? null,
       p_result_code: Number(callback.ResultCode ?? 1),
       p_result_description: callback.ResultDesc ?? 'No Daraja result description',
-      p_raw_payload: payload,
+      p_raw_payload: sanitizeCallbackPayload(payload),
     })
 
     if (error) {
@@ -67,13 +101,7 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json({ ResultCode: 0, ResultDesc: 'Accepted' })
-  } catch (error: unknown) {
-    return NextResponse.json(
-      {
-        ResultCode: 1,
-        ResultDesc: error instanceof Error ? error.message : 'Unable to process callback',
-      },
-      { status: 500 }
-    )
+  } catch {
+    return NextResponse.json({ ResultCode: 0, ResultDesc: 'Accepted' })
   }
 }

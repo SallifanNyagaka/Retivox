@@ -467,9 +467,9 @@ function LoginReviewsSection({ reviews }: { reviews: LoginReviewRow[] }) {
     if (previousPending.current && !isPending) {
       if (state.success) {
         toast.success('Review submitted for platform approval')
-        setReviewerTitle('')
-        setQuote('')
         refreshTimer = setTimeout(() => {
+          setReviewerTitle('')
+          setQuote('')
           router.refresh()
         }, 0)
       } else if (state.error) {
@@ -659,10 +659,12 @@ function SubscriptionSection({
   paymentRequests: SubscriptionPaymentRequestRow[]
 }) {
   const router = useRouter()
+  const defaultStkAmount = String(Math.max(1, Math.round(Number(subscription?.monthly_amount ?? 200))))
   const [paymentMethod, setPaymentMethod] = useState<SubscriptionPaymentRequestRow['payment_method']>('mpesa_manual')
   const [referenceCode, setReferenceCode] = useState('')
   const [payerPhone, setPayerPhone] = useState('')
   const [stkPhone, setStkPhone] = useState('')
+  const [stkAmount, setStkAmount] = useState(defaultStkAmount)
   const { toast, toastState, dismiss } = useToast()
   const [state, action, isPending] = useActionState<FormState, FormData>(submitSubscriptionPayment, {
     error: null,
@@ -684,9 +686,9 @@ function SubscriptionSection({
     if (previousPending.current && !isPending) {
       if (state.success) {
         toast.success('Payment reference submitted for verification')
-        setReferenceCode('')
-        setPayerPhone('')
         refreshTimer = setTimeout(() => {
+          setReferenceCode('')
+          setPayerPhone('')
           router.refresh()
         }, 0)
       } else if (state.error) {
@@ -708,8 +710,9 @@ function SubscriptionSection({
     if (previousStkPending.current && !isStkPending) {
       if (stkState.success) {
         toast.success('M-Pesa prompt sent. Complete it on your phone.')
-        setStkPhone('')
         refreshTimer = setTimeout(() => {
+          setStkPhone('')
+          setStkAmount(defaultStkAmount)
           router.refresh()
         }, 0)
       } else if (stkState.error) {
@@ -723,7 +726,7 @@ function SubscriptionSection({
         clearTimeout(refreshTimer)
       }
     }
-  }, [isStkPending, router, stkState.error, stkState.success, toast])
+  }, [defaultStkAmount, isStkPending, router, stkState.error, stkState.success, toast])
 
   const onSubmitPayment = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -743,6 +746,7 @@ function SubscriptionSection({
 
     const formData = new FormData()
     formData.set('phone', stkPhone)
+    formData.set('amount', stkAmount)
 
     startTransition(() => {
       stkAction(formData)
@@ -860,7 +864,7 @@ function SubscriptionSection({
             marginTop: 16,
           }}
         >
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_auto] md:items-end">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_180px_auto] md:items-end">
             <label style={{ fontSize: 13 }}>
               <span style={{ display: 'block', marginBottom: 6, fontWeight: 700, color: 'var(--color-text-primary)' }}>
                 Pay with M-Pesa PayBill prompt
@@ -873,13 +877,27 @@ function SubscriptionSection({
                 style={inputStyle}
               />
             </label>
+            <label style={{ fontSize: 13 }}>
+              <span style={{ display: 'block', marginBottom: 6, fontWeight: 700, color: 'var(--color-text-primary)' }}>
+                Amount
+              </span>
+              <input
+                value={stkAmount}
+                onChange={(event) => setStkAmount(event.target.value)}
+                type="number"
+                min="1"
+                step="1"
+                required
+                style={inputStyle}
+              />
+            </label>
             <button
               type="submit"
               className="btn-success"
               disabled={isStkPending}
               style={{ padding: '11px 18px', borderRadius: 8, opacity: isStkPending ? 0.8 : 1 }}
             >
-              {isStkPending ? 'Sending...' : `Pay ${formatMoney(Number(subscription?.monthly_amount ?? 200), activeCurrency)}`}
+              {isStkPending ? 'Sending...' : `Pay ${formatMoney(Number(stkAmount || subscription?.monthly_amount || 200), activeCurrency)}`}
             </button>
           </div>
           {stkState.error && (

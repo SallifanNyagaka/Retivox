@@ -1,5 +1,6 @@
 import { Badge } from '../../../../components/ui/Badge'
 import { Card, CardHeader } from '../../../../components/ui/Card'
+import { getDarajaConfigurationStatus } from '../../../../lib/payments/daraja'
 import { createServiceRoleClient } from '../../../../lib/supabase/admin'
 import { updatePlatformPaymentSettings } from '../actions'
 
@@ -27,6 +28,7 @@ function maskSecret(value: string | null) {
 
 export default async function PlatformPaymentsPage() {
   const serviceClient = createServiceRoleClient()
+  const configStatus = await getDarajaConfigurationStatus()
   const { data, error } = await serviceClient
     .from('platform_payment_settings')
     .select('id, environment, business_shortcode, account_reference, transaction_type, callback_url, consumer_key, consumer_secret, passkey, is_active, updated_at')
@@ -102,7 +104,7 @@ export default async function PlatformPaymentsPage() {
 
             <label style={labelStyle}>
               Callback URL
-              <input name="callbackUrl" type="url" defaultValue={settings?.callback_url ?? process.env.DARAJA_CALLBACK_URL ?? ''} required style={inputStyle} />
+              <input name="callbackUrl" type="url" defaultValue={settings?.callback_url ?? process.env.MPESA_CALLBACK_URL ?? ''} required style={inputStyle} />
             </label>
 
             <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
@@ -129,13 +131,14 @@ export default async function PlatformPaymentsPage() {
         <Card padding="md">
           <CardHeader title="Current receiver" action={<Badge variant={settings?.is_active ? 'success' : 'warning'}>{settings ? 'Configured' : 'Env fallback'}</Badge>} />
           <div className="flex flex-col gap-3" style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
-            <Info label="Environment" value={settings?.environment ?? process.env.DARAJA_ENV ?? 'sandbox'} />
-            <Info label="Shortcode" value={settings?.business_shortcode ?? process.env.DARAJA_SHORTCODE ?? 'Not set'} />
+            <Info label="STK readiness" value={configStatus.isConfigured ? `Ready (${configStatus.source})` : `Missing ${configStatus.missing.join(', ')}`} />
+            <Info label="Environment" value={settings?.environment ?? process.env.MPESA_ENV ?? 'sandbox'} />
+            <Info label="Shortcode" value={settings?.business_shortcode ?? process.env.MPESA_SHORTCODE ?? 'Not set'} />
             <Info label="Account reference" value={settings?.account_reference ?? 'RETIVOX'} />
-            <Info label="Callback URL" value={settings?.callback_url ?? process.env.DARAJA_CALLBACK_URL ?? 'Not set'} />
-            <Info label="Consumer key" value={maskSecret(settings?.consumer_key ?? process.env.DARAJA_CONSUMER_KEY ?? null)} />
-            <Info label="Consumer secret" value={maskSecret(settings?.consumer_secret ?? process.env.DARAJA_CONSUMER_SECRET ?? null)} />
-            <Info label="Passkey" value={maskSecret(settings?.passkey ?? process.env.DARAJA_PASSKEY ?? null)} />
+            <Info label="Callback URL" value={settings?.callback_url ?? process.env.MPESA_CALLBACK_URL ?? 'Not set'} />
+            <Info label="Consumer key" value={maskSecret(settings?.consumer_key ?? process.env.MPESA_CONSUMER_KEY ?? null)} />
+            <Info label="Consumer secret" value={maskSecret(settings?.consumer_secret ?? process.env.MPESA_CONSUMER_SECRET ?? null)} />
+            <Info label="Passkey" value={maskSecret(settings?.passkey ?? process.env.MPESA_PASSKEY ?? null)} />
           </div>
         </Card>
       </div>

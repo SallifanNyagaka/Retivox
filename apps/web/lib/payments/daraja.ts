@@ -2,14 +2,15 @@
  * Daraja STK Push client for subscription payments.
  *
  * Required env vars:
- * - DARAJA_CONSUMER_KEY
- * - DARAJA_CONSUMER_SECRET
- * - DARAJA_SHORTCODE
- * - DARAJA_PASSKEY
- * - DARAJA_CALLBACK_URL
+ * - MPESA_CONSUMER_KEY
+ * - MPESA_CONSUMER_SECRET
+ * - MPESA_SHORTCODE
+ * - MPESA_PASSKEY
+ * - MPESA_CALLBACK_URL
  * Optional:
- * - DARAJA_ENV=sandbox|production
- * - DARAJA_TRANSACTION_TYPE=CustomerPayBillOnline
+ * - MPESA_ENV=sandbox|production
+ * - MPESA_BASE_URL
+ * - MPESA_TRANSACTION_TYPE=CustomerPayBillOnline
  */
 
 import { createServiceRoleClient } from '../supabase/admin'
@@ -31,6 +32,7 @@ type DarajaConfig = {
   passkey: string
   callbackUrl: string
   environment: 'sandbox' | 'production'
+  baseUrl: string
   transactionType: string
   accountReference: string
 }
@@ -44,6 +46,12 @@ type PlatformPaymentSettingsRow = {
   consumer_key: string | null
   consumer_secret: string | null
   passkey: string | null
+}
+
+type DarajaConfigResolution = {
+  config: DarajaConfig | null
+  missing: string[]
+  source: 'platform' | 'env' | 'mixed' | 'none'
 }
 
 async function getPlatformDarajaSettings(): Promise<PlatformPaymentSettingsRow | null> {
@@ -68,32 +76,94 @@ async function getPlatformDarajaSettings(): Promise<PlatformPaymentSettingsRow |
   }
 }
 
-async function getDarajaConfig(): Promise<DarajaConfig> {
+async function resolveDarajaConfig(): Promise<DarajaConfigResolution> {
   const settings = await getPlatformDarajaSettings()
-  const consumerKey = process.env.DARAJA_CONSUMER_KEY
-  const consumerSecret = process.env.DARAJA_CONSUMER_SECRET
-  const shortcode = process.env.DARAJA_SHORTCODE
-  const passkey = process.env.DARAJA_PASSKEY
-  const callbackUrl = process.env.DARAJA_CALLBACK_URL
+  const configuredEnvironment = settings?.environment ?? (process.env.MPESA_ENV === 'production' ? 'production' : 'sandbox')
+  const consumerKey = process.env.MPESA_CONSUMER_KEY
+  const consumerSecret = process.env.MPESA_CONSUMER_SECRET
+  const shortcode = process.env.MPESA_SHORTCODE
+  const passkey = process.env.MPESA_PASSKEY
+  const callbackUrl = process.env.MPESA_CALLBACK_URL
   const resolvedConsumerKey = settings?.consumer_key || consumerKey
   const resolvedConsumerSecret = settings?.consumer_secret || consumerSecret
-  const resolvedShortcode = settings?.business_shortcode || shortcode
+  const resolvedShortcode = configuredEnvironment === 'sandbox' ? '174379' : settings?.business_shortcode || shortcode
   const resolvedPasskey = settings?.passkey || passkey
   const resolvedCallbackUrl = settings?.callback_url || callbackUrl
+  const requiredFields: Array<[string, string | undefined | null]> = [
+    ['consumer key', resolvedConsumerKey],
+    ['consumer secret', resolvedConsumerSecret],
+    ['PayBill shortcode', resolvedShortcode],
+    ['Lipa na M-Pesa passkey', resolvedPasskey],
+    ['callback URL', resolvedCallbackUrl],
+  ]
+  const missing = requiredFields
+    .filter(([, value]) => !value)
+    .map(([label]) => label)
 
-  if (!resolvedConsumerKey || !resolvedConsumerSecret || !resolvedShortcode || !resolvedPasskey || !resolvedCallbackUrl) {
-    throw new Error('Daraja is not configured. Add it in Platform > M-Pesa or set DARAJA_CONSUMER_KEY, DARAJA_CONSUMER_SECRET, DARAJA_SHORTCODE, DARAJA_PASSKEY, and DARAJA_CALLBACK_URL.')
+  const platformValues = [
+    settings?.consumer_key,
+    settings?.consumer_secret,
+    settings?.business_shortcode,
+    settings?.passkey,
+    settings?.callback_url,
+  ].filter(Boolean).length
+  const envValues = [
+    consumerKey,
+    consumerSecret,
+    shortcode,
+    passkey,
+    callbackUrl,
+  ].filter(Boolean).length
+  const source = platformValues === 5 ? 'platform' : envValues === 5 ? 'env' : platformValues > 0 || envValues > 0 ? 'mixed' : 'none'
+
+  if (missing.length > 0) {
+    return {
+      config: null,
+      missing,
+      source,
+    }
   }
 
   return {
-    consumerKey: resolvedConsumerKey,
-    consumerSecret: resolvedConsumerSecret,
-    shortcode: resolvedShortcode,
-    passkey: resolvedPasskey,
-    callbackUrl: resolvedCallbackUrl,
-    environment: settings?.environment ?? (process.env.DARAJA_ENV === 'production' ? 'production' : 'sandbox'),
-    transactionType: settings?.transaction_type || process.env.DARAJA_TRANSACTION_TYPE || 'CustomerPayBillOnline',
-    accountReference: settings?.account_reference || process.env.DARAJA_ACCOUNT_REFERENCE || 'RETIVOX',
+    config: {
+      consumerKey: resolvedConsumerKey as string,
+      consumerSecret: resolvedConsumerSecret as string,
+      shortcode: resolvedShortcode as string,
+      passkey: resolvedPasskey as string,
+      callbackUrl: resolvedCallbackUrl as string,
+      environment: configuredEnvironment,
+      baseUrl: process.env.MPESA_BASE_URL || (configuredEnvironment === 'production' ? 'https://api.safaricom.co.ke' : 'https://sandbox.safaricom.co.ke'),
+      transactionType: settings?.transaction_type || process.env.MPESA_TRANSACTION_TYPE || 'CustomerPayBillOnline',
+      accountReference: settings?.account_reference || process.env.MPESA_ACCOUNT_REFERENCE || 'RETIVOX',
+    },
+    missing: [],
+    source,
+  }
+}
+
+async function getDarajaConfig(): Promise<DarajaConfig> {
+  const resolution = await resolveDarajaConfig()
+
+  if (!resolution.config) {
+    throw new Error(`M-Pesa is not configured. Missing: ${resolution.missing.join(', ')}. Add them in Platform > M-Pesa or set the MPESA_* environment variables in Vercel, then redeploy.`)
+  }
+
+  return resolution.config
+}
+
+export async function getDarajaConfigurationStatus() {
+  const resolution = await resolveDarajaConfig()
+
+  return {
+    isConfigured: resolution.missing.length === 0,
+    missing: resolution.missing,
+    source: resolution.source,
+    environment: resolution.config?.environment ?? process.env.MPESA_ENV ?? 'sandbox',
+    shortcodeSet: Boolean(resolution.config?.shortcode || process.env.MPESA_SHORTCODE),
+    callbackUrlSet: Boolean(resolution.config?.callbackUrl || process.env.MPESA_CALLBACK_URL),
+    consumerKeySet: Boolean(resolution.config?.consumerKey || process.env.MPESA_CONSUMER_KEY),
+    consumerSecretSet: Boolean(resolution.config?.consumerSecret || process.env.MPESA_CONSUMER_SECRET),
+    passkeySet: Boolean(resolution.config?.passkey || process.env.MPESA_PASSKEY),
   }
 }
 
@@ -109,41 +179,58 @@ export async function getDarajaPromptConfiguration() {
   }
 }
 
-function getBaseUrl(environment: DarajaConfig['environment']) {
-  return environment === 'production'
-    ? 'https://api.safaricom.co.ke'
-    : 'https://sandbox.safaricom.co.ke'
+function getTimestamp() {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Africa/Nairobi',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date())
+  const value = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? ''
+
+  return `${value('year')}${value('month')}${value('day')}${value('hour')}${value('minute')}${value('second')}`
 }
 
-function getTimestamp() {
-  const now = new Date()
-  const pad = (value: number) => String(value).padStart(2, '0')
+export function normalizeKenyanPhoneNumber(phone: string) {
+  const rawPhone = String(phone ?? '').trim()
 
-  return [
-    now.getFullYear(),
-    pad(now.getMonth() + 1),
-    pad(now.getDate()),
-    pad(now.getHours()),
-    pad(now.getMinutes()),
-    pad(now.getSeconds()),
-  ].join('')
+  if (!rawPhone) {
+    throw new Error('Enter a Safaricom phone number.')
+  }
+
+  if (/[^0-9+\s\-()]/.test(rawPhone)) {
+    throw new Error('Enter a valid Kenyan Safaricom phone number.')
+  }
+
+  const digits = rawPhone.replace(/[\s\-()+]/g, '')
+  let normalized = ''
+
+  if (/^0[17]\d{8}$/.test(digits)) {
+    normalized = `254${digits.slice(1)}`
+  } else if (/^[17]\d{8}$/.test(digits)) {
+    normalized = `254${digits}`
+  } else if (/^254[17]\d{8}$/.test(digits)) {
+    normalized = digits
+  }
+
+  if (!normalized) {
+    throw new Error('Enter a valid Kenyan Safaricom phone number.')
+  }
+
+  return normalized
 }
 
 export function normalizeKenyanPhone(phone: string) {
-  const digits = phone.replace(/\D/g, '')
-
-  if (digits.startsWith('254') && digits.length === 12) return digits
-  if (digits.startsWith('0') && digits.length === 10) return `254${digits.slice(1)}`
-  if (digits.startsWith('7') && digits.length === 9) return `254${digits}`
-  if (digits.startsWith('1') && digits.length === 9) return `254${digits}`
-
-  throw new Error('Enter a valid Kenyan phone number, for example 07XXXXXXXX or 2547XXXXXXXX.')
+  return normalizeKenyanPhoneNumber(phone)
 }
 
 async function getAccessToken(config: DarajaConfig) {
-  const baseUrl = getBaseUrl(config.environment)
   const credentials = Buffer.from(`${config.consumerKey}:${config.consumerSecret}`).toString('base64')
-  const response = await fetch(`${baseUrl}/oauth/v1/generate?grant_type=client_credentials`, {
+  const response = await fetch(`${config.baseUrl}/oauth/v1/generate?grant_type=client_credentials`, {
     method: 'GET',
     headers: {
       Authorization: `Basic ${credentials}`,
@@ -167,14 +254,17 @@ export async function initiateDarajaStkPush(input: {
   transactionDescription: string
 }): Promise<DarajaStkPushResponse> {
   const config = await getDarajaConfig()
-  const baseUrl = getBaseUrl(config.environment)
   const accessToken = await getAccessToken(config)
   const timestamp = getTimestamp()
   const password = Buffer.from(`${config.shortcode}${config.passkey}${timestamp}`).toString('base64')
-  const amount = Math.max(1, Math.round(input.amount))
-  const phone = normalizeKenyanPhone(input.phone)
+  const amount = Number(input.amount)
+  const phone = normalizeKenyanPhoneNumber(input.phone)
 
-  const response = await fetch(`${baseUrl}/mpesa/stkpush/v1/processrequest`, {
+  if (!Number.isInteger(amount) || amount <= 0) {
+    throw new Error('Enter a valid whole-number payment amount.')
+  }
+
+  const response = await fetch(`${config.baseUrl}/mpesa/stkpush/v1/processrequest`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -184,7 +274,7 @@ export async function initiateDarajaStkPush(input: {
       BusinessShortCode: config.shortcode,
       Password: password,
       Timestamp: timestamp,
-      TransactionType: config.transactionType,
+      TransactionType: config.environment === 'sandbox' ? 'CustomerPayBillOnline' : config.transactionType,
       Amount: amount,
       PartyA: phone,
       PartyB: config.shortcode,
