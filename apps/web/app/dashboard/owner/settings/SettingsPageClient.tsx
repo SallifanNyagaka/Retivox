@@ -709,7 +709,7 @@ function SubscriptionSection({
 
     if (previousStkPending.current && !isStkPending) {
       if (stkState.success) {
-        toast.success('M-Pesa prompt sent. Complete it on your phone.')
+        toast.success(stkState.message ?? 'M-Pesa prompt sent. Complete it on your phone.')
         refreshTimer = setTimeout(() => {
           setStkPhone('')
           setStkAmount(defaultStkAmount)
@@ -726,7 +726,7 @@ function SubscriptionSection({
         clearTimeout(refreshTimer)
       }
     }
-  }, [defaultStkAmount, isStkPending, router, stkState.error, stkState.success, toast])
+  }, [defaultStkAmount, isStkPending, router, stkState.error, stkState.message, stkState.success, toast])
 
   const onSubmitPayment = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -849,6 +849,7 @@ function SubscriptionSection({
             </p>
             <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 6 }}>
               Pay {formatMoney(Number(subscription?.monthly_amount ?? 200), activeCurrency)} for this month with an M-Pesa PayBill prompt or submit a manual reference.
+              This is only for your Retivox rental/subscription payment; customer sales payments in transactions remain separate.
             </p>
           </div>
           <Badge variant="info">Manual verification</Badge>
@@ -906,7 +907,7 @@ function SubscriptionSection({
             </p>
           )}
           <p style={{ margin: '10px 0 0', fontSize: 12, color: 'var(--color-text-muted)' }}>
-            You will receive a Lipa na M-Pesa PayBill prompt on this phone. After payment, Daraja confirms it automatically.
+            In live mode, you will receive a Lipa na M-Pesa PayBill prompt on this phone. In sandbox testing without a passkey or callback URL, Retivox records a test request without sending a real phone prompt.
           </p>
         </form>
 

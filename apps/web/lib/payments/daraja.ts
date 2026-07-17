@@ -25,6 +25,16 @@ export type DarajaStkPushResponse = {
   errorMessage?: string
 }
 
+export type DarajaPromptConfiguration = {
+  environment: 'sandbox' | 'production'
+  shortcode: string
+  transactionType: string
+  accountReference: string
+  callbackUrl: string
+  isTestMode: boolean
+  missing: string[]
+}
+
 type DarajaConfig = {
   consumerKey: string
   consumerSecret: string
@@ -141,16 +151,6 @@ async function resolveDarajaConfig(): Promise<DarajaConfigResolution> {
   }
 }
 
-async function getDarajaConfig(): Promise<DarajaConfig> {
-  const resolution = await resolveDarajaConfig()
-
-  if (!resolution.config) {
-    throw new Error(`M-Pesa is not configured. Missing: ${resolution.missing.join(', ')}. Add them in Platform > M-Pesa or set the MPESA_* environment variables in Vercel, then redeploy.`)
-  }
-
-  return resolution.config
-}
-
 export async function getDarajaConfigurationStatus() {
   const resolution = await resolveDarajaConfig()
 
@@ -168,15 +168,33 @@ export async function getDarajaConfigurationStatus() {
 }
 
 export async function getDarajaPromptConfiguration() {
-  const config = await getDarajaConfig()
+  const resolution = await resolveDarajaConfig()
+
+  if (!resolution.config) {
+    if (process.env.MPESA_ENV === 'production') {
+      throw new Error(`Subscription M-Pesa STK Push is not configured. Missing: ${resolution.missing.join(', ')}.`)
+    }
+
+    return {
+      environment: 'sandbox',
+      shortcode: '174379',
+      transactionType: process.env.MPESA_TRANSACTION_TYPE || 'CustomerPayBillOnline',
+      accountReference: process.env.MPESA_ACCOUNT_REFERENCE || 'RETIVOX',
+      callbackUrl: process.env.MPESA_CALLBACK_URL || '',
+      isTestMode: true,
+      missing: resolution.missing,
+    } satisfies DarajaPromptConfiguration
+  }
 
   return {
-    environment: config.environment,
-    shortcode: config.shortcode,
-    transactionType: config.transactionType,
-    accountReference: config.accountReference,
-    callbackUrl: config.callbackUrl,
-  }
+    environment: resolution.config.environment,
+    shortcode: resolution.config.shortcode,
+    transactionType: resolution.config.transactionType,
+    accountReference: resolution.config.accountReference,
+    callbackUrl: resolution.config.callbackUrl,
+    isTestMode: false,
+    missing: [],
+  } satisfies DarajaPromptConfiguration
 }
 
 function getTimestamp() {
@@ -253,16 +271,35 @@ export async function initiateDarajaStkPush(input: {
   accountReference?: string
   transactionDescription: string
 }): Promise<DarajaStkPushResponse> {
-  const config = await getDarajaConfig()
-  const accessToken = await getAccessToken(config)
-  const timestamp = getTimestamp()
-  const password = Buffer.from(`${config.shortcode}${config.passkey}${timestamp}`).toString('base64')
   const amount = Number(input.amount)
   const phone = normalizeKenyanPhoneNumber(input.phone)
 
   if (!Number.isInteger(amount) || amount <= 0) {
     throw new Error('Enter a valid whole-number payment amount.')
   }
+
+  const resolution = await resolveDarajaConfig()
+
+  if (!resolution.config) {
+    if (process.env.MPESA_ENV === 'production') {
+      throw new Error(`Subscription M-Pesa STK Push is not configured. Missing: ${resolution.missing.join(', ')}.`)
+    }
+
+    const testId = `${Date.now()}${phone.slice(-4)}`
+
+    return {
+      MerchantRequestID: `TEST-MERCHANT-${testId}`,
+      CheckoutRequestID: `TEST-CHECKOUT-${testId}`,
+      ResponseCode: '0',
+      ResponseDescription: `Sandbox test request recorded locally. No real M-Pesa prompt was sent because ${resolution.missing.join(', ')} ${resolution.missing.length === 1 ? 'is' : 'are'} not configured.`,
+      CustomerMessage: 'Test mode: request recorded. No real M-Pesa prompt was sent.',
+    }
+  }
+
+  const config = resolution.config
+  const accessToken = await getAccessToken(config)
+  const timestamp = getTimestamp()
+  const password = Buffer.from(`${config.shortcode}${config.passkey}${timestamp}`).toString('base64')
 
   const response = await fetch(`${config.baseUrl}/mpesa/stkpush/v1/processrequest`, {
     method: 'POST',
