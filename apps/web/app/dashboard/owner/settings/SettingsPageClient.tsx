@@ -907,7 +907,7 @@ function SubscriptionSection({
             </p>
           )}
           <p style={{ margin: '10px 0 0', fontSize: 12, color: 'var(--color-text-muted)' }}>
-            In live mode, you will receive a Lipa na M-Pesa PayBill prompt on this phone. In sandbox testing without a passkey or callback URL, Retivox records a test request without sending a real phone prompt.
+            You will receive a Lipa na M-Pesa PayBill prompt on this phone. Enter your PIN on your phone only; Retivox never asks for or stores your M-Pesa PIN.
           </p>
         </form>
 

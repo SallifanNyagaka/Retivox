@@ -410,9 +410,7 @@ export async function initiateSubscriptionStkPush(_prevState: FormState, formDat
         payer_phone: normalizedPhone,
         status: 'pending',
         provider: 'daraja',
-        provider_result_description: promptConfig.isTestMode
-          ? `Sandbox test request queued locally. No real M-Pesa prompt will be sent because ${promptConfig.missing.join(', ')} ${promptConfig.missing.length === 1 ? 'is' : 'are'} not configured.`
-          : `STK Push queued for PayBill ${promptConfig.shortcode}, account ${promptConfig.accountReference}`,
+        provider_result_description: `STK Push queued for PayBill ${promptConfig.shortcode}, account ${promptConfig.accountReference}`,
       })
       .select('id')
       .single()
@@ -453,9 +451,7 @@ export async function initiateSubscriptionStkPush(_prevState: FormState, formDat
     return {
       success: true,
       error: null,
-      message: promptConfig.isTestMode
-        ? 'Sandbox test request recorded. No real M-Pesa prompt was sent because the passkey/callback URL are not configured yet.'
-        : 'M-Pesa prompt sent. Complete it on your phone.',
+      message: 'M-Pesa prompt sent. Complete it on your phone.',
     }
   } catch (error: unknown) {
     if (paymentRequestId) {

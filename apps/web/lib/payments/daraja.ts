@@ -6,11 +6,11 @@
  * - MPESA_CONSUMER_SECRET
  * - MPESA_SHORTCODE
  * - MPESA_PASSKEY
- * - MPESA_CALLBACK_URL
  * Optional:
  * - MPESA_ENV=sandbox|production
  * - MPESA_BASE_URL
  * - MPESA_TRANSACTION_TYPE=CustomerPayBillOnline
+ * - MPESA_CALLBACK_URL
  */
 
 import { createServiceRoleClient } from '../supabase/admin'
@@ -86,6 +86,24 @@ async function getPlatformDarajaSettings(): Promise<PlatformPaymentSettingsRow |
   }
 }
 
+function getDefaultCallbackUrl() {
+  const appUrl = process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL || process.env.NEXT_PUBLIC_APP_URL
+
+  if (!appUrl) {
+    return undefined
+  }
+
+  const baseUrl = appUrl.startsWith('http://') || appUrl.startsWith('https://')
+    ? appUrl
+    : `https://${appUrl}`
+
+  try {
+    return new URL('/api/daraja/stk-callback', baseUrl).toString()
+  } catch {
+    return undefined
+  }
+}
+
 async function resolveDarajaConfig(): Promise<DarajaConfigResolution> {
   const settings = await getPlatformDarajaSettings()
   const configuredEnvironment = settings?.environment ?? (process.env.MPESA_ENV === 'production' ? 'production' : 'sandbox')
@@ -93,7 +111,7 @@ async function resolveDarajaConfig(): Promise<DarajaConfigResolution> {
   const consumerSecret = process.env.MPESA_CONSUMER_SECRET
   const shortcode = process.env.MPESA_SHORTCODE
   const passkey = process.env.MPESA_PASSKEY
-  const callbackUrl = process.env.MPESA_CALLBACK_URL
+  const callbackUrl = process.env.MPESA_CALLBACK_URL || getDefaultCallbackUrl()
   const resolvedConsumerKey = settings?.consumer_key || consumerKey
   const resolvedConsumerSecret = settings?.consumer_secret || consumerSecret
   const resolvedShortcode = configuredEnvironment === 'sandbox' ? '174379' : settings?.business_shortcode || shortcode
@@ -160,7 +178,7 @@ export async function getDarajaConfigurationStatus() {
     source: resolution.source,
     environment: resolution.config?.environment ?? process.env.MPESA_ENV ?? 'sandbox',
     shortcodeSet: Boolean(resolution.config?.shortcode || process.env.MPESA_SHORTCODE),
-    callbackUrlSet: Boolean(resolution.config?.callbackUrl || process.env.MPESA_CALLBACK_URL),
+    callbackUrlSet: Boolean(resolution.config?.callbackUrl || process.env.MPESA_CALLBACK_URL || getDefaultCallbackUrl()),
     consumerKeySet: Boolean(resolution.config?.consumerKey || process.env.MPESA_CONSUMER_KEY),
     consumerSecretSet: Boolean(resolution.config?.consumerSecret || process.env.MPESA_CONSUMER_SECRET),
     passkeySet: Boolean(resolution.config?.passkey || process.env.MPESA_PASSKEY),
@@ -171,19 +189,7 @@ export async function getDarajaPromptConfiguration() {
   const resolution = await resolveDarajaConfig()
 
   if (!resolution.config) {
-    if (process.env.MPESA_ENV === 'production') {
-      throw new Error(`Subscription M-Pesa STK Push is not configured. Missing: ${resolution.missing.join(', ')}.`)
-    }
-
-    return {
-      environment: 'sandbox',
-      shortcode: '174379',
-      transactionType: process.env.MPESA_TRANSACTION_TYPE || 'CustomerPayBillOnline',
-      accountReference: process.env.MPESA_ACCOUNT_REFERENCE || 'RETIVOX',
-      callbackUrl: process.env.MPESA_CALLBACK_URL || '',
-      isTestMode: true,
-      missing: resolution.missing,
-    } satisfies DarajaPromptConfiguration
+    throw new Error(`Subscription M-Pesa STK Push is not configured. Missing: ${resolution.missing.join(', ')}.`)
   }
 
   return {
@@ -281,19 +287,7 @@ export async function initiateDarajaStkPush(input: {
   const resolution = await resolveDarajaConfig()
 
   if (!resolution.config) {
-    if (process.env.MPESA_ENV === 'production') {
-      throw new Error(`Subscription M-Pesa STK Push is not configured. Missing: ${resolution.missing.join(', ')}.`)
-    }
-
-    const testId = `${Date.now()}${phone.slice(-4)}`
-
-    return {
-      MerchantRequestID: `TEST-MERCHANT-${testId}`,
-      CheckoutRequestID: `TEST-CHECKOUT-${testId}`,
-      ResponseCode: '0',
-      ResponseDescription: `Sandbox test request recorded locally. No real M-Pesa prompt was sent because ${resolution.missing.join(', ')} ${resolution.missing.length === 1 ? 'is' : 'are'} not configured.`,
-      CustomerMessage: 'Test mode: request recorded. No real M-Pesa prompt was sent.',
-    }
+    throw new Error(`Subscription M-Pesa STK Push is not configured. Missing: ${resolution.missing.join(', ')}.`)
   }
 
   const config = resolution.config
