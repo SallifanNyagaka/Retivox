@@ -102,6 +102,7 @@ export default async function AdminNewTransactionPage({ searchParams }: { search
                 action={recordAdminTransaction}
                 branchId={data.selectedBranchId}
                 redirectPath="/dashboard/admin/transactions"
+                stayOnSuccess
                 submitLabel="Record pending transaction"
                 pendingMessage="Recording transaction for owner verification..."
               />

@@ -76,6 +76,7 @@ type Props = {
   action?: RecordTransactionAction
   branchId?: string
   redirectPath?: string
+  stayOnSuccess?: boolean
   submitLabel?: string
   pendingMessage?: string
 }
@@ -317,6 +318,17 @@ const inputStyle = {
   backgroundColor: 'var(--color-background)',
 } as const
 
+function getInitialLineItems(products: EmployeeProductOption[], idSuffix = ''): LineItemDraft[] {
+  return [
+    {
+      id: `row-1${idSuffix}`,
+      optionId: products[0]?.optionId ?? '',
+      uomId: getDefaultSaleUOM(products[0] ?? null)?.id ?? '',
+      quantity: '1',
+    },
+  ]
+}
+
 /**
  * RecordEmployeeTransactionForm renders the web POS transaction form.
  */
@@ -326,19 +338,13 @@ export default function RecordEmployeeTransactionForm({
   action: recordTransactionAction = recordEmployeeTransaction,
   branchId,
   redirectPath = '/dashboard/employee/transactions',
+  stayOnSuccess = false,
   submitLabel = 'Record transaction',
   pendingMessage = 'Recording transaction...',
 }: Props) {
   const router = useRouter()
   const previousPending = useRef(false)
-  const [rows, setRows] = useState<LineItemDraft[]>([
-    {
-      id: 'row-1',
-      optionId: products[0]?.optionId ?? '',
-      uomId: getDefaultSaleUOM(products[0] ?? null)?.id ?? '',
-      quantity: '1',
-    },
-  ])
+  const [rows, setRows] = useState<LineItemDraft[]>(() => getInitialLineItems(products))
   const [paymentMethod, setPaymentMethod] = useState<'mpesa_manual' | 'cash'>('mpesa_manual')
   const [discountAmount, setDiscountAmount] = useState('0')
   const [customerName, setCustomerName] = useState('')
@@ -422,7 +428,16 @@ export default function RecordEmployeeTransactionForm({
       if (state.success) {
         toast.success(state.message ?? 'Transaction recorded successfully')
         redirectTimer = setTimeout(() => {
-          router.push(redirectPath)
+          if (stayOnSuccess) {
+            setRows(getInitialLineItems(products, `-${Date.now()}`))
+            setDiscountAmount('0')
+            setCustomerName('')
+            setCustomerPhone('')
+            setMpesaRefCode('')
+            setCashDepositCode('')
+          } else {
+            router.push(redirectPath)
+          }
           router.refresh()
         }, 0)
       } else if (state.error) {
@@ -436,7 +451,7 @@ export default function RecordEmployeeTransactionForm({
         clearTimeout(redirectTimer)
       }
     }
-  }, [isPending, redirectPath, router, state.error, state.message, state.success, toast])
+  }, [isPending, products, redirectPath, router, state.error, state.message, state.success, stayOnSuccess, toast])
 
   /**
    * Updates one line item draft field.

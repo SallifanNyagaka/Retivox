@@ -56,7 +56,7 @@ export default async function EmployeeSettingsPage() {
 
   if (pageError) {
     return (
-      <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 text-center">
+      <div className="mx-auto flex w-full max-w-4xl flex-col items-center gap-6 text-center">
         <div>
           <h1 className="font-bold" style={{ fontSize: 22, color: 'var(--color-text-primary)', letterSpacing: '-0.3px' }}>
             Settings
@@ -66,7 +66,7 @@ export default async function EmployeeSettingsPage() {
           </p>
         </div>
 
-        <Card padding="md">
+        <Card className="w-full" padding="md">
           <p style={{ fontSize: 14, color: 'var(--color-danger)', margin: 0 }}>
             Failed to load employee settings. Please refresh and try again.
           </p>

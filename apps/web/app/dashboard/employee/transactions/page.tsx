@@ -1,9 +1,8 @@
 /**
  * Employee transactions page.
  *
- * Shows only the signed-in employee's own transactions at their single current
- * branch. Filters and pagination are URL-driven, and every query is scoped by
- * business_id, branch_id, and employee_id together.
+ * Shows the signed-in employee's own transaction history across current and
+ * former store assignments. New sales remain limited to their current store.
  */
 
 import Link from 'next/link'
@@ -70,12 +69,14 @@ type BusinessCurrencyRow = {
  */
 type EmployeeTransactionRow = {
   id: string
+  branch_id: string | null
   status: EmployeeTransactionStatus
   subtotal: number
   discount_amount: number
   total_amount: number
   origin: string
   recorded_at: string
+  branches: { name: string } | { name: string }[] | null
 }
 
 /**
@@ -119,7 +120,8 @@ type ProductBaseUomRow = {
 /**
  * Hydrated transaction row shown in the employee table.
  */
-type EmployeeTransactionView = EmployeeTransactionRow & {
+type EmployeeTransactionView = Omit<EmployeeTransactionRow, 'branches'> & {
+  branchName: string
   payment: EmployeePaymentRow | null
   itemSummary: EmployeeTransactionItemSummary[]
 }
@@ -308,9 +310,8 @@ export default async function EmployeeTransactionsPage({
 
     let transactionQuery = supabase
       .from('transactions')
-      .select('id, status, subtotal, discount_amount, total_amount, origin, recorded_at', { count: 'exact' })
+      .select('id, branch_id, status, subtotal, discount_amount, total_amount, origin, recorded_at, branches(name)', { count: 'exact' })
       .eq('business_id', employeeProfile.businessId)
-      .eq('branch_id', employeeProfile.branchId)
       .eq('employee_id', employeeProfile.id)
       .order('recorded_at', { ascending: false })
       .range(from, to)
@@ -416,11 +417,16 @@ export default async function EmployeeTransactionsPage({
       itemsByTransaction.set(item.transaction_id, currentItems)
     })
 
-    transactions = transactionRows.map((transaction) => ({
-      ...transaction,
-      payment: paymentsByTransaction.get(transaction.id) ?? null,
-      itemSummary: itemsByTransaction.get(transaction.id) ?? [],
-    }))
+    transactions = transactionRows.map((transaction) => {
+      const branch = normalizeJoinedOne(transaction.branches)
+
+      return {
+        ...transaction,
+        branchName: branch?.name ?? 'Former store',
+        payment: paymentsByTransaction.get(transaction.id) ?? null,
+        itemSummary: itemsByTransaction.get(transaction.id) ?? [],
+      }
+    })
   } catch (error: unknown) {
     logger.error('EmployeeTransactionsPage data fetch failed', {
       userId: employeeProfile.id,
@@ -453,7 +459,7 @@ export default async function EmployeeTransactionsPage({
   return (
     <div className="mx-auto flex w-full flex-col items-center gap-6 text-center">
       {/* Page header */}
-      <div className="flex w-full flex-col items-center justify-center gap-4 text-center">
+      <div className="flex w-full flex-col items-center justify-between gap-4 text-center sm:flex-row sm:text-left">
         <div>
           <h1
             className="font-bold"
@@ -462,9 +468,12 @@ export default async function EmployeeTransactionsPage({
             My Transactions
           </h1>
           <p style={{ fontSize: 14, color: 'var(--color-text-muted)', marginTop: 4 }}>
-            Only transactions you recorded at {employeeProfile.branchName} are shown.
+            Transactions you recorded across your store assignments are shown. New sales can only be recorded at {employeeProfile.branchName}.
           </p>
         </div>
+        <Link href="/dashboard/employee/transactions/new" className="btn-primary" style={{ padding: '10px 18px', borderRadius: 8, flexShrink: 0 }}>
+          Record transaction
+        </Link>
       </div>
 
       {/* URL-driven filters */}
@@ -557,7 +566,7 @@ export default async function EmployeeTransactionsPage({
               <table style={{ width: '100%', borderSpacing: 0 }}>
                 <thead>
                   <tr style={{ textAlign: 'center' }}>
-                    {['Date', 'Items', 'Amount', 'Payment', 'Status'].map((heading) => (
+                    {['Date', 'Store', 'Items', 'Amount', 'Payment', 'Status'].map((heading) => (
                       <th key={heading} style={{ padding: 12, fontSize: 12, color: 'var(--color-text-muted)' }}>
                         {heading}
                       </th>
@@ -572,6 +581,9 @@ export default async function EmployeeTransactionsPage({
                     >
                       <td style={{ padding: 12, fontSize: 13, color: 'var(--color-text-primary)', textAlign: 'center' }}>
                         {formatDateTimeLabel(transaction.recorded_at)}
+                      </td>
+                      <td style={{ padding: 12, fontSize: 13, color: 'var(--color-text-primary)', textAlign: 'center' }}>
+                        {transaction.branchName}
                       </td>
                       <td style={{ padding: 12, fontSize: 13, color: 'var(--color-text-primary)', textAlign: 'center', minWidth: 220 }}>
                         {formatItemSummary(transaction.itemSummary)}

@@ -6,6 +6,7 @@
  * a responsive branch management UI with metrics and cards.
  */
 
+import Link from 'next/link'
 import { requireRole } from '../../../../lib/auth/helpers'
 import { GlobalRole } from '@smartretail/shared'
 import { createClient } from '../../../../lib/supabase/server'
@@ -357,13 +358,24 @@ export default async function BranchesPage({
               }}
             >
               <div className="flex flex-col gap-3">
-                <div>
-                  <p style={{ fontSize: '16px', fontWeight: 600, color: 'var(--color-text-primary)', margin: 0 }}>
-                    {branch.name}
-                  </p>
-                  <p style={{ fontSize: '13px', color: 'var(--color-text-muted)', marginTop: '6px' }}>
-                    {branch.location}
-                  </p>
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p style={{ fontSize: '16px', fontWeight: 600, color: 'var(--color-text-primary)', margin: 0 }}>
+                      {branch.name}
+                    </p>
+                    <p style={{ fontSize: '13px', color: 'var(--color-text-muted)', marginTop: '6px' }}>
+                      {branch.location}
+                    </p>
+                  </div>
+                  {branch.is_active && (
+                    <Link
+                      href={`/dashboard/owner/transactions/new?branch=${branch.id}`}
+                      className="btn-primary"
+                      style={{ borderRadius: 8, flexShrink: 0, padding: '7px 12px', fontSize: 12 }}
+                    >
+                      Make transaction
+                    </Link>
+                  )}
                 </div>
 
                 <div className="flex flex-wrap gap-2">
