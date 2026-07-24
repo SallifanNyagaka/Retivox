@@ -102,18 +102,28 @@ export async function getOwnerMetrics(businessId: string) {
     const activeBranchIds = await getActiveBranchIds(businessId)
 
     if (activeBranchIds.length === 0) {
-      return { totalRevenue: 0, txCount: 0, pendingApprovals: 0 }
+      return { totalRevenue: 0, verifiedSales: 0, unverifiedSales: 0, txCount: 0, pendingApprovals: 0 }
     }
 
     const { data: revenueData } = await supabase
-      .from('payments')
-      .select('amount, transactions!inner(branch_id)')
+      .from('transactions')
+      .select('total_amount, status')
       .eq('business_id', businessId)
-      .eq('status', 'verified')
-      .in('transactions.branch_id', activeBranchIds)
-      .gte('payment_at', todayStart)
+      .in('branch_id', activeBranchIds)
+      .in('status', ['synced', 'verified', 'pending_verify'])
+      .gte('recorded_at', todayStart)
 
-    const totalRevenue = revenueData?.reduce((sum, p) => sum + Number(p.amount), 0) ?? 0
+    const verifiedSales = revenueData?.reduce((sum, transaction) => {
+      return ['synced', 'verified'].includes(String(transaction.status))
+        ? sum + Number(transaction.total_amount)
+        : sum
+    }, 0) ?? 0
+    const unverifiedSales = revenueData?.reduce((sum, transaction) => {
+      return transaction.status === 'pending_verify'
+        ? sum + Number(transaction.total_amount)
+        : sum
+    }, 0) ?? 0
+    const totalRevenue = verifiedSales + unverifiedSales
 
     // Transaction count today
     const { count: txCount } = await supabase
@@ -141,12 +151,14 @@ export async function getOwnerMetrics(businessId: string) {
 
     return {
       totalRevenue,
+      verifiedSales,
+      unverifiedSales,
       txCount: txCount ?? 0,
       pendingApprovals: (pendingPayments ?? 0) + (pendingPrices ?? 0),
     }
   } catch (error) {
     logger.error('Failed to fetch owner metrics', { businessId, error })
-    return { totalRevenue: 0, txCount: 0, pendingApprovals: 0 }
+    return { totalRevenue: 0, verifiedSales: 0, unverifiedSales: 0, txCount: 0, pendingApprovals: 0 }
   }
 }
 
@@ -190,21 +202,20 @@ export async function getBranchSummaries(businessId: string) {
     if (!branches) return []
     if (activeBranchIds.length === 0) return branches.map((branch) => ({ ...branch, todayRevenue: 0 }))
 
-    // Get today's revenue per branch
-    const { data: payments } = await supabase
-      .from('payments')
-      .select('amount, transaction_id, transactions!inner(branch_id)')
+    // Get today's total sales per branch, including owner-verified and pending verification.
+    const { data: transactions } = await supabase
+      .from('transactions')
+      .select('total_amount, branch_id')
       .eq('business_id', businessId)
-      .eq('status', 'verified')
-      .in('transactions.branch_id', activeBranchIds)
-      .gte('payment_at', todayStart)
+      .in('branch_id', activeBranchIds)
+      .in('status', ['synced', 'verified', 'pending_verify'])
+      .gte('recorded_at', todayStart)
 
     // Calculate revenue per branch
     const revenueByBranch: Record<string, number> = {}
-    payments?.forEach((p) => {
-      const tx = p.transactions as unknown as { branch_id: string }
-      if (tx?.branch_id) {
-        revenueByBranch[tx.branch_id] = (revenueByBranch[tx.branch_id] ?? 0) + Number(p.amount)
+    transactions?.forEach((transaction) => {
+      if (transaction.branch_id) {
+        revenueByBranch[transaction.branch_id] = (revenueByBranch[transaction.branch_id] ?? 0) + Number(transaction.total_amount)
       }
     })
 

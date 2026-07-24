@@ -34,6 +34,8 @@ type Props = {
   basePath?: string
   subtitle?: string
   canManageTransactions?: boolean
+  recordTransactionHref?: string
+  recordTransactionLabel?: string
 }
 
 /**
@@ -260,7 +262,7 @@ function TransactionFilterBar({
 
           {/* Employee search filter */}
           <label style={{ fontSize: 13 }}>
-            <span style={{ display: 'block', marginBottom: 6, color: 'var(--color-text-muted)' }}>Employee</span>
+            <span style={{ display: 'block', marginBottom: 6, color: 'var(--color-text-muted)' }}>Recorded by</span>
             <input
               type="search"
               name="search"
@@ -342,6 +344,8 @@ export default function TransactionsPageView({
   basePath = '/dashboard/owner/transactions',
   subtitle = 'Review sales, payments, verification requests, and branch activity across the business.',
   canManageTransactions = true,
+  recordTransactionHref = `${basePath}/new`,
+  recordTransactionLabel = 'Record transaction',
 }: Props) {
   const previousPage = Math.max(1, filters.page - 1)
   const nextPage = Math.min(totalPages, filters.page + 1)
@@ -349,20 +353,25 @@ export default function TransactionsPageView({
   return (
     <div className="flex flex-col gap-6" data-currency={currency}>
       {/* Page header */}
-      <div>
-        <h1
-          className="font-bold"
-          style={{
-            fontSize: '22px',
-            color: 'var(--color-text-primary)',
-            letterSpacing: '-0.3px',
-          }}
-        >
-          Transactions
-        </h1>
-        <p style={{ fontSize: '14px', color: 'var(--color-text-muted)', marginTop: '4px' }}>
-          {subtitle}
-        </p>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h1
+            className="font-bold"
+            style={{
+              fontSize: '22px',
+              color: 'var(--color-text-primary)',
+              letterSpacing: '-0.3px',
+            }}
+          >
+            Transactions
+          </h1>
+          <p style={{ fontSize: '14px', color: 'var(--color-text-muted)', marginTop: '4px' }}>
+            {subtitle}
+          </p>
+        </div>
+        <Link href={recordTransactionHref} className="btn-primary" style={{ padding: '9px 16px', borderRadius: 8, textDecoration: 'none' }}>
+          {recordTransactionLabel}
+        </Link>
       </div>
 
       {/* Summary metrics */}
@@ -395,7 +404,7 @@ export default function TransactionsPageView({
               <table style={{ width: '100%', borderSpacing: 0 }}>
                 <thead>
                   <tr style={{ textAlign: 'left' }}>
-                    {['Time', 'Branch', 'Employee', 'Items', 'Amount', 'Payment method', 'Status', 'Actions'].map((heading) => (
+                    {['Time', 'Branch', 'Recorded by', 'Items', 'Amount', 'Payment method', 'Status', 'Actions'].map((heading) => (
                       <th key={heading} style={{ padding: '12px', fontSize: '12px', color: 'var(--color-text-muted)' }}>
                         {heading}
                       </th>

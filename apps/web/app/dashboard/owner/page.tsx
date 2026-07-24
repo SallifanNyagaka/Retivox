@@ -430,11 +430,24 @@ export default async function OwnerDashboardPage() {
       </div>
 
       {/* Metric cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-6 gap-4">
         <MetricCard
-          label="Total revenue today"
+          label="Total sales today"
           value={formatCurrency(metrics.totalRevenue, currency)}
           deltaType="neutral"
+          icon={<RevenueIcon />}
+        />
+        <MetricCard
+          label="Verified sales"
+          value={formatCurrency(metrics.verifiedSales, currency)}
+          deltaType="neutral"
+          icon={<RevenueIcon />}
+        />
+        <MetricCard
+          label="Unverified sales"
+          value={formatCurrency(metrics.unverifiedSales, currency)}
+          deltaType={metrics.unverifiedSales > 0 ? 'down' : 'neutral'}
+          valueColor={metrics.unverifiedSales > 0 ? 'var(--color-accent)' : 'var(--color-text-primary)'}
           icon={<RevenueIcon />}
         />
         <MetricCard

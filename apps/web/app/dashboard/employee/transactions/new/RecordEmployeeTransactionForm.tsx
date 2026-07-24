@@ -14,6 +14,11 @@ import Toast from '../../../../../components/ui/Toast'
 import { useToast } from '../../../../../lib/hooks/useToast'
 import { recordEmployeeTransaction, type EmployeeTransactionFormState } from './actions'
 
+type RecordTransactionAction = (
+  previousState: EmployeeTransactionFormState,
+  formData: FormData
+) => Promise<EmployeeTransactionFormState>
+
 /**
  * Branch-scoped product option available to the employee.
  */
@@ -68,6 +73,11 @@ type LineItemDraft = {
 type Props = {
   products: EmployeeProductOption[]
   currency: string
+  action?: RecordTransactionAction
+  branchId?: string
+  redirectPath?: string
+  submitLabel?: string
+  pendingMessage?: string
 }
 
 type PreviewPricing = {
@@ -310,7 +320,15 @@ const inputStyle = {
 /**
  * RecordEmployeeTransactionForm renders the web POS transaction form.
  */
-export default function RecordEmployeeTransactionForm({ products, currency }: Props) {
+export default function RecordEmployeeTransactionForm({
+  products,
+  currency,
+  action: recordTransactionAction = recordEmployeeTransaction,
+  branchId,
+  redirectPath = '/dashboard/employee/transactions',
+  submitLabel = 'Record transaction',
+  pendingMessage = 'Recording transaction...',
+}: Props) {
   const router = useRouter()
   const previousPending = useRef(false)
   const [rows, setRows] = useState<LineItemDraft[]>([
@@ -327,7 +345,7 @@ export default function RecordEmployeeTransactionForm({ products, currency }: Pr
   const [customerPhone, setCustomerPhone] = useState('')
   const [mpesaRefCode, setMpesaRefCode] = useState('')
   const [cashDepositCode, setCashDepositCode] = useState('')
-  const [state, action, isPending] = useActionState<EmployeeTransactionFormState, FormData>(recordEmployeeTransaction, {
+  const [state, action, isPending] = useActionState<EmployeeTransactionFormState, FormData>(recordTransactionAction, {
     success: false,
     error: null,
   })
@@ -404,7 +422,7 @@ export default function RecordEmployeeTransactionForm({ products, currency }: Pr
       if (state.success) {
         toast.success(state.message ?? 'Transaction recorded successfully')
         redirectTimer = setTimeout(() => {
-          router.push('/dashboard/employee/transactions')
+          router.push(redirectPath)
           router.refresh()
         }, 0)
       } else if (state.error) {
@@ -418,7 +436,7 @@ export default function RecordEmployeeTransactionForm({ products, currency }: Pr
         clearTimeout(redirectTimer)
       }
     }
-  }, [isPending, router, state.error, state.message, state.success, toast])
+  }, [isPending, redirectPath, router, state.error, state.message, state.success, toast])
 
   /**
    * Updates one line item draft field.
@@ -482,6 +500,9 @@ export default function RecordEmployeeTransactionForm({ products, currency }: Pr
     }
 
     const formData = new FormData()
+    if (branchId) {
+      formData.set('branchId', branchId)
+    }
     formData.set(
       'itemsJson',
       JSON.stringify(
@@ -513,7 +534,7 @@ export default function RecordEmployeeTransactionForm({ products, currency }: Pr
 
   return (
     <>
-      {isPending && <LoadingOverlay message="Recording transaction..." />}
+      {isPending && <LoadingOverlay message={pendingMessage} />}
       {toastState && (
         <Toast
           message={toastState.message}
@@ -879,10 +900,10 @@ export default function RecordEmployeeTransactionForm({ products, currency }: Pr
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
               </svg>
-              Recording transaction...
+              {pendingMessage}
             </span>
           ) : (
-            'Record transaction'
+            submitLabel
           )}
         </button>
       </form>
