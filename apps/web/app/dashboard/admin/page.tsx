@@ -16,6 +16,8 @@ import { Card, CardHeader } from '../../../components/ui/Card'
 import { Badge } from '../../../components/ui/Badge'
 import { MetricCard } from '../../../components/dashboard/MetricCard'
 import TimeGreeting from '../../../components/dashboard/TimeGreeting'
+import AdminBranchCoverageCards from './AdminBranchCoverageCards'
+import type { BranchInsight } from '../owner/branches/OwnerBranchCards'
 
 /**
  * Business row used to read the active currency.
@@ -41,6 +43,7 @@ type BranchRow = {
 type TransactionRow = {
   id: string
   branch_id: string
+  employee_id: string | null
   total_amount: number
   status: string
   recorded_at: string
@@ -54,6 +57,45 @@ type TransactionRow = {
   } | {
     name: string
   }[] | null
+}
+
+type BranchRoleSummaryRow = {
+  branch_id: string
+  role: 'owner' | 'admin' | 'employee'
+  is_active: boolean
+  users?: {
+    id: string
+    name: string
+    email: string | null
+    phone: string | null
+    global_role: 'owner' | 'admin' | 'employee'
+    is_active: boolean
+    deleted_at: string | null
+  } | {
+    id: string
+    name: string
+    email: string | null
+    phone: string | null
+    global_role: 'owner' | 'admin' | 'employee'
+    is_active: boolean
+    deleted_at: string | null
+  }[]
+}
+
+type BranchStockSummaryRow = {
+  branch_id: string
+  base_quantity_on_hand: number | string | null
+  base_quantity_reserved: number | string | null
+}
+
+type BranchTransactionItemProfitRow = {
+  transaction_id: string
+  gross_profit: number | string | null
+}
+
+type BranchLossReportSummaryRow = {
+  branch_id: string
+  status: string
 }
 
 /**
@@ -86,6 +128,14 @@ function normalizeJoinedOne<T>(value: T | T[] | null | undefined): T | null {
   }
 
   return Array.isArray(value) ? value[0] ?? null : value
+}
+
+function normalizeJoinedRoleUser(row: BranchRoleSummaryRow) {
+  if (!row.users) {
+    return null
+  }
+
+  return Array.isArray(row.users) ? row.users[0] ?? null : row.users
 }
 
 /**
@@ -144,13 +194,6 @@ function getTransactionVariant(status: string) {
   if (status === 'pending_verify') return 'warning'
   if (status === 'rejected') return 'danger'
   return 'muted'
-}
-
-/**
- * Returns the badge style for a branch type.
- */
-function getBranchTypeVariant(branchType: string) {
-  return branchType === 'warehouse' ? 'info' : 'success'
 }
 
 /**
@@ -216,6 +259,7 @@ export default async function AdminDashboardPage() {
   let recentTransactions: TransactionRow[] = []
   let lowStockItems: LowStockRow[] = []
   let todayRevenue = 0
+  let branchInsights: Record<string, BranchInsight> = {}
 
   try {
     const supabase = await createClient()
@@ -259,14 +303,14 @@ export default async function AdminDashboardPage() {
         ? await Promise.all([
             supabase
               .from('transactions')
-              .select('id, branch_id, total_amount, status, recorded_at, users(name), branches!inner(name)')
+              .select('id, branch_id, employee_id, total_amount, status, recorded_at, users(name), branches!inner(name)')
               .eq('business_id', businessId)
               .in('branch_id', branchIds)
               .gte('recorded_at', todayStart)
               .order('recorded_at', { ascending: false }),
             supabase
               .from('transactions')
-              .select('id, branch_id, total_amount, status, recorded_at, users(name), branches!inner(name)')
+              .select('id, branch_id, employee_id, total_amount, status, recorded_at, users(name), branches!inner(name)')
               .eq('business_id', businessId)
               .in('branch_id', branchIds)
               .order('recorded_at', { ascending: false })
@@ -289,6 +333,179 @@ export default async function AdminDashboardPage() {
     recentTransactions = (recentTransactionsResponse.data ?? []) as TransactionRow[]
     lowStockItems = branchIds.length > 0 ? ((await getStockAlerts(businessId, branchIds, 6)) as LowStockRow[]) : []
     todayRevenue = todayTransactions.reduce((sum, transaction) => sum + Number(transaction.total_amount), 0)
+
+    branchInsights = assignedBranches.reduce<Record<string, BranchInsight>>((accumulator, branch) => {
+      accumulator[branch.id] = {
+        branchId: branch.id,
+        admins: [],
+        employees: [],
+        stockItems: 0,
+        stockBaseQuantity: 0,
+        todaySales: 0,
+        todayVerifiedSales: 0,
+        todayProfit: 0,
+        pendingDamageReports: 0,
+        approvedLossReports: 0,
+        bestEmployeeName: null,
+        bestEmployeeSales: 0,
+        bestAdminName: null,
+        bestAdminSales: 0,
+      }
+
+      return accumulator
+    }, {})
+
+    const [rolesResponse, stockResponse, lossReportsResponse] =
+      branchIds.length > 0
+        ? await Promise.all([
+            supabase
+              .from('user_branch_roles')
+              .select('branch_id, role, is_active, users!user_branch_roles_user_id_fkey(id, name, email, phone, global_role, is_active, deleted_at)')
+              .eq('business_id', businessId)
+              .in('branch_id', branchIds)
+              .in('role', ['admin', 'employee']),
+            supabase
+              .from('branch_stock')
+              .select('branch_id, base_quantity_on_hand, base_quantity_reserved')
+              .eq('business_id', businessId)
+              .in('branch_id', branchIds),
+            supabase
+              .from('employee_inventory_loss_reports')
+              .select('branch_id, status')
+              .eq('business_id', businessId)
+              .in('branch_id', branchIds),
+          ])
+        : [
+            { data: [], error: null },
+            { data: [], error: null },
+            { data: [], error: null },
+          ]
+
+    if (rolesResponse.error) {
+      throw rolesResponse.error
+    }
+
+    if (stockResponse.error) {
+      throw stockResponse.error
+    }
+
+    if (lossReportsResponse.error) {
+      throw lossReportsResponse.error
+    }
+
+    const todayTransactionIds = todayTransactions.map((transaction) => transaction.id)
+    const transactionItemsResponse =
+      todayTransactionIds.length > 0
+        ? await supabase
+            .from('transaction_items')
+            .select('transaction_id, gross_profit')
+            .eq('business_id', businessId)
+            .in('transaction_id', todayTransactionIds)
+        : { data: [], error: null }
+
+    if (transactionItemsResponse.error) {
+      throw transactionItemsResponse.error
+    }
+
+    const usersById = new Map<string, NonNullable<ReturnType<typeof normalizeJoinedRoleUser>>>()
+    ;((rolesResponse.data ?? []) as BranchRoleSummaryRow[]).forEach((role) => {
+      const user = normalizeJoinedRoleUser(role)
+      const insight = branchInsights[role.branch_id]
+
+      if (!user || !insight || role.is_active === false || !user.is_active || user.deleted_at !== null) {
+        return
+      }
+
+      usersById.set(user.id, user)
+      const person = { id: user.id, name: user.name, email: user.email, phone: user.phone }
+
+      if (role.role === 'admin') {
+        insight.admins.push(person)
+      }
+
+      if (role.role === 'employee') {
+        insight.employees.push(person)
+      }
+    })
+
+    ;((stockResponse.data ?? []) as BranchStockSummaryRow[]).forEach((stock) => {
+      const insight = branchInsights[stock.branch_id]
+
+      if (!insight) {
+        return
+      }
+
+      const available = Math.max(Number(stock.base_quantity_on_hand ?? 0) - Number(stock.base_quantity_reserved ?? 0), 0)
+
+      if (available > 0) {
+        insight.stockItems += 1
+      }
+
+      insight.stockBaseQuantity += available
+    })
+
+    const profitByTransaction = new Map<string, number>()
+    ;((transactionItemsResponse.data ?? []) as BranchTransactionItemProfitRow[]).forEach((item) => {
+      profitByTransaction.set(item.transaction_id, (profitByTransaction.get(item.transaction_id) ?? 0) + Number(item.gross_profit ?? 0))
+    })
+
+    const salesByUserBranch = new Map<string, number>()
+    todayTransactions.forEach((transaction) => {
+      const insight = branchInsights[transaction.branch_id]
+
+      if (!insight) {
+        return
+      }
+
+      const amount = Number(transaction.total_amount ?? 0)
+      insight.todaySales += amount
+      insight.todayProfit += profitByTransaction.get(transaction.id) ?? 0
+
+      if (transaction.status === 'verified') {
+        insight.todayVerifiedSales += amount
+      }
+
+      if (transaction.employee_id) {
+        const key = `${transaction.branch_id}:${transaction.employee_id}`
+        salesByUserBranch.set(key, (salesByUserBranch.get(key) ?? 0) + amount)
+      }
+    })
+
+    salesByUserBranch.forEach((amount, key) => {
+      const [branchId, userId] = key.split(':')
+      const insight = branchInsights[branchId]
+      const user = usersById.get(userId)
+
+      if (!insight || !user) {
+        return
+      }
+
+      if (user.global_role === 'employee' && amount > insight.bestEmployeeSales) {
+        insight.bestEmployeeName = user.name
+        insight.bestEmployeeSales = amount
+      }
+
+      if (user.global_role === 'admin' && amount > insight.bestAdminSales) {
+        insight.bestAdminName = user.name
+        insight.bestAdminSales = amount
+      }
+    })
+
+    ;((lossReportsResponse.data ?? []) as BranchLossReportSummaryRow[]).forEach((loss) => {
+      const insight = branchInsights[loss.branch_id]
+
+      if (!insight) {
+        return
+      }
+
+      if (loss.status === 'pending') {
+        insight.pendingDamageReports += 1
+      }
+
+      if (loss.status === 'approved') {
+        insight.approvedLossReports += 1
+      }
+    })
   } catch (error: unknown) {
     logger.error('AdminDashboardPage data fetch failed', { businessId, error })
     pageError = error
@@ -381,40 +598,7 @@ export default async function AdminDashboardPage() {
               </div>
             </div>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-              {assignedBranches.map((branch) => (
-                <div
-                  key={branch.id}
-                  className="rounded-xl border"
-                  style={{
-                    borderColor: 'var(--color-border)',
-                    backgroundColor: 'var(--color-background)',
-                    padding: '16px',
-                  }}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p style={{ fontSize: '15px', fontWeight: 600, color: 'var(--color-text-primary)', margin: 0 }}>
-                        {branch.name}
-                      </p>
-                      <p style={{ fontSize: '13px', color: 'var(--color-text-muted)', marginTop: '6px' }}>
-                        {branch.location}
-                      </p>
-                    </div>
-                    <Badge variant={branch.is_active ? 'success' : 'muted'}>
-                      {branch.is_active ? 'Active' : 'Inactive'}
-                    </Badge>
-                  </div>
-
-                  <div className="flex flex-wrap gap-2" style={{ marginTop: '12px' }}>
-                    <Badge variant={getBranchTypeVariant(branch.branch_type)}>{branch.branch_type}</Badge>
-                    <Badge variant="info">
-                      {todayTransactions.filter((transaction) => transaction.branch_id === branch.id).length} sales today
-                    </Badge>
-                  </div>
-                </div>
-              ))}
-            </div>
+            <AdminBranchCoverageCards branches={assignedBranches} insights={branchInsights} currency={currency} />
           )}
         </Card>
 

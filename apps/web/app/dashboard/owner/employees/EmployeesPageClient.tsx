@@ -10,6 +10,7 @@ import { useMemo, useState } from 'react'
 import { Card, CardHeader } from '../../../../components/ui/Card'
 import { Badge } from '../../../../components/ui/Badge'
 import { MetricCard } from '../../../../components/dashboard/MetricCard'
+import PersonDetailsDialog, { type PersonDetail } from '../../../../components/dashboard/PersonDetailsDialog'
 import SpreadsheetTools from '../../../../components/dashboard/SpreadsheetTools'
 import AddEmployeeForm from './AddEmployeeForm'
 import InviteEmployeeForm from './InviteEmployeeForm'
@@ -126,6 +127,7 @@ export default function EmployeesPageClient({
   const [search, setSearch] = useState('')
   const [status, setStatus] = useState<'all' | 'active' | 'inactive'>('all')
   const [branchId, setBranchId] = useState('all')
+  const [selectedEmployee, setSelectedEmployee] = useState<PersonDetail | null>(null)
 
   const filteredEmployees = useMemo(() => {
     const normalized = search.trim().toLowerCase()
@@ -315,8 +317,42 @@ export default function EmployeesPageClient({
                   {filteredEmployees.map((employee, index) => (
                     <tr
                       key={employee.id}
+                      role="button"
+                      tabIndex={0}
                       style={{
                         backgroundColor: index % 2 === 0 ? 'var(--color-background)' : 'var(--color-surface)',
+                        cursor: 'pointer',
+                      }}
+                      onClick={() =>
+                        setSelectedEmployee({
+                          id: employee.id,
+                          name: employee.name,
+                          roleLabel: 'Employee',
+                          email: employee.email,
+                          phone: employee.phone,
+                          statusLabel: employee.is_active ? 'Active' : 'Inactive',
+                          assignedLabel: employee.assignedBranchName ?? 'No branch assigned',
+                          createdLabel: formatDateTimeLabel(employee.created_at),
+                          transactionCount: employee.transactionCount,
+                          operationsHref: `/dashboard/owner/transactions?employee=${employee.id}`,
+                        })
+                      }
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault()
+                          setSelectedEmployee({
+                            id: employee.id,
+                            name: employee.name,
+                            roleLabel: 'Employee',
+                            email: employee.email,
+                            phone: employee.phone,
+                            statusLabel: employee.is_active ? 'Active' : 'Inactive',
+                            assignedLabel: employee.assignedBranchName ?? 'No branch assigned',
+                            createdLabel: formatDateTimeLabel(employee.created_at),
+                            transactionCount: employee.transactionCount,
+                            operationsHref: `/dashboard/owner/transactions?employee=${employee.id}`,
+                          })
+                        }
                       }}
                     >
                       <td style={{ padding: '12px', fontSize: '13px', color: 'var(--color-text-primary)' }}>
@@ -339,7 +375,7 @@ export default function EmployeesPageClient({
                           {employee.is_active ? 'Active' : 'Inactive'}
                         </Badge>
                       </td>
-                      <td style={{ padding: '12px' }}>
+                      <td style={{ padding: '12px' }} onClick={(event) => event.stopPropagation()}>
                         <EmployeeRowActions employee={employee} branches={branches} />
                       </td>
                     </tr>
@@ -350,6 +386,8 @@ export default function EmployeesPageClient({
           )}
         </Card>
       )}
+
+      <PersonDetailsDialog person={selectedEmployee} onClose={() => setSelectedEmployee(null)} />
 
       {/* Transfer history table */}
       {activeTab === 'transfers' && (

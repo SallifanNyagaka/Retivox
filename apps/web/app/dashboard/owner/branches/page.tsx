@@ -6,16 +6,14 @@
  * a responsive branch management UI with metrics and cards.
  */
 
-import Link from 'next/link'
 import { requireRole } from '../../../../lib/auth/helpers'
 import { GlobalRole } from '@smartretail/shared'
 import { createClient } from '../../../../lib/supabase/server'
 import { runSoftDeleteAwareQuery } from '../../../../lib/supabase/softDelete'
 import { Card } from '../../../../components/ui/Card'
-import { Badge } from '../../../../components/ui/Badge'
 import SpreadsheetTools from '../../../../components/dashboard/SpreadsheetTools'
 import AddBranchForm from './AddBranchForm'
-import BranchCardActions from './BranchCardActions'
+import OwnerBranchCards, { type BranchInsight } from './OwnerBranchCards'
 import { importBranches } from './actions'
 
 // ── Types for branch data and statistics ──
@@ -38,35 +36,59 @@ type BranchTransactionCountRow = {
   count: number
 }
 
-/**
- * Returns the badge variant for a branch type.
- */
-function getBranchTypeVariant(branchType: string) {
-  return branchType === 'warehouse' ? 'info' : 'success'
+type BranchRoleSummaryRow = {
+  branch_id: string
+  role: 'owner' | 'admin' | 'employee'
+  is_active: boolean
+  users?: {
+    id: string
+    name: string
+    email: string | null
+    phone: string | null
+    global_role: 'owner' | 'admin' | 'employee'
+    is_active: boolean
+    deleted_at: string | null
+  } | {
+    id: string
+    name: string
+    email: string | null
+    phone: string | null
+    global_role: 'owner' | 'admin' | 'employee'
+    is_active: boolean
+    deleted_at: string | null
+  }[]
 }
 
-/**
- * Formats an ISO date as a readable label.
- */
-function formatDateLabel(isoDate: string) {
-  return new Date(isoDate).toLocaleDateString([], {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-  })
+type BranchStockSummaryRow = {
+  branch_id: string
+  base_quantity_on_hand: number | string | null
+  base_quantity_reserved: number | string | null
 }
 
-/**
- * Icon used for transaction totals.
- */
-function TransactionIcon() {
-  return (
-    <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-      <path d="M3 12h18" />
-      <path d="M3 6h18" />
-      <path d="M3 18h18" />
-    </svg>
-  )
+type BranchTodayTransactionRow = {
+  id: string
+  branch_id: string | null
+  employee_id: string | null
+  total_amount: number | string
+  status: string
+}
+
+type BranchTransactionItemProfitRow = {
+  transaction_id: string
+  gross_profit: number | string | null
+}
+
+type BranchLossReportSummaryRow = {
+  branch_id: string
+  status: string
+}
+
+function normalizeJoinedUser(row: BranchRoleSummaryRow) {
+  if (!row.users) {
+    return null
+  }
+
+  return Array.isArray(row.users) ? row.users[0] ?? null : row.users
 }
 
 /**
@@ -124,15 +146,7 @@ export default async function BranchesPage({
   )
 
   // Fetch transaction counts grouped by branch through a compact RPC.
-  const transactionResponse = await supabase
-    .rpc('owner_branch_transaction_counts')
-
-  // Fetch admin assignments per branch (only live users count as assigned)
-  const adminRolesResponse = await supabase
-    .from('user_branch_roles')
-    .select('branch_id, is_active, users!user_branch_roles_user_id_fkey(is_active, deleted_at)')
-    .eq('business_id', businessId)
-    .eq('role', 'admin')
+  const transactionResponse = await supabase.rpc('owner_branch_transaction_counts')
 
   if (branchesResponse.error) {
     throw branchesResponse.error
@@ -142,17 +156,88 @@ export default async function BranchesPage({
     throw transactionResponse.error
   }
 
-  if (adminRolesResponse.error) {
-    throw adminRolesResponse.error
+  const branches = (branchesResponse.data ?? []) as Branch[]
+  const branchIds = branches.map((branch) => branch.id)
+  const transactionCounts = (transactionResponse.data ?? []) as BranchTransactionCountRow[]
+
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const todayStart = today.toISOString()
+
+  const [businessResponse, rolesResponse, stockResponse, todayTransactionsResponse, lossReportsResponse] = await Promise.all([
+    supabase.from('businesses').select('currency').eq('id', businessId).single(),
+    branchIds.length > 0
+      ? supabase
+          .from('user_branch_roles')
+          .select('branch_id, role, is_active, users!user_branch_roles_user_id_fkey(id, name, email, phone, global_role, is_active, deleted_at)')
+          .eq('business_id', businessId)
+          .in('branch_id', branchIds)
+          .in('role', ['admin', 'employee'])
+      : Promise.resolve({ data: [], error: null }),
+    branchIds.length > 0
+      ? supabase
+          .from('branch_stock')
+          .select('branch_id, base_quantity_on_hand, base_quantity_reserved')
+          .eq('business_id', businessId)
+          .in('branch_id', branchIds)
+      : Promise.resolve({ data: [], error: null }),
+    branchIds.length > 0
+      ? supabase
+          .from('transactions')
+          .select('id, branch_id, employee_id, total_amount, status')
+          .eq('business_id', businessId)
+          .in('branch_id', branchIds)
+          .gte('recorded_at', todayStart)
+      : Promise.resolve({ data: [], error: null }),
+    branchIds.length > 0
+      ? supabase
+          .from('employee_inventory_loss_reports')
+          .select('branch_id, status')
+          .eq('business_id', businessId)
+          .in('branch_id', branchIds)
+      : Promise.resolve({ data: [], error: null }),
+  ])
+
+  if (businessResponse.error) {
+    throw businessResponse.error
   }
 
-  const branches = (branchesResponse.data ?? []) as Branch[]
-  const transactionCounts = (transactionResponse.data ?? []) as BranchTransactionCountRow[]
-  const adminRoles = (adminRolesResponse.data ?? []) as {
-    branch_id: string
-    is_active: boolean
-    users?: { is_active: boolean; deleted_at: string | null }[]
-  }[]
+  if (rolesResponse.error) {
+    throw rolesResponse.error
+  }
+
+  if (stockResponse.error) {
+    throw stockResponse.error
+  }
+
+  if (todayTransactionsResponse.error) {
+    throw todayTransactionsResponse.error
+  }
+
+  if (lossReportsResponse.error) {
+    throw lossReportsResponse.error
+  }
+
+  const currency = businessResponse.data?.currency ?? 'USD'
+  const roleRows = (rolesResponse.data ?? []) as BranchRoleSummaryRow[]
+  const stockRows = (stockResponse.data ?? []) as BranchStockSummaryRow[]
+  const todayTransactions = (todayTransactionsResponse.data ?? []) as BranchTodayTransactionRow[]
+  const lossRows = (lossReportsResponse.data ?? []) as BranchLossReportSummaryRow[]
+  const todayTransactionIds = todayTransactions.map((transaction) => transaction.id)
+  const transactionItemsResponse =
+    todayTransactionIds.length > 0
+      ? await supabase
+          .from('transaction_items')
+          .select('transaction_id, gross_profit')
+          .eq('business_id', businessId)
+          .in('transaction_id', todayTransactionIds)
+      : { data: [], error: null }
+
+  if (transactionItemsResponse.error) {
+    throw transactionItemsResponse.error
+  }
+
+  const transactionItemRows = (transactionItemsResponse.data ?? []) as BranchTransactionItemProfitRow[]
   const transactionCountMap: Record<string, number> = {}
   transactionCounts.forEach((transaction) => {
     transactionCountMap[transaction.branchId] = transaction.count
@@ -182,12 +267,148 @@ export default async function BranchesPage({
 
   // Compute admin counts per branch and total admins across the business
   const adminCountMap: Record<string, number> = {}
-  adminRoles.forEach((r) => {
-    const branchId = r.branch_id
-    const user = r.users?.[0]
-    const active = r.is_active !== false && user?.is_active === true && user.deleted_at === null
-    if (!adminCountMap[branchId]) adminCountMap[branchId] = 0
-    if (active) adminCountMap[branchId] += 1
+  roleRows.forEach((role) => {
+    const branchId = role.branch_id
+    const user = normalizeJoinedUser(role)
+    const active = role.is_active !== false && user?.is_active === true && user.deleted_at === null
+
+    if (role.role === 'admin' && active) {
+      if (!adminCountMap[branchId]) adminCountMap[branchId] = 0
+      adminCountMap[branchId] += 1
+    }
+  })
+
+  const usersById = new Map<string, NonNullable<ReturnType<typeof normalizeJoinedUser>>>()
+  const branchInsights: Record<string, BranchInsight> = {}
+
+  branches.forEach((branch) => {
+    branchInsights[branch.id] = {
+      branchId: branch.id,
+      admins: [],
+      employees: [],
+      stockItems: 0,
+      stockBaseQuantity: 0,
+      todaySales: 0,
+      todayVerifiedSales: 0,
+      todayProfit: 0,
+      pendingDamageReports: 0,
+      approvedLossReports: 0,
+      bestEmployeeName: null,
+      bestEmployeeSales: 0,
+      bestAdminName: null,
+      bestAdminSales: 0,
+    }
+  })
+
+  roleRows.forEach((role) => {
+    const user = normalizeJoinedUser(role)
+    const insight = branchInsights[role.branch_id]
+
+    if (!user || !insight || role.is_active === false || !user.is_active || user.deleted_at !== null) {
+      return
+    }
+
+    usersById.set(user.id, user)
+
+    const person = {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      phone: user.phone,
+    }
+
+    if (role.role === 'admin') {
+      insight.admins.push(person)
+    }
+
+    if (role.role === 'employee') {
+      insight.employees.push(person)
+    }
+  })
+
+  stockRows.forEach((stock) => {
+    const insight = branchInsights[stock.branch_id]
+
+    if (!insight) {
+      return
+    }
+
+    const onHand = Number(stock.base_quantity_on_hand ?? 0)
+    const reserved = Number(stock.base_quantity_reserved ?? 0)
+    const available = Math.max(onHand - reserved, 0)
+
+    if (available > 0) {
+      insight.stockItems += 1
+    }
+
+    insight.stockBaseQuantity += available
+  })
+
+  const profitByTransaction = new Map<string, number>()
+  transactionItemRows.forEach((item) => {
+    profitByTransaction.set(item.transaction_id, (profitByTransaction.get(item.transaction_id) ?? 0) + Number(item.gross_profit ?? 0))
+  })
+
+  const salesByUserBranch = new Map<string, number>()
+  todayTransactions.forEach((transaction) => {
+    if (!transaction.branch_id) {
+      return
+    }
+
+    const insight = branchInsights[transaction.branch_id]
+
+    if (!insight) {
+      return
+    }
+
+    const amount = Number(transaction.total_amount ?? 0)
+    insight.todaySales += amount
+    insight.todayProfit += profitByTransaction.get(transaction.id) ?? 0
+
+    if (transaction.status === 'verified') {
+      insight.todayVerifiedSales += amount
+    }
+
+    if (transaction.employee_id) {
+      const key = `${transaction.branch_id}:${transaction.employee_id}`
+      salesByUserBranch.set(key, (salesByUserBranch.get(key) ?? 0) + amount)
+    }
+  })
+
+  salesByUserBranch.forEach((amount, key) => {
+    const [branchId, userId] = key.split(':')
+    const insight = branchInsights[branchId]
+    const user = usersById.get(userId)
+
+    if (!insight || !user) {
+      return
+    }
+
+    if (user.global_role === 'employee' && amount > insight.bestEmployeeSales) {
+      insight.bestEmployeeName = user.name
+      insight.bestEmployeeSales = amount
+    }
+
+    if (user.global_role === 'admin' && amount > insight.bestAdminSales) {
+      insight.bestAdminName = user.name
+      insight.bestAdminSales = amount
+    }
+  })
+
+  lossRows.forEach((loss) => {
+    const insight = branchInsights[loss.branch_id]
+
+    if (!insight) {
+      return
+    }
+
+    if (loss.status === 'pending') {
+      insight.pendingDamageReports += 1
+    }
+
+    if (loss.status === 'approved') {
+      insight.approvedLossReports += 1
+    }
   })
 
   const totalAdmins = Object.values(adminCountMap).reduce((s, v) => s + v, 0)
@@ -346,63 +567,12 @@ export default async function BranchesPage({
           <AddBranchForm />
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {branchesWithStats.map((branch) => (
-            <Card
-              key={branch.id}
-              hoverable
-              className="flex flex-col justify-between"
-              style={{
-                borderLeft: `3px solid ${branch.is_active ? 'var(--color-success)' : 'var(--color-text-muted)'}`,
-                padding: '20px',
-              }}
-            >
-              <div className="flex flex-col gap-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <p style={{ fontSize: '16px', fontWeight: 600, color: 'var(--color-text-primary)', margin: 0 }}>
-                      {branch.name}
-                    </p>
-                    <p style={{ fontSize: '13px', color: 'var(--color-text-muted)', marginTop: '6px' }}>
-                      {branch.location}
-                    </p>
-                  </div>
-                  {branch.is_active && (
-                    <Link
-                      href={`/dashboard/owner/transactions/new?branch=${branch.id}`}
-                      className="btn-primary"
-                      style={{ borderRadius: 8, flexShrink: 0, padding: '7px 12px', fontSize: 12 }}
-                    >
-                      Make transaction
-                    </Link>
-                  )}
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                  <Badge variant={getBranchTypeVariant(branch.branch_type)}>{branch.branch_type}</Badge>
-                  <Badge variant={branch.is_active ? 'success' : 'muted'}>
-                    {branch.is_active ? 'Active' : 'Inactive'}
-                  </Badge>
-                </div>
-
-                <div className="flex items-center gap-2" style={{ color: 'var(--color-text-primary)' }}>
-                  <TransactionIcon />
-                  <span style={{ fontSize: '13px', fontWeight: 500 }}>
-                    {branch.transactionCount} transactions
-                  </span>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between" style={{ marginTop: 18 }}>
-                <p style={{ fontSize: '12px', color: 'var(--color-text-muted)' }}>Created {formatDateLabel(branch.created_at)}</p>
-                <div className="flex items-center gap-2">
-                  <span style={{ fontSize: 13, color: 'var(--color-text-primary)' }}>{adminCountMap[branch.id] ?? 0} admins</span>
-                  <BranchCardActions branchId={branch.id} branchName={branch.name} isActive={branch.is_active} />
-                </div>
-              </div>
-            </Card>
-          ))}
-        </div>
+        <OwnerBranchCards
+          branches={branchesWithStats}
+          adminCountMap={adminCountMap}
+          insights={branchInsights}
+          currency={currency}
+        />
       )}
     </div>
   )

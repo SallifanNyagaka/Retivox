@@ -25,6 +25,10 @@ type ActiveAwareBranchRoleRow = UserBranchRoleRow & {
   is_active?: boolean | null
 }
 
+type AdminTransactionCountRow = {
+  employee_id: string | null
+}
+
 /**
  * Owner admins page server component.
  */
@@ -138,6 +142,30 @@ export default async function AdminsPage() {
       userMap[user.id] = user
     })
 
+    const adminIds = users.filter((user) => user.global_role === 'admin').map((user) => user.id)
+    const transactionCountsResponse =
+      adminIds.length > 0
+        ? await supabase
+            .from('transactions')
+            .select('employee_id')
+            .eq('business_id', businessId)
+            .in('employee_id', adminIds)
+            .range(0, 9999)
+        : { data: [], error: null }
+
+    if (transactionCountsResponse.error) {
+      throw transactionCountsResponse.error
+    }
+
+    const transactionCounts = new Map<string, number>()
+    ;((transactionCountsResponse.data ?? []) as AdminTransactionCountRow[]).forEach((transaction) => {
+      if (!transaction.employee_id) {
+        return
+      }
+
+      transactionCounts.set(transaction.employee_id, (transactionCounts.get(transaction.employee_id) ?? 0) + 1)
+    })
+
     const adminAssignedBranchIds = new Set(
       roles
         .filter((role) => role.is_active !== false && userMap[role.user_id]?.global_role === 'admin')
@@ -156,6 +184,7 @@ export default async function AdminsPage() {
           ...user,
           assignedBranchIds,
           assignedBranchNames: assignedBranchIds.map((branchId) => branchMap[branchId]).filter(Boolean),
+          transactionCount: transactionCounts.get(user.id) ?? 0,
         }
       })
 
@@ -170,6 +199,7 @@ export default async function AdminsPage() {
             .filter((role) => role.user_id === ownerUser.id && role.is_active !== false)
             .map((role) => branchMap[role.branch_id])
             .filter(Boolean),
+          transactionCount: 0,
         }
       : null
 

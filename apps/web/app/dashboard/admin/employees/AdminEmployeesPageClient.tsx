@@ -10,6 +10,7 @@ import { useMemo, useState } from 'react'
 import { Badge } from '../../../../components/ui/Badge'
 import { Card, CardHeader } from '../../../../components/ui/Card'
 import { MetricCard } from '../../../../components/dashboard/MetricCard'
+import PersonDetailsDialog, { type PersonDetail } from '../../../../components/dashboard/PersonDetailsDialog'
 import AddAdminEmployeeForm, { type AdminEmployeeBranchOption } from './AddAdminEmployeeForm'
 import AdminEmployeeRowActions from './AdminEmployeeRowActions'
 
@@ -102,6 +103,7 @@ export default function AdminEmployeesPageClient({ employees, branches, metrics 
   const [search, setSearch] = useState('')
   const [status, setStatus] = useState<'all' | 'active' | 'inactive'>('all')
   const [branchId, setBranchId] = useState('all')
+  const [selectedEmployee, setSelectedEmployee] = useState<PersonDetail | null>(null)
 
   /**
    * Filters employee rows locally after the server has already branch-scoped them.
@@ -253,7 +255,43 @@ export default function AdminEmployeesPageClient({ employees, branches, metrics 
                   return (
                     <tr
                       key={employee.roleId}
-                      style={{ backgroundColor: index % 2 === 0 ? 'var(--color-background)' : 'var(--color-surface)' }}
+                      role="button"
+                      tabIndex={0}
+                      style={{
+                        backgroundColor: index % 2 === 0 ? 'var(--color-background)' : 'var(--color-surface)',
+                        cursor: 'pointer',
+                      }}
+                      onClick={() =>
+                        setSelectedEmployee({
+                          id: employee.userId,
+                          name: employee.name,
+                          roleLabel: 'Employee',
+                          email: employee.email,
+                          phone: employee.phone,
+                          statusLabel,
+                          assignedLabel: employee.branchName,
+                          createdLabel: formatDateLabel(employee.assignedAt),
+                          transactionCount: employee.transactionCount,
+                          operationsHref: `/dashboard/admin/transactions?employee=${employee.userId}&branch=${employee.branchId}`,
+                        })
+                      }
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault()
+                          setSelectedEmployee({
+                            id: employee.userId,
+                            name: employee.name,
+                            roleLabel: 'Employee',
+                            email: employee.email,
+                            phone: employee.phone,
+                            statusLabel,
+                            assignedLabel: employee.branchName,
+                            createdLabel: formatDateLabel(employee.assignedAt),
+                            transactionCount: employee.transactionCount,
+                            operationsHref: `/dashboard/admin/transactions?employee=${employee.userId}&branch=${employee.branchId}`,
+                          })
+                        }
+                      }}
                     >
                       <td style={{ padding: 12, fontSize: 13, color: 'var(--color-text-primary)' }}>{employee.name}</td>
                       <td style={{ padding: 12, fontSize: 13, color: 'var(--color-text-primary)' }}>{employee.email}</td>
@@ -268,7 +306,7 @@ export default function AdminEmployeesPageClient({ employees, branches, metrics 
                       <td style={{ padding: 12 }}>
                         <Badge variant={operationallyActive ? 'success' : 'muted'}>{statusLabel}</Badge>
                       </td>
-                      <td style={{ padding: 12 }}>
+                      <td style={{ padding: 12 }} onClick={(event) => event.stopPropagation()}>
                         <AdminEmployeeRowActions
                           employee={{
                             roleId: employee.roleId,
@@ -289,6 +327,8 @@ export default function AdminEmployeesPageClient({ employees, branches, metrics 
           </div>
         )}
       </Card>
+
+      <PersonDetailsDialog person={selectedEmployee} onClose={() => setSelectedEmployee(null)} />
     </div>
   )
 }

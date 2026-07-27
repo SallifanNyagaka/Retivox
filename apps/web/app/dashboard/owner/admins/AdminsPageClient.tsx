@@ -10,6 +10,7 @@ import { useMemo, useState } from 'react'
 import { Card, CardHeader } from '../../../../components/ui/Card'
 import { Badge } from '../../../../components/ui/Badge'
 import { MetricCard } from '../../../../components/dashboard/MetricCard'
+import PersonDetailsDialog, { type PersonDetail } from '../../../../components/dashboard/PersonDetailsDialog'
 import SpreadsheetTools from '../../../../components/dashboard/SpreadsheetTools'
 import AddAdminForm from './AddAdminForm'
 import InviteAdminForm from './InviteAdminForm'
@@ -84,6 +85,7 @@ export default function AdminsPageClient({
   const [search, setSearch] = useState('')
   const [status, setStatus] = useState<'all' | 'active' | 'inactive'>('all')
   const [branchId, setBranchId] = useState('all')
+  const [selectedAdmin, setSelectedAdmin] = useState<PersonDetail | null>(null)
 
   const filteredAdmins = useMemo(() => {
     const normalized = search.trim().toLowerCase()
@@ -329,8 +331,42 @@ export default function AdminsPageClient({
                   {filteredAdmins.map((admin, index) => (
                     <tr
                       key={admin.id}
+                      role="button"
+                      tabIndex={0}
                       style={{
                         backgroundColor: index % 2 === 0 ? 'var(--color-background)' : 'var(--color-surface)',
+                        cursor: 'pointer',
+                      }}
+                      onClick={() =>
+                        setSelectedAdmin({
+                          id: admin.id,
+                          name: admin.name,
+                          roleLabel: 'Admin',
+                          email: admin.email,
+                          phone: admin.phone,
+                          statusLabel: admin.is_active ? 'Active' : 'Inactive',
+                          assignedLabel: admin.assignedBranchNames.length > 0 ? admin.assignedBranchNames.join(', ') : 'No branches assigned',
+                          createdLabel: formatDateTimeLabel(admin.created_at),
+                          transactionCount: admin.transactionCount,
+                          operationsHref: `/dashboard/owner/transactions?employee=${admin.id}`,
+                        })
+                      }
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault()
+                          setSelectedAdmin({
+                            id: admin.id,
+                            name: admin.name,
+                            roleLabel: 'Admin',
+                            email: admin.email,
+                            phone: admin.phone,
+                            statusLabel: admin.is_active ? 'Active' : 'Inactive',
+                            assignedLabel: admin.assignedBranchNames.length > 0 ? admin.assignedBranchNames.join(', ') : 'No branches assigned',
+                            createdLabel: formatDateTimeLabel(admin.created_at),
+                            transactionCount: admin.transactionCount,
+                            operationsHref: `/dashboard/owner/transactions?employee=${admin.id}`,
+                          })
+                        }
                       }}
                     >
                       <td style={{ padding: '12px', fontSize: '13px', color: 'var(--color-text-primary)' }}>
@@ -353,7 +389,7 @@ export default function AdminsPageClient({
                           <Badge variant="info">{admin.global_role === 'admin' ? 'Admin' : 'Owner'}</Badge>
                         </div>
                       </td>
-                      <td style={{ padding: '12px' }}>
+                      <td style={{ padding: '12px' }} onClick={(event) => event.stopPropagation()}>
                         <AdminRowActions
                           admin={admin}
                           branches={branches}
@@ -368,6 +404,8 @@ export default function AdminsPageClient({
           )}
         </Card>
       )}
+
+      <PersonDetailsDialog person={selectedAdmin} onClose={() => setSelectedAdmin(null)} />
 
       {/* Transfer history tab */}
       {activeTab === 'history' && (

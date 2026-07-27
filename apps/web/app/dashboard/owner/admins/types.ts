@@ -58,6 +58,7 @@ export type EmployeeTransferRow = {
 export type AdminRow = AdminUserRow & {
   assignedBranchIds: string[]
   assignedBranchNames: string[]
+  transactionCount: number
 }
 
 /**
@@ -69,4 +70,3 @@ export type TransferHistoryRow = EmployeeTransferRow & {
   from_branch_name: string
   to_branch_name: string
 }
-
