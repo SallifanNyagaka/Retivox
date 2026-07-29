@@ -525,10 +525,6 @@ BEGIN
     RAISE EXCEPTION 'Enter a valid M-Pesa reference code';
   END IF;
 
-  IF p_payment_method = 'cash' AND length(trim(COALESCE(p_cash_deposit_code, ''))) < 3 THEN
-    RAISE EXCEPTION 'Enter a valid cash deposit/reference code';
-  END IF;
-
   SELECT *
     INTO v_branch
     FROM public.branches
@@ -771,7 +767,7 @@ BEGIN
     v_total_amount,
     v_payment_status,
     CASE WHEN p_payment_method = 'mpesa_manual' THEN trim(p_mpesa_ref_code) ELSE NULL END,
-    CASE WHEN p_payment_method = 'cash' THEN trim(p_cash_deposit_code) ELSE NULL END,
+    NULL,
     v_recorded_at
   );
 
