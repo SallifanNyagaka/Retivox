@@ -17,6 +17,8 @@ import { Badge } from '../../../components/ui/Badge'
 import { MetricCard } from '../../../components/dashboard/MetricCard'
 import TimeGreeting from '../../../components/dashboard/TimeGreeting'
 import AdminBranchCoverageCards from './AdminBranchCoverageCards'
+import OperationalAlertsPanel from '../../../components/dashboard/OperationalAlertsPanel'
+import { getOperationalAlerts, type OperationalAlert } from '../../../lib/dashboard/operationalAlerts'
 import type { BranchInsight } from '../owner/branches/OwnerBranchCards'
 
 /**
@@ -260,6 +262,7 @@ export default async function AdminDashboardPage() {
   let lowStockItems: LowStockRow[] = []
   let todayRevenue = 0
   let branchInsights: Record<string, BranchInsight> = {}
+  let operationalAlerts: OperationalAlert[] = []
 
   try {
     const supabase = await createClient()
@@ -332,6 +335,9 @@ export default async function AdminDashboardPage() {
     todayTransactions = (todayTransactionsResponse.data ?? []) as TransactionRow[]
     recentTransactions = (recentTransactionsResponse.data ?? []) as TransactionRow[]
     lowStockItems = branchIds.length > 0 ? ((await getStockAlerts(businessId, branchIds, 6)) as LowStockRow[]) : []
+    operationalAlerts = branchIds.length > 0
+      ? await getOperationalAlerts(profile.id, businessId, { minimumRole: 'admin', baseHref: '/dashboard/admin', limit: 6 })
+      : []
     todayRevenue = todayTransactions.reduce((sum, transaction) => sum + Number(transaction.total_amount), 0)
 
     branchInsights = assignedBranches.reduce<Record<string, BranchInsight>>((accumulator, branch) => {
@@ -601,6 +607,8 @@ export default async function AdminDashboardPage() {
             <AdminBranchCoverageCards branches={assignedBranches} insights={branchInsights} currency={currency} />
           )}
         </Card>
+
+        <OperationalAlertsPanel alerts={operationalAlerts} />
 
         {/* Activity grid */}
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">

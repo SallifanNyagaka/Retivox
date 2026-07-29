@@ -17,9 +17,11 @@ import {
 } from '../../../lib/data/owner'
 import { createClient } from '../../../lib/supabase/server'
 import { MetricCard } from '../../../components/dashboard/MetricCard'
+import OperationalAlertsPanel from '../../../components/dashboard/OperationalAlertsPanel'
 import TimeGreeting from '../../../components/dashboard/TimeGreeting'
 import { Card, CardHeader } from '../../../components/ui/Card'
 import { Badge } from '../../../components/ui/Badge'
+import { getOperationalAlerts } from '../../../lib/dashboard/operationalAlerts'
 
 // ── Types ──
 type Branch = {
@@ -382,13 +384,14 @@ export default async function OwnerDashboardPage() {
   const supabase = await createClient()
 
   // Fetch all data in parallel for performance
-  const [businessResponse, metrics, branches, stockAlerts, approvals, transactions] = await Promise.all([
+  const [businessResponse, metrics, branches, stockAlerts, approvals, transactions, operationalAlerts] = await Promise.all([
     supabase.from('businesses').select('currency').eq('id', businessId).single(),
     getOwnerMetrics(businessId),
     getBranchSummaries(businessId),
     getStockAlerts(businessId),
     getPendingApprovals(businessId),
     getRecentTransactions(businessId),
+    getOperationalAlerts(profile.id, businessId, { minimumRole: 'admin', baseHref: '/dashboard/owner', limit: 8 }),
   ])
 
   if (businessResponse.error) {
@@ -509,6 +512,8 @@ export default async function OwnerDashboardPage() {
           )}
         </Card>
       </div>
+
+      <OperationalAlertsPanel alerts={operationalAlerts} />
 
       {/* Pending approvals + Recent transactions */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
