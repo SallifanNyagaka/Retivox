@@ -18,7 +18,7 @@ export default async function OwnerStockPage() {
     throw new Error('Owner profile missing business ID')
   }
 
-  const { rows, metrics, branches, products, movements, deliveries, deliveryEditRequests } = await getStockDashboardData(profile.id, businessId)
+  const { rows, metrics, branches, products, movements, deliveries, deliveryEditRequests, suppliers } = await getStockDashboardData(profile.id, businessId)
 
   return (
     <div className="flex flex-col gap-6">
@@ -31,7 +31,7 @@ export default async function OwnerStockPage() {
         </p>
       </div>
 
-      <StockPageClient role="owner" rows={rows} metrics={metrics} branches={branches} products={products} movements={movements} deliveries={deliveries} deliveryEditRequests={deliveryEditRequests} />
+      <StockPageClient role="owner" rows={rows} metrics={metrics} branches={branches} products={products} movements={movements} deliveries={deliveries} deliveryEditRequests={deliveryEditRequests} suppliers={suppliers} />
     </div>
   )
 }

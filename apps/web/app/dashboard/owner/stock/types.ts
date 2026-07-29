@@ -107,8 +107,14 @@ export type StockDeliveryRow = {
   id: string
   branch_id: string
   branch_name: string
+  supplier_id: string | null
   supplier_name: string
   reference_code: string | null
+  supplier_reference_number: string | null
+  supplier_price_rating: number | null
+  supplier_stock_quality_rating: number | null
+  supplier_availability_rating: number | null
+  supplier_rating_note: string | null
   status: 'pending_approval' | 'approved' | 'received' | 'pending' | 'disputed'
   recorded_at: string
   item_count: number
@@ -159,6 +165,27 @@ export type StockDeliveryEditRequestRow = {
   reason: string | null
   requested_at: string
   status: 'pending_approval' | 'approved' | 'rejected'
+}
+
+/**
+ * Supplier directory and ranking row shown in stock dashboards.
+ */
+export type SupplierDirectoryRow = {
+  id: string
+  name: string
+  phone: string | null
+  email: string | null
+  contact_person: string | null
+  notes: string | null
+  is_active: boolean
+  supply_count: number
+  product_count: number
+  branch_count: number
+  average_price_rating: number | null
+  average_stock_quality_rating: number | null
+  average_availability_rating: number | null
+  average_score: number | null
+  last_supplied_at: string | null
 }
 
 /**

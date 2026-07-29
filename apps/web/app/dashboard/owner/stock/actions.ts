@@ -52,8 +52,17 @@ type DeliveryEditDraftItem = DeliveryDraftItem & {
  */
 const recordDeliverySchema = z.object({
   branchId: z.string().uuid(),
+  supplierId: z.string().uuid().optional().or(z.literal('')),
   supplierName: z.string().trim().min(1, 'Supplier name is required').max(120),
+  supplierPhone: z.string().trim().max(40).optional().default(''),
+  supplierEmail: z.string().trim().email('Enter a valid supplier email').optional().or(z.literal('')).default(''),
+  supplierContactPerson: z.string().trim().max(120).optional().default(''),
+  supplierNotes: z.string().trim().max(240).optional().default(''),
   referenceCode: z.string().trim().max(80).optional().default(''),
+  priceRating: z.number().int().min(1).max(5).optional(),
+  stockQualityRating: z.number().int().min(1).max(5).optional(),
+  availabilityRating: z.number().int().min(1).max(5).optional(),
+  ratingNote: z.string().trim().max(240).optional().default(''),
   items: z
     .array(
       z.object({
@@ -275,8 +284,17 @@ export async function recordSupplierDelivery(_prevState: FormState, formData: Fo
 
   const validation = recordDeliverySchema.safeParse({
     branchId,
+    supplierId: getString(formData, 'supplierId'),
     supplierName: getString(formData, 'supplierName'),
+    supplierPhone: getString(formData, 'supplierPhone'),
+    supplierEmail: getString(formData, 'supplierEmail'),
+    supplierContactPerson: getString(formData, 'supplierContactPerson'),
+    supplierNotes: getString(formData, 'supplierNotes'),
     referenceCode: getString(formData, 'referenceCode'),
+    priceRating: getString(formData, 'priceRating') ? Number(getString(formData, 'priceRating')) : undefined,
+    stockQualityRating: getString(formData, 'stockQualityRating') ? Number(getString(formData, 'stockQualityRating')) : undefined,
+    availabilityRating: getString(formData, 'availabilityRating') ? Number(getString(formData, 'availabilityRating')) : undefined,
+    ratingNote: getString(formData, 'ratingNote'),
     items: parseDeliveryItems(formData),
   })
 
@@ -298,6 +316,15 @@ export async function recordSupplierDelivery(_prevState: FormState, formData: Fo
       p_supplier_name: validation.data.supplierName,
       p_reference_code: validation.data.referenceCode,
       p_items: validation.data.items,
+      p_supplier_id: validation.data.supplierId || null,
+      p_supplier_phone: validation.data.supplierPhone || null,
+      p_supplier_email: validation.data.supplierEmail || null,
+      p_supplier_contact_person: validation.data.supplierContactPerson || null,
+      p_supplier_notes: validation.data.supplierNotes || null,
+      p_price_rating: validation.data.priceRating ?? null,
+      p_stock_quality_rating: validation.data.stockQualityRating ?? null,
+      p_availability_rating: validation.data.availabilityRating ?? null,
+      p_rating_note: validation.data.ratingNote || null,
     })
 
     if (error) {

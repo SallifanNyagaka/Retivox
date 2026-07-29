@@ -35,6 +35,7 @@ import type {
   StockDeliveryItemRow,
   StockMovementRow,
   StockProductOption,
+  SupplierDirectoryRow,
   StockUOMOption,
 } from '../../app/dashboard/owner/stock/types'
 
@@ -49,6 +50,7 @@ export type StockDashboardData = {
   movements: StockMovementRow[]
   deliveries: StockDeliveryRow[]
   deliveryEditRequests: StockDeliveryEditRequestRow[]
+  suppliers: SupplierDirectoryRow[]
 }
 
 /**
@@ -124,12 +126,42 @@ type SupplierDeliveryItemSummary = {
 type RawSupplierDeliveryRow = {
   id: string
   to_branch_id: string
+  supplier_id: string | null
   supplier_name: string
   reference_code: string | null
+  supplier_reference_number: string | null
+  supplier_price_rating: string | number | null
+  supplier_stock_quality_rating: string | number | null
+  supplier_availability_rating: string | number | null
+  supplier_rating_note: string | null
   status: StockDeliveryRow['status']
   recorded_at: string
   branches: BranchStockBranch | BranchStockBranch[] | null
   supplier_delivery_items: SupplierDeliveryItemSummary[] | null
+}
+
+type RawSupplierDirectoryRow = {
+  id: string
+  name: string
+  phone: string | null
+  email: string | null
+  contact_person: string | null
+  notes: string | null
+  is_active: boolean
+}
+
+type RawSupplierStatsDeliveryItemRow = {
+  product_id: string | null
+}
+
+type RawSupplierStatsDeliveryRow = {
+  supplier_id: string | null
+  to_branch_id: string | null
+  recorded_at: string
+  supplier_price_rating: string | number | null
+  supplier_stock_quality_rating: string | number | null
+  supplier_availability_rating: string | number | null
+  supplier_delivery_items: RawSupplierStatsDeliveryItemRow[] | null
 }
 
 type RawDeliveryEditRequestRow = Omit<
@@ -138,7 +170,16 @@ type RawDeliveryEditRequestRow = Omit<
 > & {
   requested_by: string | null
   branches: BranchStockBranch | BranchStockBranch[] | null
-  supplier_deliveries: { supplier_name: string; reference_code: string | null } | Array<{ supplier_name: string; reference_code: string | null }> | null
+    supplier_deliveries: { supplier_name: string; reference_code: string | null } | Array<{ supplier_name: string; reference_code: string | null }> | null
+}
+
+function toNumberOrNull(value: string | number | null | undefined): number | null {
+  if (value === null || value === undefined) {
+    return null
+  }
+
+  const numericValue = Number(value)
+  return Number.isFinite(numericValue) ? numericValue : null
 }
 
 /**
@@ -352,8 +393,14 @@ function normalizeDeliveryRows(rows: RawSupplierDeliveryRow[]): StockDeliveryRow
       id: row.id,
       branch_id: row.to_branch_id,
       branch_name: branch?.name ?? 'Unknown branch',
+      supplier_id: row.supplier_id,
       supplier_name: row.supplier_name,
       reference_code: row.reference_code,
+      supplier_reference_number: row.supplier_reference_number,
+      supplier_price_rating: toNumberOrNull(row.supplier_price_rating),
+      supplier_stock_quality_rating: toNumberOrNull(row.supplier_stock_quality_rating),
+      supplier_availability_rating: toNumberOrNull(row.supplier_availability_rating),
+      supplier_rating_note: row.supplier_rating_note,
       status: row.status,
       recorded_at: row.recorded_at,
       item_count: items.length,
@@ -364,6 +411,101 @@ function normalizeDeliveryRows(rows: RawSupplierDeliveryRow[]): StockDeliveryRow
       items: normalizedItems,
     }
   })
+}
+
+function normalizeSupplierDirectoryRows(
+  suppliers: RawSupplierDirectoryRow[],
+  statsRows: RawSupplierStatsDeliveryRow[]
+): SupplierDirectoryRow[] {
+  const statsBySupplier = new Map<
+    string,
+    {
+      supplyCount: number
+      products: Set<string>
+      branches: Set<string>
+      priceRatings: number[]
+      qualityRatings: number[]
+      availabilityRatings: number[]
+      lastSuppliedAt: string | null
+    }
+  >()
+
+  statsRows.forEach((row) => {
+    if (!row.supplier_id) {
+      return
+    }
+
+    const current = statsBySupplier.get(row.supplier_id) ?? {
+      supplyCount: 0,
+      products: new Set<string>(),
+      branches: new Set<string>(),
+      priceRatings: [],
+      qualityRatings: [],
+      availabilityRatings: [],
+      lastSuppliedAt: null,
+    }
+
+    current.supplyCount += 1
+
+    if (row.to_branch_id) {
+      current.branches.add(row.to_branch_id)
+    }
+
+    ;(row.supplier_delivery_items ?? []).forEach((item) => {
+      if (item.product_id) {
+        current.products.add(item.product_id)
+      }
+    })
+
+    const priceRating = toNumberOrNull(row.supplier_price_rating)
+    const qualityRating = toNumberOrNull(row.supplier_stock_quality_rating)
+    const availabilityRating = toNumberOrNull(row.supplier_availability_rating)
+
+    if (priceRating) current.priceRatings.push(priceRating)
+    if (qualityRating) current.qualityRatings.push(qualityRating)
+    if (availabilityRating) current.availabilityRatings.push(availabilityRating)
+
+    if (!current.lastSuppliedAt || Date.parse(row.recorded_at) > Date.parse(current.lastSuppliedAt)) {
+      current.lastSuppliedAt = row.recorded_at
+    }
+
+    statsBySupplier.set(row.supplier_id, current)
+  })
+
+  const average = (values: number[]): number | null => (
+    values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null
+  )
+
+  return suppliers
+    .map((supplier) => {
+      const stats = statsBySupplier.get(supplier.id)
+      const averagePriceRating = average(stats?.priceRatings ?? [])
+      const averageStockQualityRating = average(stats?.qualityRatings ?? [])
+      const averageAvailabilityRating = average(stats?.availabilityRatings ?? [])
+      const scoreValues = [averagePriceRating, averageStockQualityRating, averageAvailabilityRating].filter(
+        (value): value is number => value !== null
+      )
+      const averageScore = average(scoreValues)
+
+      return {
+        id: supplier.id,
+        name: supplier.name,
+        phone: supplier.phone,
+        email: supplier.email,
+        contact_person: supplier.contact_person,
+        notes: supplier.notes,
+        is_active: supplier.is_active,
+        supply_count: stats?.supplyCount ?? 0,
+        product_count: stats?.products.size ?? 0,
+        branch_count: stats?.branches.size ?? 0,
+        average_price_rating: averagePriceRating,
+        average_stock_quality_rating: averageStockQualityRating,
+        average_availability_rating: averageAvailabilityRating,
+        average_score: averageScore,
+        last_supplied_at: stats?.lastSuppliedAt ?? null,
+      }
+    })
+    .sort((first, second) => (second.average_score ?? 0) - (first.average_score ?? 0) || second.supply_count - first.supply_count)
 }
 
 function normalizeDeliveryEditRequestRows(
@@ -402,10 +544,21 @@ export async function getStockDashboardData(userId: string, businessId: string):
         movements: [],
         deliveries: [],
         deliveryEditRequests: [],
+        suppliers: [],
       }
     }
 
-    const [stockResponse, metricsResponse, branchesResponse, productsResponse, movementsResponse, deliveriesResponse, deliveryEditRequestsResponse] = await Promise.all([
+    const [
+      stockResponse,
+      metricsResponse,
+      branchesResponse,
+      productsResponse,
+      movementsResponse,
+      deliveriesResponse,
+      deliveryEditRequestsResponse,
+      suppliersResponse,
+      supplierStatsResponse,
+    ] = await Promise.all([
       supabase
         .from('branch_stock')
         .select(
@@ -481,8 +634,14 @@ export async function getStockDashboardData(userId: string, businessId: string):
           `
           id,
           to_branch_id,
+          supplier_id,
           supplier_name,
           reference_code,
+          supplier_reference_number,
+          supplier_price_rating,
+          supplier_stock_quality_rating,
+          supplier_availability_rating,
+          supplier_rating_note,
           status,
           recorded_at,
           branches!inner(id, name),
@@ -532,6 +691,31 @@ export async function getStockDashboardData(userId: string, businessId: string):
         .eq('status', 'pending_approval')
         .order('requested_at', { ascending: false })
         .range(0, 49),
+      supabase
+        .from('suppliers')
+        .select('id, name, phone, email, contact_person, notes, is_active')
+        .eq('business_id', businessId)
+        .order('is_active', { ascending: false })
+        .order('name', { ascending: true })
+        .range(0, 199),
+      supabase
+        .from('supplier_deliveries')
+        .select(
+          `
+          supplier_id,
+          to_branch_id,
+          recorded_at,
+          supplier_price_rating,
+          supplier_stock_quality_rating,
+          supplier_availability_rating,
+          supplier_delivery_items(product_id)
+        `
+        )
+        .eq('business_id', businessId)
+        .in('to_branch_id', branchIds)
+        .not('supplier_id', 'is', null)
+        .order('recorded_at', { ascending: false })
+        .range(0, 999),
     ])
 
     if (stockResponse.error) {
@@ -560,6 +744,14 @@ export async function getStockDashboardData(userId: string, businessId: string):
 
     if (deliveryEditRequestsResponse.error) {
       throw deliveryEditRequestsResponse.error
+    }
+
+    if (suppliersResponse.error) {
+      throw suppliersResponse.error
+    }
+
+    if (supplierStatsResponse.error) {
+      throw supplierStatsResponse.error
     }
 
     const metricsRows = (metricsResponse.data ?? []) as StockMetricsRpcRow[]
@@ -628,6 +820,10 @@ export async function getStockDashboardData(userId: string, businessId: string):
       movements: (movementsResponse.data ?? []) as StockMovementRow[],
       deliveries: normalizeDeliveryRows((deliveriesResponse.data ?? []) as RawSupplierDeliveryRow[]),
       deliveryEditRequests: normalizeDeliveryEditRequestRows(deliveryEditRequestRows, requesterNamesById),
+      suppliers: normalizeSupplierDirectoryRows(
+        (suppliersResponse.data ?? []) as RawSupplierDirectoryRow[],
+        (supplierStatsResponse.data ?? []) as RawSupplierStatsDeliveryRow[]
+      ),
     }
   } catch (error: unknown) {
     logger.error('getStockDashboardData failed', { userId, businessId, error })

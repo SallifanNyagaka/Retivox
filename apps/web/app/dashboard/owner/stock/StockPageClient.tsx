@@ -27,6 +27,7 @@ import type {
   StockMetrics,
   StockMovementRow,
   StockProductOption,
+  SupplierDirectoryRow,
   StockUOMOption,
 } from './types'
 
@@ -61,7 +62,7 @@ type DeliveryEditItemDraft = DeliveryItemDraft & {
 /**
  * Visible stock tabs.
  */
-type StockTab = 'levels' | 'delivery' | 'approvals' | 'history'
+type StockTab = 'levels' | 'delivery' | 'suppliers' | 'approvals' | 'history'
 
 /**
  * Icon for SKU metrics.
@@ -306,6 +307,7 @@ export default function StockPageClient({
   movements,
   deliveries,
   deliveryEditRequests,
+  suppliers,
   role,
 }: {
   role: 'owner' | 'admin'
@@ -316,6 +318,7 @@ export default function StockPageClient({
   movements: StockMovementRow[]
   deliveries: StockDeliveryRow[]
   deliveryEditRequests: StockDeliveryEditRequestRow[]
+  suppliers: SupplierDirectoryRow[]
 }) {
   const router = useRouter()
   const [selectedBranch, setSelectedBranch] = useState<string | null>(null)
@@ -330,8 +333,17 @@ export default function StockPageClient({
   const [editReason, setEditReason] = useState('')
   const [editDeliveryItems, setEditDeliveryItems] = useState<DeliveryEditItemDraft[]>([])
   const [deliveryBranchId, setDeliveryBranchId] = useState(branches[0]?.id ?? '')
+  const [selectedSupplierId, setSelectedSupplierId] = useState('')
   const [supplierName, setSupplierName] = useState('')
+  const [supplierPhone, setSupplierPhone] = useState('')
+  const [supplierEmail, setSupplierEmail] = useState('')
+  const [supplierContactPerson, setSupplierContactPerson] = useState('')
+  const [supplierNotes, setSupplierNotes] = useState('')
   const [referenceCode, setReferenceCode] = useState('')
+  const [priceRating, setPriceRating] = useState('')
+  const [stockQualityRating, setStockQualityRating] = useState('')
+  const [availabilityRating, setAvailabilityRating] = useState('')
+  const [ratingNote, setRatingNote] = useState('')
   const createDeliveryItem = (id: string): DeliveryItemDraft => ({
     id,
     productId: products[0]?.id ?? '',
@@ -372,7 +384,16 @@ export default function StockPageClient({
         toast.success('Supplier delivery recorded')
         resetTimer = setTimeout(() => {
           setSupplierName('')
+          setSelectedSupplierId('')
+          setSupplierPhone('')
+          setSupplierEmail('')
+          setSupplierContactPerson('')
+          setSupplierNotes('')
           setReferenceCode('')
+          setPriceRating('')
+          setStockQualityRating('')
+          setAvailabilityRating('')
+          setRatingNote('')
           setDeliveryItems([createDeliveryItem('item-0')])
           router.refresh()
         }, 0)
@@ -445,6 +466,7 @@ export default function StockPageClient({
   const filteredRows = selectedBranch ? rows.filter((row) => row.branch_id === selectedBranch) : rows
   const filteredMovements = selectedBranch ? movements.filter((movement) => movement.branch_id === selectedBranch) : movements
   const filteredDeliveries = selectedBranch ? deliveries.filter((delivery) => delivery.branch_id === selectedBranch) : deliveries
+  const activeSuppliers = suppliers.filter((supplier) => supplier.is_active)
   const filteredDeliveryEditRequests = selectedBranch
     ? deliveryEditRequests.filter((request) => request.branch_id === selectedBranch)
     : deliveryEditRequests
@@ -473,6 +495,27 @@ export default function StockPageClient({
       ...current,
       createDeliveryItem(`item-${current.length}`),
     ])
+  }
+
+  const selectSupplier = (supplierId: string) => {
+    setSelectedSupplierId(supplierId)
+
+    const supplier = suppliers.find((item) => item.id === supplierId)
+
+    if (!supplier) {
+      setSupplierName('')
+      setSupplierPhone('')
+      setSupplierEmail('')
+      setSupplierContactPerson('')
+      setSupplierNotes('')
+      return
+    }
+
+    setSupplierName(supplier.name)
+    setSupplierPhone(supplier.phone ?? '')
+    setSupplierEmail(supplier.email ?? '')
+    setSupplierContactPerson(supplier.contact_person ?? '')
+    setSupplierNotes(supplier.notes ?? '')
   }
 
   /**
@@ -637,8 +680,17 @@ export default function StockPageClient({
 
     const formData = new FormData()
     formData.set('branchId', deliveryBranchId)
+    formData.set('supplierId', selectedSupplierId)
     formData.set('supplierName', supplierName)
+    formData.set('supplierPhone', supplierPhone)
+    formData.set('supplierEmail', supplierEmail)
+    formData.set('supplierContactPerson', supplierContactPerson)
+    formData.set('supplierNotes', supplierNotes)
     formData.set('referenceCode', referenceCode)
+    formData.set('priceRating', priceRating)
+    formData.set('stockQualityRating', stockQualityRating)
+    formData.set('availabilityRating', availabilityRating)
+    formData.set('ratingNote', ratingNote)
     formData.set('itemsCount', String(deliveryItems.length))
     deliveryItems.forEach((item, index) => {
       const totalCost = item.costs.reduce((sum, cost) => {
@@ -745,6 +797,7 @@ export default function StockPageClient({
         {([
           ['levels', 'Current levels'],
           ['delivery', 'Supplier delivery'],
+          ['suppliers', 'Suppliers'],
           ['approvals', 'Deliveries & approvals'],
           ['history', 'Movement history'],
         ] as Array<[StockTab, string]>).map(([tab, label]) => (
@@ -915,11 +968,77 @@ export default function StockPageClient({
               </label>
               <label style={{ fontSize: 13 }}>
                 <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>Supplier</span>
-                <input value={supplierName} onChange={(event) => setSupplierName(event.target.value)} required style={inputStyle} />
+                <select value={selectedSupplierId} onChange={(event) => selectSupplier(event.target.value)} style={inputStyle}>
+                  <option value="">New supplier</option>
+                  {activeSuppliers.map((supplier) => (
+                    <option key={supplier.id} value={supplier.id}>
+                      {supplier.name}
+                    </option>
+                  ))}
+                </select>
               </label>
               <label style={{ fontSize: 13 }}>
                 <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>Reference</span>
-                <input value={referenceCode} onChange={(event) => setReferenceCode(event.target.value)} style={inputStyle} />
+                <input value={referenceCode} onChange={(event) => setReferenceCode(event.target.value)} placeholder="Optional supplier invoice/ref" style={inputStyle} />
+                <span style={{ display: 'block', marginTop: 6, color: 'var(--color-text-muted)', fontSize: 12 }}>
+                  If left blank, Retivox generates a supplier reference.
+                </span>
+              </label>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+              <label style={{ fontSize: 13 }}>
+                <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>Supplier name</span>
+                <input value={supplierName} onChange={(event) => setSupplierName(event.target.value)} required style={inputStyle} />
+              </label>
+              <label style={{ fontSize: 13 }}>
+                <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>Phone</span>
+                <input value={supplierPhone} onChange={(event) => setSupplierPhone(event.target.value)} inputMode="tel" style={inputStyle} />
+              </label>
+              <label style={{ fontSize: 13 }}>
+                <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>Email</span>
+                <input type="email" value={supplierEmail} onChange={(event) => setSupplierEmail(event.target.value)} style={inputStyle} />
+              </label>
+              <label style={{ fontSize: 13 }}>
+                <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>Contact person</span>
+                <input value={supplierContactPerson} onChange={(event) => setSupplierContactPerson(event.target.value)} style={inputStyle} />
+              </label>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+              <label style={{ fontSize: 13 }}>
+                <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>Price rating</span>
+                <select value={priceRating} onChange={(event) => setPriceRating(event.target.value)} style={inputStyle}>
+                  <option value="">Not rated</option>
+                  {[1, 2, 3, 4, 5].map((rating) => (
+                    <option key={rating} value={rating}>{rating} / 5</option>
+                  ))}
+                </select>
+              </label>
+              <label style={{ fontSize: 13 }}>
+                <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>Stock quality</span>
+                <select value={stockQualityRating} onChange={(event) => setStockQualityRating(event.target.value)} style={inputStyle}>
+                  <option value="">Not rated</option>
+                  {[1, 2, 3, 4, 5].map((rating) => (
+                    <option key={rating} value={rating}>{rating} / 5</option>
+                  ))}
+                </select>
+              </label>
+              <label style={{ fontSize: 13 }}>
+                <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>Availability</span>
+                <select value={availabilityRating} onChange={(event) => setAvailabilityRating(event.target.value)} style={inputStyle}>
+                  <option value="">Not rated</option>
+                  {[1, 2, 3, 4, 5].map((rating) => (
+                    <option key={rating} value={rating}>{rating} / 5</option>
+                  ))}
+                </select>
+              </label>
+              <label style={{ fontSize: 13 }}>
+                <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>Supplier note</span>
+                <input value={ratingNote || supplierNotes} onChange={(event) => {
+                  setRatingNote(event.target.value)
+                  setSupplierNotes(event.target.value)
+                }} placeholder="Optional supplier/rating note" style={inputStyle} />
               </label>
             </div>
 
@@ -1074,6 +1193,76 @@ export default function StockPageClient({
           </div>
         </form>
       )}
+
+      {activeTab === 'suppliers' && (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
+                {['Supplier', 'Contacts', 'Score', 'Price', 'Quality', 'Availability', 'Coverage', 'Last supply'].map((heading) => (
+                  <th key={heading} style={{ padding: 12, textAlign: 'left', color: 'var(--color-text-muted)', fontSize: 12 }}>
+                    {heading}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {suppliers.length === 0 ? (
+                <tr>
+                  <td colSpan={8} style={{ padding: 20, textAlign: 'center', color: 'var(--color-text-muted)' }}>
+                    No suppliers yet. Record a supplier delivery to create one.
+                  </td>
+                </tr>
+              ) : (
+                suppliers.map((supplier, index) => (
+                  <tr key={supplier.id} style={{ backgroundColor: index % 2 === 0 ? 'var(--color-background)' : 'var(--color-surface)' }}>
+                    <td style={{ padding: 12, color: 'var(--color-text-primary)', fontWeight: 700 }}>
+                      {supplier.name}
+                      {!supplier.is_active && (
+                        <span style={{ display: 'block', marginTop: 4 }}>
+                          <Badge variant="muted">Inactive</Badge>
+                        </span>
+                      )}
+                      {supplier.notes && (
+                        <span style={{ display: 'block', marginTop: 4, color: 'var(--color-text-muted)', fontSize: 12, fontWeight: 500 }}>
+                          {supplier.notes}
+                        </span>
+                      )}
+                    </td>
+                    <td style={{ padding: 12, color: 'var(--color-text-muted)' }}>
+                      {supplier.contact_person ?? 'No contact person'}
+                      <span style={{ display: 'block', marginTop: 3 }}>{supplier.phone ?? 'No phone'}</span>
+                      <span style={{ display: 'block', marginTop: 3 }}>{supplier.email ?? 'No email'}</span>
+                    </td>
+                    <td style={{ padding: 12, color: supplier.average_score ? 'var(--color-success)' : 'var(--color-text-muted)', fontWeight: 800 }}>
+                      {supplier.average_score ? `${supplier.average_score.toFixed(1)} / 5` : 'Not rated'}
+                    </td>
+                    <td style={{ padding: 12, color: 'var(--color-text-primary)' }}>
+                      {supplier.average_price_rating ? supplier.average_price_rating.toFixed(1) : '-'}
+                    </td>
+                    <td style={{ padding: 12, color: 'var(--color-text-primary)' }}>
+                      {supplier.average_stock_quality_rating ? supplier.average_stock_quality_rating.toFixed(1) : '-'}
+                    </td>
+                    <td style={{ padding: 12, color: 'var(--color-text-primary)' }}>
+                      {supplier.average_availability_rating ? supplier.average_availability_rating.toFixed(1) : '-'}
+                    </td>
+                    <td style={{ padding: 12, color: 'var(--color-text-muted)' }}>
+                      {supplier.supply_count} supplies
+                      <span style={{ display: 'block', marginTop: 3 }}>
+                        {supplier.product_count} products, {supplier.branch_count} stores
+                      </span>
+                    </td>
+                    <td style={{ padding: 12, color: 'var(--color-text-muted)' }}>
+                      {supplier.last_supplied_at ? formatDateTime(supplier.last_supplied_at) : '-'}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+
       {activeTab === 'approvals' && (
         <div className="flex flex-col gap-6">
           <div style={{ overflowX: 'auto' }}>
@@ -1101,7 +1290,14 @@ export default function StockPageClient({
                       <td style={{ padding: 12, color: 'var(--color-text-primary)' }}>{formatDateTime(delivery.recorded_at)}</td>
                       <td style={{ padding: 12, color: 'var(--color-text-primary)' }}>{delivery.branch_name}</td>
                       <td style={{ padding: 12, color: 'var(--color-text-primary)', fontWeight: 600 }}>{delivery.supplier_name}</td>
-                      <td style={{ padding: 12, color: 'var(--color-text-muted)' }}>{delivery.reference_code ?? '-'}</td>
+                      <td style={{ padding: 12, color: 'var(--color-text-muted)' }}>
+                        {delivery.reference_code ?? '-'}
+                        {delivery.supplier_reference_number && (
+                          <span style={{ display: 'block', marginTop: 3, fontSize: 12 }}>
+                            Retivox ref: {delivery.supplier_reference_number}
+                          </span>
+                        )}
+                      </td>
                       <td style={{ padding: 12, color: 'var(--color-text-primary)', textAlign: 'center' }}>{delivery.item_count}</td>
                       <td style={{ padding: 12, color: 'var(--color-text-primary)', textAlign: 'center', fontWeight: 700 }}>{delivery.total_expected}</td>
                       <td style={{ padding: 12 }}>
