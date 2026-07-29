@@ -33,6 +33,8 @@ type DashboardRecordTransactionRow = {
   total_amount: number
 }
 
+const DEFERRED_CASH_DEPOSIT_CODE = 'PENDING_CASH_RECONCILIATION'
+
 const lineItemSchema = z.object({
   productId: z.string().uuid(),
   uomId: z.string().uuid(),
@@ -184,7 +186,7 @@ async function recordDashboardTransactionForRole(
       p_customer_name: validation.data.customerName ?? null,
       p_customer_phone: validation.data.customerPhone ?? null,
       p_mpesa_ref_code: validation.data.mpesaRefCode ?? null,
-      p_cash_deposit_code: null,
+      p_cash_deposit_code: validation.data.paymentMethod === 'cash' ? DEFERRED_CASH_DEPOSIT_CODE : null,
     })
 
     if (response.error) {
@@ -201,6 +203,26 @@ async function recordDashboardTransactionForRole(
     const result = Array.isArray(response.data)
       ? ((response.data[0] ?? null) as DashboardRecordTransactionRow | null)
       : ((response.data ?? null) as DashboardRecordTransactionRow | null)
+
+    if (validation.data.paymentMethod === 'cash' && result?.transaction_id) {
+      const clearDeferredCashCodeResponse = await supabase
+        .from('payments')
+        .update({ cash_deposit_code: null })
+        .eq('business_id', businessId)
+        .eq('transaction_id', result.transaction_id)
+        .eq('payment_method', 'cash')
+
+      if (clearDeferredCashCodeResponse.error) {
+        logger.warn('recordDashboardTransactionForRole: unable to clear deferred cash code', {
+          userId: profile.id,
+          businessId,
+          branchId: validation.data.branchId,
+          role,
+          transactionId: result.transaction_id,
+          error: clearDeferredCashCodeResponse.error,
+        })
+      }
+    }
 
     revalidatePath('/dashboard/owner')
     revalidatePath('/dashboard/owner/transactions')
