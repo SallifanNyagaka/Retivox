@@ -335,10 +335,6 @@ export default function StockPageClient({
   const [deliveryBranchId, setDeliveryBranchId] = useState(branches[0]?.id ?? '')
   const [selectedSupplierId, setSelectedSupplierId] = useState('')
   const [supplierName, setSupplierName] = useState('')
-  const [supplierPhone, setSupplierPhone] = useState('')
-  const [supplierEmail, setSupplierEmail] = useState('')
-  const [supplierContactPerson, setSupplierContactPerson] = useState('')
-  const [supplierNotes, setSupplierNotes] = useState('')
   const [referenceCode, setReferenceCode] = useState('')
   const [priceRating, setPriceRating] = useState('')
   const [stockQualityRating, setStockQualityRating] = useState('')
@@ -385,10 +381,6 @@ export default function StockPageClient({
         resetTimer = setTimeout(() => {
           setSupplierName('')
           setSelectedSupplierId('')
-          setSupplierPhone('')
-          setSupplierEmail('')
-          setSupplierContactPerson('')
-          setSupplierNotes('')
           setReferenceCode('')
           setPriceRating('')
           setStockQualityRating('')
@@ -504,18 +496,10 @@ export default function StockPageClient({
 
     if (!supplier) {
       setSupplierName('')
-      setSupplierPhone('')
-      setSupplierEmail('')
-      setSupplierContactPerson('')
-      setSupplierNotes('')
       return
     }
 
     setSupplierName(supplier.name)
-    setSupplierPhone(supplier.phone ?? '')
-    setSupplierEmail(supplier.email ?? '')
-    setSupplierContactPerson(supplier.contact_person ?? '')
-    setSupplierNotes(supplier.notes ?? '')
   }
 
   /**
@@ -682,10 +666,6 @@ export default function StockPageClient({
     formData.set('branchId', deliveryBranchId)
     formData.set('supplierId', selectedSupplierId)
     formData.set('supplierName', supplierName)
-    formData.set('supplierPhone', supplierPhone)
-    formData.set('supplierEmail', supplierEmail)
-    formData.set('supplierContactPerson', supplierContactPerson)
-    formData.set('supplierNotes', supplierNotes)
     formData.set('referenceCode', referenceCode)
     formData.set('priceRating', priceRating)
     formData.set('stockQualityRating', stockQualityRating)
@@ -986,22 +966,21 @@ export default function StockPageClient({
               </label>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <label style={{ fontSize: 13 }}>
                 <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>Supplier name</span>
-                <input value={supplierName} onChange={(event) => setSupplierName(event.target.value)} required style={inputStyle} />
-              </label>
-              <label style={{ fontSize: 13 }}>
-                <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>Phone</span>
-                <input value={supplierPhone} onChange={(event) => setSupplierPhone(event.target.value)} inputMode="tel" style={inputStyle} />
-              </label>
-              <label style={{ fontSize: 13 }}>
-                <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>Email</span>
-                <input type="email" value={supplierEmail} onChange={(event) => setSupplierEmail(event.target.value)} style={inputStyle} />
-              </label>
-              <label style={{ fontSize: 13 }}>
-                <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>Contact person</span>
-                <input value={supplierContactPerson} onChange={(event) => setSupplierContactPerson(event.target.value)} style={inputStyle} />
+                <input
+                  value={supplierName}
+                  onChange={(event) => {
+                    setSelectedSupplierId('')
+                    setSupplierName(event.target.value)
+                  }}
+                  required
+                  style={inputStyle}
+                />
+                <span style={{ display: 'block', marginTop: 6, color: 'var(--color-text-muted)', fontSize: 12 }}>
+                  Contact details live in People &gt; Suppliers, so delivery recording stays fast.
+                </span>
               </label>
             </div>
 
@@ -1035,9 +1014,8 @@ export default function StockPageClient({
               </label>
               <label style={{ fontSize: 13 }}>
                 <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>Supplier note</span>
-                <input value={ratingNote || supplierNotes} onChange={(event) => {
+                <input value={ratingNote} onChange={(event) => {
                   setRatingNote(event.target.value)
-                  setSupplierNotes(event.target.value)
                 }} placeholder="Optional supplier/rating note" style={inputStyle} />
               </label>
             </div>
@@ -1064,8 +1042,8 @@ export default function StockPageClient({
                   : null
 
                 return (
-                <div key={item.id} className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-12 gap-3">
-                  <label style={{ fontSize: 13 }}>
+                <div key={item.id} className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-12">
+                  <label className="xl:col-span-4" style={{ fontSize: 13 }}>
                     <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>Product</span>
                     <select
                       value={item.productId}
@@ -1087,7 +1065,7 @@ export default function StockPageClient({
                       ))}
                     </select>
                   </label>
-                  <label style={{ fontSize: 13 }}>
+                  <label className="xl:col-span-4" style={{ fontSize: 13 }}>
                     <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>Receive as</span>
                     <select value={item.uomId} onChange={(event) => updateDeliveryItem(item.id, { uomId: event.target.value })} required style={inputStyle}>
                       <option value="">Select stock unit</option>
@@ -1103,11 +1081,11 @@ export default function StockPageClient({
                       </span>
                     )}
                   </label>
-                  <label style={{ fontSize: 13 }}>
+                  <label className="xl:col-span-4" style={{ fontSize: 13 }}>
                     <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>Quantity</span>
                     <input type="number" min={0.0001} step="0.0001" value={item.quantity} onChange={(event) => updateDeliveryItem(item.id, { quantity: event.target.value })} required style={inputStyle} />
                   </label>
-                  <div className="md:col-span-2 xl:col-span-4" style={{ fontSize: 13 }}>
+                  <div className="md:col-span-2 xl:col-span-12" style={{ fontSize: 13 }}>
                     <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>Costs / expenses</span>
                     {item.costs.length > 0 ? (
                       <div className="flex flex-col gap-2">
@@ -1166,12 +1144,12 @@ export default function StockPageClient({
                       </button>
                     )}
                   </div>
-                  <label className="md:col-span-2 xl:col-span-11 xl:row-start-2" style={{ fontSize: 13 }}>
+                  <label className="md:col-span-2 xl:col-span-10" style={{ fontSize: 13 }}>
                     <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>Notes</span>
                     <input value={item.notes} onChange={(event) => updateDeliveryItem(item.id, { notes: event.target.value })} style={inputStyle} />
                   </label>
-                  <div className="flex items-end xl:col-span-1 xl:row-start-2">
-                    <button type="button" className="btn-outline" onClick={() => removeDeliveryItem(item.id)} style={{ padding: '8px 16px', borderRadius: 8 }} disabled={index === 0 && deliveryItems.length === 1}>
+                  <div className="flex items-end md:col-span-2 xl:col-span-2">
+                    <button type="button" className="btn-outline" onClick={() => removeDeliveryItem(item.id)} style={{ width: '100%', padding: '8px 16px', borderRadius: 8 }} disabled={index === 0 && deliveryItems.length === 1}>
                       Remove
                     </button>
                   </div>

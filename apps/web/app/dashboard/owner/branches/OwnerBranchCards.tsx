@@ -231,7 +231,7 @@ export default function OwnerBranchCards({ branches, adminCountMap, insights, cu
               <Metric label="Approved losses" value={String(selectedInsight.approvedLossReports)} />
             </div>
 
-            <div className="mt-5 flex flex-wrap gap-3">
+            <div className="mt-6 flex flex-wrap gap-3 border-t pt-4" style={{ borderColor: 'var(--color-border)' }}>
               <Link href={`/dashboard/owner/transactions?branch=${selectedBranch.id}`} className="btn-primary" style={{ padding: '10px 18px', borderRadius: 8 }}>
                 View transactions
               </Link>

@@ -68,7 +68,7 @@ export default function PersonDetailsDialog({ person, onClose }: Props) {
           <Detail label="Registered" value={person.createdLabel ?? '-'} />
         </div>
 
-        <div className="mt-5">
+        <div className="mt-6 border-t pt-4" style={{ borderColor: 'var(--color-border)' }}>
           <Link href={person.operationsHref} className="btn-primary" style={{ padding: '10px 18px', borderRadius: 8 }}>
             {person.operationsLabel ?? 'View transactions / operations'}
           </Link>

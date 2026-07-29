@@ -263,8 +263,10 @@ function parseDeliveryEditItems(formData: FormData): DeliveryEditDraftItem[] {
  */
 function revalidateStockRoutes() {
   revalidatePath('/dashboard/owner/stock')
+  revalidatePath('/dashboard/owner/suppliers')
   revalidatePath('/dashboard/owner/finances')
   revalidatePath('/dashboard/admin/stock')
+  revalidatePath('/dashboard/admin/suppliers')
   revalidatePath('/dashboard/employee')
   revalidatePath('/dashboard/employee/transactions/new')
 }
@@ -311,16 +313,44 @@ export async function recordSupplierDelivery(_prevState: FormState, formData: Fo
 
   try {
     const supabase = await createClient()
+    let supplierPhone = validation.data.supplierPhone
+    let supplierEmail = validation.data.supplierEmail
+    let supplierContactPerson = validation.data.supplierContactPerson
+    let supplierNotes = validation.data.supplierNotes
+
+    if (validation.data.supplierId) {
+      const supplierResponse = await supabase
+        .from('suppliers')
+        .select('phone, email, contact_person, notes')
+        .eq('business_id', businessId)
+        .eq('id', validation.data.supplierId)
+        .maybeSingle()
+
+      if (supplierResponse.error) {
+        logger.error('recordSupplierDelivery: supplier lookup failed', {
+          businessId,
+          supplierId: validation.data.supplierId,
+          error: supplierResponse.error,
+        })
+        return { success: false, error: 'Unable to confirm supplier details' }
+      }
+
+      supplierPhone = typeof supplierResponse.data?.phone === 'string' ? supplierResponse.data.phone : supplierPhone
+      supplierEmail = typeof supplierResponse.data?.email === 'string' ? supplierResponse.data.email : supplierEmail
+      supplierContactPerson = typeof supplierResponse.data?.contact_person === 'string' ? supplierResponse.data.contact_person : supplierContactPerson
+      supplierNotes = typeof supplierResponse.data?.notes === 'string' ? supplierResponse.data.notes : supplierNotes
+    }
+
     const { error } = await supabase.rpc('dashboard_record_supplier_delivery', {
       p_branch_id: validation.data.branchId,
       p_supplier_name: validation.data.supplierName,
       p_reference_code: validation.data.referenceCode,
       p_items: validation.data.items,
       p_supplier_id: validation.data.supplierId || null,
-      p_supplier_phone: validation.data.supplierPhone || null,
-      p_supplier_email: validation.data.supplierEmail || null,
-      p_supplier_contact_person: validation.data.supplierContactPerson || null,
-      p_supplier_notes: validation.data.supplierNotes || null,
+      p_supplier_phone: supplierPhone || null,
+      p_supplier_email: supplierEmail || null,
+      p_supplier_contact_person: supplierContactPerson || null,
+      p_supplier_notes: supplierNotes || null,
       p_price_rating: validation.data.priceRating ?? null,
       p_stock_quality_rating: validation.data.stockQualityRating ?? null,
       p_availability_rating: validation.data.availabilityRating ?? null,

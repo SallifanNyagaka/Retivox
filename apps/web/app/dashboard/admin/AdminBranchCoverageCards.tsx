@@ -151,7 +151,7 @@ export default function AdminBranchCoverageCards({ branches, insights, currency 
               <Metric label="Pending damages" value={String(selectedInsight.pendingDamageReports)} />
             </div>
 
-            <div className="mt-5 flex flex-wrap gap-3">
+            <div className="mt-6 flex flex-wrap gap-3 border-t pt-4" style={{ borderColor: 'var(--color-border)' }}>
               <Link href={`/dashboard/admin/transactions?branch=${selectedBranch.id}`} className="btn-primary" style={{ padding: '10px 18px', borderRadius: 8 }}>
                 View transactions
               </Link>

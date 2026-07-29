@@ -9,6 +9,7 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useState } from 'react'
+import { logoutUser } from '../../lib/auth/actions'
 
 type NavItem = {
   label: string
@@ -133,6 +134,16 @@ function SettingsIcon() {
 }
 
 // ── Nav items per role ──
+function LogoutIcon() {
+  return (
+    <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+      <path d="M16 17l5-5-5-5" />
+      <path d="M21 12H9" />
+    </svg>
+  )
+}
+
 const ownerNav: { section: string; items: NavItem[] }[] = [
   {
     section: '',
@@ -155,6 +166,7 @@ const ownerNav: { section: string; items: NavItem[] }[] = [
     items: [
       { label: 'Admins', href: '/dashboard/owner/admins', icon: <UsersIcon /> },
       { label: 'Employees', href: '/dashboard/owner/employees', icon: <UserIcon /> },
+      { label: 'Suppliers', href: '/dashboard/owner/suppliers', icon: <UsersIcon /> },
     ],
   },
   {
@@ -193,6 +205,7 @@ const adminNav: { section: string; items: NavItem[] }[] = [
     section: 'People',
     items: [
       { label: 'Employees', href: '/dashboard/admin/employees', icon: <UserIcon /> },
+      { label: 'Suppliers', href: '/dashboard/admin/suppliers', icon: <UsersIcon /> },
     ],
   },
   {
@@ -348,6 +361,28 @@ export function Sidebar({ role, businessName }: SidebarProps) {
           ))}
         </nav>
 
+        <form action={logoutUser} style={{ padding: '0 12px 12px' }}>
+          <button
+            type="submit"
+            className="flex w-full items-center rounded-lg transition-all duration-150"
+            title={collapsed ? 'Logout' : undefined}
+            style={{
+              justifyContent: collapsed ? 'center' : 'flex-start',
+              gap: collapsed ? 0 : '10px',
+              padding: '9px 10px',
+              fontSize: '13px',
+              fontWeight: 500,
+              color: 'var(--color-danger)',
+              backgroundColor: 'transparent',
+              border: 0,
+              cursor: 'pointer',
+            }}
+          >
+            <span style={{ opacity: 0.75 }}><LogoutIcon /></span>
+            {!collapsed && 'Logout'}
+          </button>
+        </form>
+
         <p
           style={{
             margin: 0,
@@ -499,6 +534,23 @@ export function Sidebar({ role, businessName }: SidebarProps) {
                 </div>
               ))}
             </nav>
+            <form action={logoutUser} style={{ marginTop: 12 }}>
+              <button
+                type="submit"
+                className="flex w-full items-center gap-3 rounded-lg"
+                style={{
+                  padding: '10px 12px',
+                  color: 'var(--color-danger)',
+                  backgroundColor: 'var(--color-background)',
+                  border: '1px solid var(--color-border)',
+                  fontSize: 14,
+                  fontWeight: 600,
+                }}
+              >
+                <LogoutIcon />
+                Logout
+              </button>
+            </form>
             <p style={{ margin: '16px 0 0', fontSize: 12, color: 'var(--color-text-muted)', textAlign: 'center' }}>
               © {currentYear} Retivox. All rights reserved.
             </p>
