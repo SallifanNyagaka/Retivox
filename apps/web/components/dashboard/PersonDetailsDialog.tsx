@@ -37,12 +37,14 @@ export default function PersonDetailsDialog({ person, onClose }: Props) {
         role="dialog"
         aria-modal="true"
         aria-label={`${person.name} details`}
-        className="w-full max-w-2xl"
+        className="flex w-full max-w-2xl flex-col gap-5"
         style={{
           backgroundColor: 'var(--color-surface)',
           border: '1px solid var(--color-border)',
           borderRadius: 'var(--radius-card)',
           boxShadow: 'var(--shadow-card)',
+          maxHeight: '88vh',
+          overflowY: 'auto',
           padding: 24,
         }}
         onClick={(event) => event.stopPropagation()}
@@ -59,7 +61,7 @@ export default function PersonDetailsDialog({ person, onClose }: Props) {
           </button>
         </div>
 
-        <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <Detail label="Email" value={person.email} />
           <Detail label="Phone" value={person.phone ?? '-'} />
           <Detail label="Status" value={person.statusLabel} />
@@ -68,8 +70,8 @@ export default function PersonDetailsDialog({ person, onClose }: Props) {
           <Detail label="Registered" value={person.createdLabel ?? '-'} />
         </div>
 
-        <div className="mt-6 border-t pt-4" style={{ borderColor: 'var(--color-border)' }}>
-          <Link href={person.operationsHref} className="btn-primary" style={{ padding: '10px 18px', borderRadius: 8 }}>
+        <div className="flex flex-wrap gap-3 border-t pt-5" style={{ borderColor: 'var(--color-border)' }}>
+          <Link href={person.operationsHref} className="btn-primary" style={{ display: 'inline-flex', minHeight: 44, maxWidth: '100%', alignItems: 'center', justifyContent: 'center', padding: '10px 18px', borderRadius: 8, textAlign: 'center', whiteSpace: 'normal' }}>
             {person.operationsLabel ?? 'View transactions / operations'}
           </Link>
         </div>
@@ -82,7 +84,7 @@ function Detail({ label, value }: { label: string; value: string }) {
   return (
     <div style={{ border: '1px solid var(--color-border)', borderRadius: 12, padding: 14, backgroundColor: 'var(--color-background)' }}>
       <p style={{ fontSize: 12, color: 'var(--color-text-muted)', margin: 0 }}>{label}</p>
-      <p style={{ fontSize: 14, fontWeight: 700, color: 'var(--color-text-primary)', marginTop: 6, overflowWrap: 'anywhere' }}>{value}</p>
+      <p style={{ fontSize: 14, fontWeight: 700, color: 'var(--color-text-primary)', margin: '6px 0 0', overflowWrap: 'anywhere' }}>{value}</p>
     </div>
   )
 }

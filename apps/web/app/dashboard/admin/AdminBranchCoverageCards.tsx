@@ -105,7 +105,7 @@ export default function AdminBranchCoverageCards({ branches, insights, currency 
             role="dialog"
             aria-modal="true"
             aria-label={`${selectedBranch.name} branch details`}
-            className="w-full max-w-4xl"
+            className="flex w-full max-w-4xl flex-col gap-5"
             style={{
               backgroundColor: 'var(--color-surface)',
               border: '1px solid var(--color-border)',
@@ -131,14 +131,14 @@ export default function AdminBranchCoverageCards({ branches, insights, currency 
               </button>
             </div>
 
-            <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <Metric label="Sales today" value={formatMoney(selectedInsight.todaySales, currency)} />
               <Metric label="Verified today" value={formatMoney(selectedInsight.todayVerifiedSales, currency)} />
               <Metric label="Profit today" value={formatMoney(selectedInsight.todayProfit, currency)} />
               <Metric label="Remaining stock" value={`${formatNumber(selectedInsight.stockBaseQuantity)} base units`} />
             </div>
 
-            <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Metric
                 label="Best employee today"
                 value={selectedInsight.bestEmployeeName ? `${selectedInsight.bestEmployeeName} (${formatMoney(selectedInsight.bestEmployeeSales, currency)})` : 'No employee sales today'}
@@ -151,12 +151,12 @@ export default function AdminBranchCoverageCards({ branches, insights, currency 
               <Metric label="Pending damages" value={String(selectedInsight.pendingDamageReports)} />
             </div>
 
-            <div className="mt-6 flex flex-wrap gap-3 border-t pt-4" style={{ borderColor: 'var(--color-border)' }}>
-              <Link href={`/dashboard/admin/transactions?branch=${selectedBranch.id}`} className="btn-primary" style={{ padding: '10px 18px', borderRadius: 8 }}>
+            <div className="flex flex-wrap gap-3 border-t pt-5" style={{ borderColor: 'var(--color-border)' }}>
+              <Link href={`/dashboard/admin/transactions?branch=${selectedBranch.id}`} className="btn-primary" style={{ display: 'inline-flex', minHeight: 44, maxWidth: '100%', alignItems: 'center', justifyContent: 'center', padding: '10px 18px', borderRadius: 8, textAlign: 'center', whiteSpace: 'normal' }}>
                 View transactions
               </Link>
               {selectedBranch.is_active && (
-                <Link href={`/dashboard/admin/transactions/new?branch=${selectedBranch.id}`} className="btn-outline" style={{ padding: '10px 18px', borderRadius: 8 }}>
+                <Link href={`/dashboard/admin/transactions/new?branch=${selectedBranch.id}`} className="btn-outline" style={{ display: 'inline-flex', minHeight: 44, maxWidth: '100%', alignItems: 'center', justifyContent: 'center', padding: '10px 18px', borderRadius: 8, textAlign: 'center', whiteSpace: 'normal' }}>
                   Make transaction
                 </Link>
               )}
@@ -172,7 +172,7 @@ function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div style={{ border: '1px solid var(--color-border)', borderRadius: 12, padding: 14, backgroundColor: 'var(--color-background)' }}>
       <p style={{ fontSize: 12, color: 'var(--color-text-muted)', margin: 0 }}>{label}</p>
-      <p style={{ fontSize: 15, fontWeight: 700, color: 'var(--color-text-primary)', marginTop: 6 }}>{value}</p>
+      <p style={{ fontSize: 15, fontWeight: 700, color: 'var(--color-text-primary)', margin: '6px 0 0', overflowWrap: 'anywhere' }}>{value}</p>
     </div>
   )
 }
