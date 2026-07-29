@@ -11,6 +11,7 @@ import { z } from 'zod'
 import { requireAuth } from '../../../../../lib/auth/helpers'
 import { getEmployeeProfile } from '../../../../../lib/employee/auth'
 import logger from '../../../../../lib/logger'
+import { normalizeKenyanPhoneNumber } from '../../../../../lib/payments/daraja'
 import { createClient } from '../../../../../lib/supabase/server'
 
 /**
@@ -62,9 +63,22 @@ const transactionSchema = z
     paymentMethod: z.enum(['mpesa_manual', 'cash']),
     discountAmount: z.coerce.number().min(0).default(0),
     customerName: z.string().trim().max(120).optional(),
-    customerPhone: z.string().trim().max(40).optional(),
+    customerPhone: z.string().trim().max(40).optional().transform((value, context) => {
+      if (!value) {
+        return undefined
+      }
+
+      try {
+        return normalizeKenyanPhoneNumber(value)
+      } catch {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Enter a valid Kenyan mobile phone number',
+        })
+        return z.NEVER
+      }
+    }),
     mpesaRefCode: z.string().trim().max(80).optional(),
-    cashDepositCode: z.string().trim().max(80).optional(),
   })
   .superRefine((value, context) => {
     if (value.paymentMethod === 'mpesa_manual' && (!value.mpesaRefCode || value.mpesaRefCode.length < 5)) {
@@ -75,13 +89,6 @@ const transactionSchema = z
       })
     }
 
-    if (value.paymentMethod === 'cash' && (!value.cashDepositCode || value.cashDepositCode.length < 3)) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['cashDepositCode'],
-        message: 'Enter a valid cash deposit/reference code',
-      })
-    }
   })
 
 /**
@@ -186,7 +193,6 @@ export async function recordEmployeeTransaction(
     customerName: getString(formData, 'customerName') || undefined,
     customerPhone: getString(formData, 'customerPhone') || undefined,
     mpesaRefCode: getString(formData, 'mpesaRefCode') || undefined,
-    cashDepositCode: getString(formData, 'cashDepositCode') || undefined,
   })
 
   if (!validation.success) {
@@ -210,7 +216,7 @@ export async function recordEmployeeTransaction(
       p_customer_name: validation.data.customerName ?? null,
       p_customer_phone: validation.data.customerPhone ?? null,
       p_mpesa_ref_code: validation.data.mpesaRefCode ?? null,
-      p_cash_deposit_code: validation.data.cashDepositCode ?? null,
+      p_cash_deposit_code: null,
     })
 
     if (response.error) {

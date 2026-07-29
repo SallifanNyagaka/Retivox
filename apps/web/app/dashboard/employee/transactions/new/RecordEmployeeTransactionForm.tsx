@@ -350,7 +350,6 @@ export default function RecordEmployeeTransactionForm({
   const [customerName, setCustomerName] = useState('')
   const [customerPhone, setCustomerPhone] = useState('')
   const [mpesaRefCode, setMpesaRefCode] = useState('')
-  const [cashDepositCode, setCashDepositCode] = useState('')
   const [state, action, isPending] = useActionState<EmployeeTransactionFormState, FormData>(recordTransactionAction, {
     success: false,
     error: null,
@@ -434,7 +433,6 @@ export default function RecordEmployeeTransactionForm({
             setCustomerName('')
             setCustomerPhone('')
             setMpesaRefCode('')
-            setCashDepositCode('')
           } else {
             router.push(redirectPath)
           }
@@ -540,7 +538,6 @@ export default function RecordEmployeeTransactionForm({
     formData.set('customerName', customerName)
     formData.set('customerPhone', customerPhone)
     formData.set('mpesaRefCode', mpesaRefCode)
-    formData.set('cashDepositCode', cashDepositCode)
 
     startTransition(() => {
       action(formData)
@@ -809,7 +806,19 @@ export default function RecordEmployeeTransactionForm({
           </label>
           <label className="flex flex-col gap-2 text-left" style={{ fontSize: 13, color: 'var(--color-text-primary)' }}>
             Customer phone optional
-            <input value={customerPhone} onChange={(event) => setCustomerPhone(event.target.value)} style={inputStyle} />
+            <input
+              type="tel"
+              inputMode="tel"
+              pattern="^(?:\+?254|0)?[17]\d{8}$"
+              title="Use a Kenyan mobile number like 0712345678 or +254712345678"
+              value={customerPhone}
+              onChange={(event) => {
+                const nextValue = event.target.value.replace(/[^\d+]/g, '').replace(/(?!^)\+/g, '').slice(0, 13)
+                setCustomerPhone(nextValue)
+              }}
+              placeholder="0712345678"
+              style={inputStyle}
+            />
           </label>
           <label className="flex flex-col gap-2 text-left" style={{ fontSize: 13, color: 'var(--color-text-primary)' }}>
             Discount amount
@@ -842,10 +851,18 @@ export default function RecordEmployeeTransactionForm({
             <input value={mpesaRefCode} onChange={(event) => setMpesaRefCode(event.target.value)} required style={inputStyle} />
           </label>
         ) : (
-          <label className="flex flex-col gap-2 text-left" style={{ fontSize: 13, color: 'var(--color-text-primary)' }}>
-            Cash deposit/reference code
-            <input value={cashDepositCode} onChange={(event) => setCashDepositCode(event.target.value)} required style={inputStyle} />
-          </label>
+          <div
+            className="rounded-xl border text-left"
+            style={{
+              borderColor: 'var(--color-border)',
+              backgroundColor: 'var(--color-surface)',
+              color: 'var(--color-text-muted)',
+              fontSize: 13,
+              padding: 14,
+            }}
+          >
+            Cash sales are recorded now. The bank/M-Pesa agent deposit reference will be entered later during end-of-day cash reconciliation.
+          </div>
         )}
 
         {state.error && (
