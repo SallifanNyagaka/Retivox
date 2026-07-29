@@ -87,7 +87,7 @@ export type RecordTransactionPayload = {
   customerName: string
   customerPhone: string
   mpesaRefCode: string
-  cashDepositCode: string
+  cashDepositCode?: string
 }
 
 export type DamageReportPayload = {
@@ -391,7 +391,7 @@ export async function recordEmployeeTransaction(payload: RecordTransactionPayloa
     p_customer_name: payload.customerName || null,
     p_customer_phone: payload.customerPhone || null,
     p_mpesa_ref_code: payload.mpesaRefCode || null,
-    p_cash_deposit_code: payload.cashDepositCode || null,
+    p_cash_deposit_code: null,
   })
 
   if (error) throw error

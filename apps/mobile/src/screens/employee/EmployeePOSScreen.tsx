@@ -76,7 +76,6 @@ export default function EmployeePOSScreen() {
   const [customerPhone, setCustomerPhone] = useState('')
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('mpesa_manual')
   const [mpesaRefCode, setMpesaRefCode] = useState('')
-  const [cashDepositCode, setCashDepositCode] = useState('')
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -205,11 +204,6 @@ export default function EmployeePOSScreen() {
       return
     }
 
-    if (paymentMethod === 'cash' && cashDepositCode.trim().length < 3) {
-      showToast('Enter a valid cash deposit/reference code.', 'warning')
-      return
-    }
-
     setSubmitting(true)
 
     try {
@@ -225,7 +219,6 @@ export default function EmployeePOSScreen() {
         customerName: customerName.trim(),
         customerPhone: customerPhone.trim(),
         mpesaRefCode: mpesaRefCode.trim(),
-        cashDepositCode: cashDepositCode.trim(),
       })
 
       setCart([])
@@ -233,7 +226,6 @@ export default function EmployeePOSScreen() {
       setCustomerName('')
       setCustomerPhone('')
       setMpesaRefCode('')
-      setCashDepositCode('')
       showToast('Transaction recorded successfully.', 'success')
       await loadProducts()
     } catch (submitError) {
@@ -375,7 +367,9 @@ export default function EmployeePOSScreen() {
               {paymentMethod === 'mpesa_manual' ? (
                 <Input label="M-Pesa reference code" value={mpesaRefCode} onChangeText={setMpesaRefCode} autoCapitalize="characters" />
               ) : (
-                <Input label="Cash deposit/reference code" value={cashDepositCode} onChangeText={setCashDepositCode} autoCapitalize="characters" />
+                <Text style={[styles.cashNote, { color: theme.colors.textMuted }]}>
+                  Cash sales are recorded now. The deposit/reference code is added later during cash reconciliation.
+                </Text>
               )}
 
               <View style={[styles.summary, { borderColor: overStockLine || invalidLine || discountInvalid ? theme.colors.danger : theme.colors.border }]}>
@@ -415,6 +409,12 @@ const styles = StyleSheet.create({
   cartTitle: {
     fontSize: 18,
     fontWeight: '800',
+  },
+  cashNote: {
+    borderRadius: 12,
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 20,
   },
   content: {
     gap: 14,
