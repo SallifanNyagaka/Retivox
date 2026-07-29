@@ -69,6 +69,20 @@ const damageReportRejectSchema = z.object({
   reviewNote: z.string().trim().max(180).optional(),
 })
 
+const cashDepositSchema = z.object({
+  branchId: z.string().uuid('Select a branch'),
+  depositDate: z.string().trim().min(1, 'Deposit date is required'),
+  amount: z.number().positive('Cash deposit amount must be greater than zero'),
+  depositReference: z.string().trim().min(3, 'Deposit reference is required').max(80),
+  note: z.string().trim().max(180).optional(),
+})
+
+const cashDepositReviewSchema = z.object({
+  depositId: z.string().uuid('Cash deposit missing'),
+  action: z.enum(['approve', 'reject']),
+  reviewNote: z.string().trim().max(180).optional(),
+})
+
 function getString(formData: FormData, key: string): string {
   const value = formData.get(key)
   return typeof value === 'string' ? value.trim() : ''
@@ -300,6 +314,99 @@ export async function skipRecurringFinanceExpense(_prevState: FinanceFormState, 
     return { success: true, error: null }
   } catch (error: unknown) {
     logger.error('skipRecurringFinanceExpense: unexpected error', { businessId, error })
+    return { success: false, error: error instanceof Error ? error.message : 'Server error' }
+  }
+}
+
+export async function recordBranchCashDeposit(_prevState: FinanceFormState, formData: FormData): Promise<FinanceFormState> {
+  const profile = await requireRole([GlobalRole.Owner, GlobalRole.Admin])
+  const validation = cashDepositSchema.safeParse({
+    branchId: getString(formData, 'branchId'),
+    depositDate: getString(formData, 'depositDate'),
+    amount: Number(getString(formData, 'amount')),
+    depositReference: getString(formData, 'depositReference'),
+    note: getString(formData, 'note') || undefined,
+  })
+
+  if (!validation.success) {
+    return { success: false, error: validation.error.errors[0]?.message ?? 'Invalid cash deposit' }
+  }
+
+  const businessId = profile.business_id
+
+  if (!businessId) {
+    logger.error('recordBranchCashDeposit: missing business id', { userId: profile.id })
+    return { success: false, error: 'Business context missing' }
+  }
+
+  try {
+    const supabase = await createClient()
+    const { error } = await supabase.rpc('record_branch_cash_deposit', {
+      p_branch_id: validation.data.branchId,
+      p_deposit_date: validation.data.depositDate,
+      p_amount: validation.data.amount,
+      p_deposit_reference: validation.data.depositReference,
+      p_note: validation.data.note ?? null,
+    })
+
+    if (error) {
+      logger.error('recordBranchCashDeposit: RPC failed', { businessId, branchId: validation.data.branchId, error })
+      return { success: false, error: error.message ?? 'Unable to record cash deposit' }
+    }
+
+    revalidateFinanceRoutes()
+    revalidatePath('/dashboard/owner/transactions')
+    revalidatePath('/dashboard/admin/transactions')
+    return { success: true, error: null }
+  } catch (error: unknown) {
+    logger.error('recordBranchCashDeposit: unexpected error', { businessId, error })
+    return { success: false, error: error instanceof Error ? error.message : 'Server error' }
+  }
+}
+
+export async function reviewBranchCashDeposit(_prevState: FinanceFormState, formData: FormData): Promise<FinanceFormState> {
+  const profile = await requireRole([GlobalRole.Owner])
+  const validation = cashDepositReviewSchema.safeParse({
+    depositId: getString(formData, 'depositId'),
+    action: getString(formData, 'action'),
+    reviewNote: getString(formData, 'reviewNote') || undefined,
+  })
+
+  if (!validation.success) {
+    return { success: false, error: validation.error.errors[0]?.message ?? 'Invalid cash deposit review' }
+  }
+
+  const businessId = profile.business_id
+
+  if (!businessId) {
+    logger.error('reviewBranchCashDeposit: missing business id', { userId: profile.id })
+    return { success: false, error: 'Business context missing' }
+  }
+
+  try {
+    const supabase = await createClient()
+    const { error } = await supabase.rpc('owner_review_branch_cash_deposit', {
+      p_deposit_id: validation.data.depositId,
+      p_action: validation.data.action,
+      p_review_note: validation.data.reviewNote ?? null,
+    })
+
+    if (error) {
+      logger.error('reviewBranchCashDeposit: RPC failed', {
+        businessId,
+        depositId: validation.data.depositId,
+        action: validation.data.action,
+        error,
+      })
+      return { success: false, error: error.message ?? 'Unable to review cash deposit' }
+    }
+
+    revalidateFinanceRoutes()
+    revalidatePath('/dashboard/owner/transactions')
+    revalidatePath('/dashboard/admin/transactions')
+    return { success: true, error: null }
+  } catch (error: unknown) {
+    logger.error('reviewBranchCashDeposit: unexpected error', { businessId, error })
     return { success: false, error: error instanceof Error ? error.message : 'Server error' }
   }
 }

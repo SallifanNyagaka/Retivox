@@ -14,6 +14,10 @@ import logger from '../../../../lib/logger'
 import { createClient } from '../../../../lib/supabase/server'
 import FinanceControls, { type LossProductOption } from './FinanceControls'
 import FinanceFilters from './FinanceFilters'
+import CashDepositReconciliationPanel, {
+  type BranchPaymentSummary,
+  type CashDepositRow,
+} from './CashDepositReconciliationPanel'
 import PendingEmployeeDamageReportsTable, { type PendingEmployeeDamageReportRow } from './PendingEmployeeDamageReportsTable'
 import RecurringExpensePanel, {
   type RecurringExpenseInstance,
@@ -127,6 +131,39 @@ type FinanceStockCostRow = {
 type BranchOption = {
   id: string
   name: string
+}
+
+type RawFinancePaymentRow = {
+  payment_method: string
+  amount: number | string
+  status: string
+  transactions: JoinedOne<{
+    branch_id: string | null
+    status: string
+    branches: JoinedOne<{ name: string }>
+  }>
+}
+
+type RawCashDepositRow = {
+  id: string
+  branch_id: string
+  deposited_by: string | null
+  deposit_date: string
+  amount: number | string
+  expected_cash_amount: number | string
+  variance_amount: number | string
+  deposit_reference: string
+  note: string | null
+  review_note: string | null
+  status: 'pending' | 'verified' | 'rejected'
+  created_at: string
+  branches: JoinedOne<{ name: string }>
+}
+
+type CashDepositUserRow = {
+  id: string
+  name: string | null
+  email: string | null
 }
 
 type RawFinanceStockRow = {
@@ -665,6 +702,165 @@ async function getPendingEmployeeDamageReports(businessId: string): Promise<Pend
   return (response.data ?? []) as PendingEmployeeDamageReportRow[]
 }
 
+async function getBranchPaymentSummaries(
+  businessId: string,
+  filters: FinancePageFilters,
+  branches: BranchOption[]
+): Promise<BranchPaymentSummary[]> {
+  const supabase = await createClient()
+  const branchIds = branches.map((branch) => branch.id)
+  const summaries = new Map<string, BranchPaymentSummary>()
+
+  branches.forEach((branch) => {
+    summaries.set(branch.id, {
+      branchId: branch.id,
+      branchName: branch.name,
+      cashRecorded: 0,
+      cashVerified: 0,
+      cashPending: 0,
+      eMoneyRecorded: 0,
+      eMoneyVerified: 0,
+      eMoneyPending: 0,
+      pendingDepositAmount: 0,
+      verifiedDepositAmount: 0,
+      varianceAmount: 0,
+    })
+  })
+
+  if (branchIds.length === 0) {
+    return []
+  }
+
+  let query = supabase
+    .from('payments')
+    .select('payment_method, amount, status, transactions!inner(branch_id, status, branches(name))')
+    .eq('business_id', businessId)
+    .in('transactions.branch_id', branchIds)
+    .gte('payment_at', filters.startDate.toISOString())
+    .lte('payment_at', filters.endDate.toISOString())
+    .range(0, 999)
+
+  if (filters.branchId) {
+    query = query.eq('transactions.branch_id', filters.branchId)
+  }
+
+  const response = await query
+
+  if (response.error) {
+    logger.error('Owner finances payment summary fetch failed', { businessId, error: response.error })
+    return Array.from(summaries.values())
+  }
+
+  ;((response.data ?? []) as RawFinancePaymentRow[]).forEach((payment) => {
+    const transaction = normalizeJoinedOne(payment.transactions)
+    const branchId = transaction?.branch_id
+
+    if (!branchId || !summaries.has(branchId) || transaction.status === 'rejected' || transaction.status === 'voided') {
+      return
+    }
+
+    const summary = summaries.get(branchId)
+    if (!summary) return
+
+    const amount = toMoneyNumber(payment.amount)
+
+    if (payment.payment_method === 'cash') {
+      summary.cashRecorded += amount
+
+      if (payment.status === 'verified') {
+        summary.cashVerified += amount
+      } else {
+        summary.cashPending += amount
+      }
+    } else {
+      summary.eMoneyRecorded += amount
+
+      if (payment.status === 'verified') {
+        summary.eMoneyVerified += amount
+      } else {
+        summary.eMoneyPending += amount
+      }
+    }
+  })
+
+  return Array.from(summaries.values())
+}
+
+async function getCashDeposits(
+  businessId: string,
+  filters: FinancePageFilters,
+  branches: BranchOption[]
+): Promise<CashDepositRow[]> {
+  const supabase = await createClient()
+  const branchIds = branches.map((branch) => branch.id)
+
+  if (branchIds.length === 0) {
+    return []
+  }
+
+  let query = supabase
+    .from('branch_cash_deposits')
+    .select(
+      'id, branch_id, deposited_by, deposit_date, amount, expected_cash_amount, variance_amount, deposit_reference, note, review_note, status, created_at, branches(name)'
+    )
+    .eq('business_id', businessId)
+    .in('branch_id', branchIds)
+    .gte('deposit_date', filters.startDateOnly)
+    .lte('deposit_date', filters.endDateOnly)
+    .order('created_at', { ascending: false })
+    .range(0, 99)
+
+  if (filters.branchId) {
+    query = query.eq('branch_id', filters.branchId)
+  }
+
+  const response = await query
+
+  if (response.error) {
+    logger.error('Owner finances cash deposit fetch failed', { businessId, error: response.error })
+    return []
+  }
+
+  const rows = (response.data ?? []) as RawCashDepositRow[]
+  const userIds = Array.from(new Set(rows.map((row) => row.deposited_by).filter((id): id is string => Boolean(id))))
+  const usersById = new Map<string, CashDepositUserRow>()
+
+  if (userIds.length > 0) {
+    const usersResponse = await supabase
+      .from('users')
+      .select('id, name, email')
+      .eq('business_id', businessId)
+      .in('id', userIds)
+
+    if (usersResponse.error) {
+      logger.error('Owner finances cash deposit user fetch failed', { businessId, error: usersResponse.error })
+    } else {
+      ;((usersResponse.data ?? []) as CashDepositUserRow[]).forEach((user) => usersById.set(user.id, user))
+    }
+  }
+
+  return rows.map((row) => {
+    const branch = normalizeJoinedOne(row.branches)
+    const depositor = row.deposited_by ? usersById.get(row.deposited_by) : null
+
+    return {
+      id: row.id,
+      branchId: row.branch_id,
+      branchName: branch?.name ?? 'Unknown branch',
+      depositedByName: depositor?.name ?? depositor?.email ?? null,
+      depositDate: row.deposit_date,
+      amount: toMoneyNumber(row.amount),
+      expectedCashAmount: toMoneyNumber(row.expected_cash_amount),
+      varianceAmount: toMoneyNumber(row.variance_amount),
+      depositReference: row.deposit_reference,
+      note: row.note,
+      reviewNote: row.review_note,
+      status: row.status,
+      createdAt: row.created_at,
+    }
+  })
+}
+
 async function getFinanceFormOptions(businessId: string): Promise<{ branches: BranchOption[]; lossProducts: LossProductOption[] }> {
   const supabase = await createClient()
   const [branchesResponse, stockResponse] = await Promise.all([
@@ -1073,9 +1269,29 @@ export default async function OwnerFinancesPage({
     getRecurringExpenseData(businessId, filters),
     getPendingEmployeeDamageReports(businessId),
   ])
+  const [basePaymentSummaries, cashDeposits] = await Promise.all([
+    getBranchPaymentSummaries(businessId, filters, formOptions.branches),
+    getCashDeposits(businessId, filters, formOptions.branches),
+  ])
   const currency = business?.currency ?? 'KES'
   const selectedBranch = formOptions.branches.find((branch) => branch.id === filters.branchId) ?? null
   const periodLabel = filters.period === 'week' ? 'this week' : filters.period === 'month' ? 'this month' : 'today'
+  const paymentSummaries = basePaymentSummaries.map((summaryRow) => {
+    const branchDeposits = cashDeposits.filter((deposit) => deposit.branchId === summaryRow.branchId)
+
+    return {
+      ...summaryRow,
+      pendingDepositAmount: branchDeposits
+        .filter((deposit) => deposit.status === 'pending')
+        .reduce((sum, deposit) => sum + deposit.amount, 0),
+      verifiedDepositAmount: branchDeposits
+        .filter((deposit) => deposit.status === 'verified')
+        .reduce((sum, deposit) => sum + deposit.amount, 0),
+      varianceAmount: branchDeposits
+        .filter((deposit) => deposit.status !== 'rejected')
+        .reduce((sum, deposit) => sum + deposit.varianceAmount, 0),
+    }
+  })
 
   return (
     <div className="flex flex-col gap-6">
@@ -1132,6 +1348,14 @@ export default async function OwnerFinancesPage({
         templates={recurringData.templates}
         pendingInstances={recurringData.pendingInstances}
         currency={currency}
+      />
+
+      <CashDepositReconciliationPanel
+        branches={formOptions.branches}
+        summaries={paymentSummaries}
+        deposits={cashDeposits}
+        currency={currency}
+        defaultDate={filters.endDateOnly}
       />
 
       <FinanceControls branches={formOptions.branches} lossProducts={formOptions.lossProducts} />
