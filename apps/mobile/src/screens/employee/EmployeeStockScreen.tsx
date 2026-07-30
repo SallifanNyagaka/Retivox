@@ -11,6 +11,7 @@ import { Boxes, PackageX } from 'lucide-react-native'
 import { Badge } from '../../components/ui/Badge'
 import { Card } from '../../components/ui/Card'
 import { EmptyState } from '../../components/ui/EmptyState'
+import { useOnlineAutoRefresh } from '../../hooks/useOnlineAutoRefresh'
 import { useTheme } from '../../hooks/useTheme'
 import { resolveEmployeeBranchAssignment } from '../../lib/employee/branchAssignment'
 import { fetchEmployeeDashboardData, fetchEmployeeSaleProducts, type EmployeeProductOption } from '../../lib/employee/employeeApi'
@@ -18,6 +19,10 @@ import { formatMoney, formatProductAvailability } from '../../lib/employee/prici
 import { useAuthStore } from '../../store/authStore'
 import { handleError } from '../../utils/errorHandler'
 import { DashboardScaffold } from '../shared/DashboardScaffold'
+
+type LoadOptions = {
+  silent?: boolean
+}
 
 /**
  * Renders employee stock levels.
@@ -33,8 +38,10 @@ export default function EmployeeStockScreen() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  const loadProducts = useCallback(async () => {
-    setLoading(true)
+  const loadProducts = useCallback(async (options: LoadOptions = {}) => {
+    if (!options.silent) {
+      setLoading(true)
+    }
     setError(null)
 
     try {
@@ -49,13 +56,16 @@ export default function EmployeeStockScreen() {
       const handled = handleError('EmployeeStock.loadProducts', loadError)
       setError(handled.message)
     } finally {
-      setLoading(false)
+      if (!options.silent) {
+        setLoading(false)
+      }
     }
   }, [setUser, user])
 
   useEffect(() => {
     void loadProducts()
   }, [loadProducts])
+  useOnlineAutoRefresh(() => loadProducts({ silent: true }), { label: 'EmployeeStock.autoRefresh' })
 
   const normalCount = useMemo(() => products.filter((product) => product.stockSource === 'normal').length, [products])
   const damagedCount = useMemo(() => products.filter((product) => product.stockSource === 'recovery').length, [products])

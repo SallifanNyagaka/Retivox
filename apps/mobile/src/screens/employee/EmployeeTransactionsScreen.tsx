@@ -10,6 +10,7 @@ import { ReceiptText, RefreshCcw } from 'lucide-react-native'
 import { Badge, type BadgeVariant } from '../../components/ui/Badge'
 import { Card } from '../../components/ui/Card'
 import { EmptyState } from '../../components/ui/EmptyState'
+import { useOnlineAutoRefresh } from '../../hooks/useOnlineAutoRefresh'
 import { useTheme } from '../../hooks/useTheme'
 import { resolveEmployeeBranchAssignment } from '../../lib/employee/branchAssignment'
 import { fetchEmployeeDashboardData, fetchEmployeeTransactions, type EmployeeTransaction } from '../../lib/employee/employeeApi'
@@ -18,6 +19,10 @@ import { useAuthStore } from '../../store/authStore'
 import { formatDateTime } from '../../utils/dateFormatter'
 import { handleError } from '../../utils/errorHandler'
 import { DashboardScaffold } from '../shared/DashboardScaffold'
+
+type LoadOptions = {
+  silent?: boolean
+}
 
 /**
  * Returns badge variant for a transaction status.
@@ -46,8 +51,10 @@ export default function EmployeeTransactionsScreen() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  const loadTransactions = useCallback(async () => {
-    setLoading(true)
+  const loadTransactions = useCallback(async (options: LoadOptions = {}) => {
+    if (!options.silent) {
+      setLoading(true)
+    }
     setError(null)
 
     try {
@@ -62,13 +69,16 @@ export default function EmployeeTransactionsScreen() {
       const handled = handleError('EmployeeTransactions.loadTransactions', loadError)
       setError(handled.message)
     } finally {
-      setLoading(false)
+      if (!options.silent) {
+        setLoading(false)
+      }
     }
   }, [setUser, user])
 
   useEffect(() => {
     void loadTransactions()
   }, [loadTransactions])
+  useOnlineAutoRefresh(() => loadTransactions({ silent: true }), { label: 'EmployeeTransactions.autoRefresh' })
 
   return (
     <DashboardScaffold

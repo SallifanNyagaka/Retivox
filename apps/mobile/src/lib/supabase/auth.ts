@@ -7,10 +7,14 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import type { Session } from '@supabase/supabase-js'
+import * as SecureStore from 'expo-secure-store'
 import { GlobalRole, loginSchema } from '@smartretail/shared'
 import { supabase, clearSupabaseStorage } from './client'
+import { getConnectivityState } from '../network/connectivity'
 import { handleError } from '../../utils/errorHandler'
 import type { UserProfile } from '../../store/authStore'
+
+const OFFLINE_AUTH_CACHE_KEY = 'retivox:offline-auth-cache'
 
 type UserRow = {
   id: string
@@ -34,8 +38,15 @@ type EmployeeProfileRow = EmployeeBranchRow & {
 }
 
 export type SignInResult = {
-  session: Session
+  session: Session | null
   user: UserProfile
+}
+
+type OfflineAuthCache = {
+  email: string
+  password: string
+  profile: UserProfile
+  updatedAt: string
 }
 
 /**
@@ -74,7 +85,8 @@ export async function loadCurrentUserProfile(): Promise<UserProfile | null> {
   const { data: userData, error: authError } = await supabase.auth.getUser()
 
   if (authError || !userData.user) {
-    return null
+    const connectivity = await getConnectivityState()
+    return connectivity.isOnline ? null : loadCachedOfflineProfile()
   }
 
   const { data: profileData, error: profileError } = await supabase
@@ -96,7 +108,10 @@ export async function loadCurrentUserProfile(): Promise<UserProfile | null> {
 
   const branchRow = profileRow.global_role === GlobalRole.Employee ? await loadEmployeeBranch(profileRow.id) : null
 
-  return normalizeUserProfile(profileRow, branchRow)
+  const profile = normalizeUserProfile(profileRow, branchRow)
+  await updateCachedOfflineProfile(profile)
+
+  return profile
 }
 
 /**
@@ -153,7 +168,22 @@ export async function signIn(email: string, password: string): Promise<SignInRes
     throw new Error(validation.error.errors[0]?.message ?? 'Invalid login details.')
   }
 
-  const { data, error } = await supabase.auth.signInWithPassword(validation.data)
+  const normalizedEmail = validation.data.email.trim().toLowerCase()
+  const connectivity = await getConnectivityState()
+
+  if (!connectivity.isOnline) {
+    const cachedUser = await authenticateOffline(normalizedEmail, validation.data.password)
+
+    return {
+      session: null,
+      user: cachedUser,
+    }
+  }
+
+  const { data, error } = await supabase.auth.signInWithPassword({
+    email: normalizedEmail,
+    password: validation.data.password,
+  })
 
   if (error || !data.session) {
     throw new Error('Invalid email or password.')
@@ -165,6 +195,7 @@ export async function signIn(email: string, password: string): Promise<SignInRes
     throw new Error('Account profile could not be loaded.')
   }
 
+  await saveOfflineAuthCache(normalizedEmail, validation.data.password, profile)
   await recordDeviceSession(profile.id)
 
   return {
@@ -187,6 +218,7 @@ export async function signOut(): Promise<void> {
 
   await clearSupabaseStorage()
   await AsyncStorage.clear()
+  await SecureStore.deleteItemAsync(OFFLINE_AUTH_CACHE_KEY)
 
   try {
     const { database } = await import('../watermelon/database')
@@ -195,6 +227,99 @@ export async function signOut(): Promise<void> {
     })
   } catch (error) {
     handleError('signOut.clearWatermelon', error)
+  }
+}
+
+/**
+ * Authenticates against the device-local cache when the shop is offline.
+ *
+ * @param email - Normalized email.
+ * @param password - Entered password.
+ * @returns Cached user profile.
+ */
+async function authenticateOffline(email: string, password: string): Promise<UserProfile> {
+  const cache = await loadOfflineAuthCache()
+
+  if (!cache || cache.email !== email || cache.password !== password) {
+    throw new Error('You are offline. Connect once with this account on this device before offline login can work.')
+  }
+
+  return cache.profile
+}
+
+/**
+ * Loads only the cached profile for session bootstrap while offline.
+ *
+ * @returns Cached profile or null.
+ */
+async function loadCachedOfflineProfile(): Promise<UserProfile | null> {
+  const cache = await loadOfflineAuthCache()
+  return cache?.profile ?? null
+}
+
+/**
+ * Persists credentials and profile in OS-backed secure storage for offline login.
+ *
+ * @param email - Normalized email.
+ * @param password - Current password.
+ * @param profile - Fresh online profile.
+ * @returns Promise resolving after save.
+ */
+async function saveOfflineAuthCache(email: string, password: string, profile: UserProfile): Promise<void> {
+  await SecureStore.setItemAsync(
+    OFFLINE_AUTH_CACHE_KEY,
+    JSON.stringify({
+      email,
+      password,
+      profile,
+      updatedAt: new Date().toISOString(),
+    } satisfies OfflineAuthCache),
+  )
+}
+
+/**
+ * Updates cached profile after online profile refresh while preserving credentials.
+ *
+ * @param profile - Latest online profile.
+ * @returns Promise resolving after best-effort save.
+ */
+async function updateCachedOfflineProfile(profile: UserProfile): Promise<void> {
+  const cache = await loadOfflineAuthCache()
+
+  if (!cache) {
+    return
+  }
+
+  await saveOfflineAuthCache(cache.email, cache.password, profile)
+}
+
+/**
+ * Reads the offline auth cache.
+ *
+ * @returns Cache row or null.
+ */
+async function loadOfflineAuthCache(): Promise<OfflineAuthCache | null> {
+  const value = await SecureStore.getItemAsync(OFFLINE_AUTH_CACHE_KEY)
+
+  if (!value) {
+    return null
+  }
+
+  try {
+    const parsed = JSON.parse(value) as Partial<OfflineAuthCache>
+
+    if (
+      typeof parsed.email === 'string' &&
+      typeof parsed.password === 'string' &&
+      parsed.profile &&
+      typeof parsed.profile.id === 'string'
+    ) {
+      return parsed as OfflineAuthCache
+    }
+
+    return null
+  } catch {
+    return null
   }
 }
 

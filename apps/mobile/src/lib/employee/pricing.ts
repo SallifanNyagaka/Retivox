@@ -127,6 +127,21 @@ export function resolvePreviewPricing(
     return null
   }
 
+  if (product.stockSource === 'recovery') {
+    const selectedUom = product.uomOptions.find((uom) => uom.id === selectedUomId) ?? getDefaultSaleUom(product)
+    const matchingOption = product.pricingOptions.find((option) => option.uomId === selectedUom?.id) ?? product.pricingOptions[0]
+    const recoveryUnitPrice = matchingOption?.price ?? product.sellingPrice
+
+    if (!selectedUom || recoveryUnitPrice <= 0) {
+      return null
+    }
+
+    return {
+      lineTotal: Number(((baseQuantity / selectedUom.conversionFactor) * recoveryUnitPrice).toFixed(2)),
+      maxDiscountAmount: 0,
+    }
+  }
+
   const matchingUomOptions = product.pricingOptions.filter((option) => option.uomId === selectedUomId)
 
   if (product.pricingMethod === 'fixed_price' && matchingUomOptions.length === 0) {

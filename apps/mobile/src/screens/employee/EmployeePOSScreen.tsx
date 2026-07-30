@@ -17,6 +17,7 @@ import { EmptyState } from '../../components/ui/EmptyState'
 import { Input } from '../../components/ui/Input'
 import { LoadingSpinner } from '../../components/ui/LoadingSpinner'
 import { Toast } from '../../components/ui/Toast'
+import { useOnlineAutoRefresh } from '../../hooks/useOnlineAutoRefresh'
 import { useTheme } from '../../hooks/useTheme'
 import { resolveEmployeeBranchAssignment } from '../../lib/employee/branchAssignment'
 import {
@@ -38,6 +39,10 @@ import { useUiStore } from '../../store/uiStore'
 import { handleError } from '../../utils/errorHandler'
 
 type SaleTab = 'normal' | 'damaged'
+
+type LoadOptions = {
+  silent?: boolean
+}
 
 type CartItem = {
   id: string
@@ -82,8 +87,10 @@ export default function EmployeePOSScreen() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const loadProducts = useCallback(async () => {
-    setLoading(true)
+  const loadProducts = useCallback(async (options: LoadOptions = {}) => {
+    if (!options.silent) {
+      setLoading(true)
+    }
     setError(null)
 
     try {
@@ -98,13 +105,16 @@ export default function EmployeePOSScreen() {
       const handled = handleError('EmployeePOS.loadProducts', loadError)
       setError(handled.message)
     } finally {
-      setLoading(false)
+      if (!options.silent) {
+        setLoading(false)
+      }
     }
   }, [setUser, user])
 
   useEffect(() => {
     void loadProducts()
   }, [loadProducts])
+  useOnlineAutoRefresh(() => loadProducts({ silent: true }), { label: 'EmployeePOS.autoRefresh' })
 
   const normalProducts = useMemo(() => products.filter((product) => product.stockSource === 'normal'), [products])
   const damagedProducts = useMemo(

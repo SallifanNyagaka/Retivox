@@ -17,6 +17,7 @@ import { EmptyState } from '../../components/ui/EmptyState'
 import { Input } from '../../components/ui/Input'
 import { LoadingSpinner } from '../../components/ui/LoadingSpinner'
 import { Toast } from '../../components/ui/Toast'
+import { useOnlineAutoRefresh } from '../../hooks/useOnlineAutoRefresh'
 import { useTheme } from '../../hooks/useTheme'
 import { resolveEmployeeBranchAssignment } from '../../lib/employee/branchAssignment'
 import {
@@ -38,6 +39,10 @@ const lossTypes: Array<{ label: string; value: LossType }> = [
   { label: 'Damaged but sellable', value: 'markdown_damage' },
   { label: 'Other', value: 'other' },
 ]
+
+type LoadOptions = {
+  silent?: boolean
+}
 
 /**
  * Finds the individual/base unit for damage reporting.
@@ -82,8 +87,10 @@ export default function EmployeeDamagedStockScreen() {
   const exceedsAvailable = selectedProduct ? baseQuantity > selectedProduct.baseQuantityAvailable : false
   const canSubmit = Boolean(selectedProduct && selectedUom && quantityValue > 0 && reason.trim() && !exceedsAvailable && !submitting)
 
-  const loadProducts = useCallback(async () => {
-    setLoading(true)
+  const loadProducts = useCallback(async (options: LoadOptions = {}) => {
+    if (!options.silent) {
+      setLoading(true)
+    }
     setError(null)
 
     try {
@@ -95,13 +102,16 @@ export default function EmployeeDamagedStockScreen() {
       const handled = handleError('EmployeeDamagedStock.loadProducts', loadError)
       setError(handled.message)
     } finally {
-      setLoading(false)
+      if (!options.silent) {
+        setLoading(false)
+      }
     }
   }, [setUser, user])
 
   useEffect(() => {
     void loadProducts()
   }, [loadProducts])
+  useOnlineAutoRefresh(() => loadProducts({ silent: true }), { label: 'EmployeeDamagedStock.autoRefresh' })
 
   /**
    * Submits a damage report.

@@ -10,6 +10,7 @@ import { ReceiptText, ShieldAlert, ShoppingCart } from 'lucide-react-native'
 import { Badge } from '../../components/ui/Badge'
 import { Card } from '../../components/ui/Card'
 import { EmptyState } from '../../components/ui/EmptyState'
+import { useOnlineAutoRefresh } from '../../hooks/useOnlineAutoRefresh'
 import { useTheme } from '../../hooks/useTheme'
 import { resolveEmployeeBranchAssignment } from '../../lib/employee/branchAssignment'
 import { fetchEmployeeDashboardData, type EmployeeDashboardData } from '../../lib/employee/employeeApi'
@@ -18,6 +19,10 @@ import { useAuthStore } from '../../store/authStore'
 import { formatDateTime } from '../../utils/dateFormatter'
 import { handleError } from '../../utils/errorHandler'
 import { DashboardScaffold } from '../shared/DashboardScaffold'
+
+type LoadOptions = {
+  silent?: boolean
+}
 
 /**
  * Returns a greeting based on local time.
@@ -44,8 +49,10 @@ export default function EmployeeHomeScreen() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  const loadDashboard = useCallback(async () => {
-    setLoading(true)
+  const loadDashboard = useCallback(async (options: LoadOptions = {}) => {
+    if (!options.silent) {
+      setLoading(true)
+    }
     setError(null)
 
     try {
@@ -55,13 +62,16 @@ export default function EmployeeHomeScreen() {
       const handled = handleError('EmployeeHome.loadDashboard', loadError)
       setError(handled.message)
     } finally {
-      setLoading(false)
+      if (!options.silent) {
+        setLoading(false)
+      }
     }
   }, [setUser, user])
 
   useEffect(() => {
     void loadDashboard()
   }, [loadDashboard])
+  useOnlineAutoRefresh(() => loadDashboard({ silent: true }), { label: 'EmployeeHome.autoRefresh' })
 
   const todayTotal = useMemo(
     () => data?.todayTransactions.reduce((sum, transaction) => sum + transaction.totalAmount, 0) ?? 0,

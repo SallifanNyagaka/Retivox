@@ -21,31 +21,57 @@ import { handleError } from '../utils/errorHandler'
 export function useSync() {
   const onlineStatus = useOnlineStatus()
   const profile = useAuthStore((state) => state.user)
-  const syncState = useSyncStore()
+  const {
+    failedCount,
+    isSyncing,
+    lastSyncedAt,
+    pendingCount,
+    setFailedCount,
+    setLastSynced,
+    setPendingCount,
+    setSyncing,
+  } = useSyncStore()
 
   const triggerSync = useCallback(async () => {
-    if (!profile) return
+    if (!profile || !onlineStatus.isOnline || isSyncing) return
 
-    syncState.setSyncing(true)
+    setSyncing(true)
     try {
       await runWatermelonSync(profile)
+      setLastSynced(new Date())
     } catch (error) {
       handleError('useSync.triggerSync', error)
     } finally {
-      syncState.setSyncing(false)
+      setSyncing(false)
     }
-  }, [profile, syncState])
+  }, [isSyncing, onlineStatus.isOnline, profile, setLastSynced, setSyncing])
 
   useEffect(() => {
-    if (onlineStatus.isOnline) {
+    if (onlineStatus.isOnline && profile) {
       scheduleSyncQueueProcessing()
+      void (async () => {
+        setSyncing(true)
+        try {
+          await runWatermelonSync(profile)
+          setLastSynced(new Date())
+        } catch (error) {
+          handleError('useSync.onlineSync', error)
+        } finally {
+          setSyncing(false)
+        }
+      })()
     }
-  }, [onlineStatus.isOnline])
+  }, [onlineStatus.isOnline, profile?.branchId, profile?.businessId, profile?.id, setLastSynced, setSyncing])
 
   return {
-    ...syncState,
+    failedCount,
+    isSyncing,
     isOnline: onlineStatus.isOnline,
+    lastSyncedAt,
+    pendingCount,
     connectionType: onlineStatus.connectionType,
+    setFailedCount,
+    setPendingCount,
     triggerSync,
   }
 }
