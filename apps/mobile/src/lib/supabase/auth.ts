@@ -266,15 +266,19 @@ async function loadCachedOfflineProfile(): Promise<UserProfile | null> {
  * @returns Promise resolving after save.
  */
 async function saveOfflineAuthCache(email: string, password: string, profile: UserProfile): Promise<void> {
-  await SecureStore.setItemAsync(
-    OFFLINE_AUTH_CACHE_KEY,
-    JSON.stringify({
-      email,
-      password,
-      profile,
-      updatedAt: new Date().toISOString(),
-    } satisfies OfflineAuthCache),
-  )
+  try {
+    await SecureStore.setItemAsync(
+      OFFLINE_AUTH_CACHE_KEY,
+      JSON.stringify({
+        email,
+        password,
+        profile,
+        updatedAt: new Date().toISOString(),
+      } satisfies OfflineAuthCache),
+    )
+  } catch (error) {
+    handleError('saveOfflineAuthCache', error)
+  }
 }
 
 /**
@@ -299,13 +303,13 @@ async function updateCachedOfflineProfile(profile: UserProfile): Promise<void> {
  * @returns Cache row or null.
  */
 async function loadOfflineAuthCache(): Promise<OfflineAuthCache | null> {
-  const value = await SecureStore.getItemAsync(OFFLINE_AUTH_CACHE_KEY)
-
-  if (!value) {
-    return null
-  }
-
   try {
+    const value = await SecureStore.getItemAsync(OFFLINE_AUTH_CACHE_KEY)
+
+    if (!value) {
+      return null
+    }
+
     const parsed = JSON.parse(value) as Partial<OfflineAuthCache>
 
     if (
@@ -318,7 +322,8 @@ async function loadOfflineAuthCache(): Promise<OfflineAuthCache | null> {
     }
 
     return null
-  } catch {
+  } catch (error) {
+    handleError('loadOfflineAuthCache', error)
     return null
   }
 }
