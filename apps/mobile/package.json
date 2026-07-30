@@ -48,5 +48,17 @@
     "@types/react": "~19.1.0",
     "typescript": "~5.9.2"
   },
+  "expo": {
+    "doctor": {
+      "reactNativeDirectoryCheck": {
+        "exclude": [
+          "@nozbe/watermelondb",
+          "@nozbe/simdjson",
+          "expo-barcode-scanner"
+        ],
+        "listUnknownPackages": false
+      }
+    }
+  },
   "private": true
 }
