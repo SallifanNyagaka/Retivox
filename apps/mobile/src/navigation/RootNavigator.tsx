@@ -10,7 +10,6 @@ import { NavigationContainer } from '@react-navigation/native'
 import { GlobalRole } from '@smartretail/shared'
 import { LoadingSpinner } from '../components/ui/LoadingSpinner'
 import { useAuth } from '../hooks/useAuth'
-import { useSync } from '../hooks/useSync'
 import { AuthNavigator } from './AuthNavigator'
 
 const OwnerNavigator = lazy(async () => {
@@ -35,7 +34,6 @@ const EmployeeNavigator = lazy(async () => {
  */
 export function RootNavigator() {
   const { user, isLoading, bootstrap } = useAuth()
-  useSync()
 
   useEffect(() => {
     bootstrap()

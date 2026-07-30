@@ -6,6 +6,7 @@
  */
 
 import { supabase } from '../supabase/client'
+import { withTimeout } from '../../utils/asyncTimeout'
 
 export type PricingMethod = 'fixed_price' | 'assisted_pack' | 'manual_quantity'
 export type RoundingRule = 'none' | 'nearest_5' | 'up_5' | 'down_5' | 'nearest_10'
@@ -384,15 +385,19 @@ export async function fetchEmployeeTransactions(
  * @returns Void.
  */
 export async function recordEmployeeTransaction(payload: RecordTransactionPayload): Promise<void> {
-  const { error } = await supabase.rpc('employee_record_transaction', {
-    p_items: payload.items,
-    p_payment_method: payload.paymentMethod,
-    p_discount_amount: payload.discountAmount,
-    p_customer_name: payload.customerName || null,
-    p_customer_phone: payload.customerPhone || null,
-    p_mpesa_ref_code: payload.mpesaRefCode || null,
-    p_cash_deposit_code: null,
-  })
+  const { error } = await withTimeout(
+    Promise.resolve(supabase.rpc('employee_record_transaction', {
+      p_items: payload.items,
+      p_payment_method: payload.paymentMethod,
+      p_discount_amount: payload.discountAmount,
+      p_customer_name: payload.customerName || null,
+      p_customer_phone: payload.customerPhone || null,
+      p_mpesa_ref_code: payload.mpesaRefCode || null,
+      p_cash_deposit_code: null,
+    })),
+    30000,
+    'The sale is taking too long. Check your network and try again.',
+  )
 
   if (error) throw error
 }
@@ -404,13 +409,17 @@ export async function recordEmployeeTransaction(payload: RecordTransactionPayloa
  * @returns Void.
  */
 export async function reportEmployeeDamagedStock(payload: DamageReportPayload): Promise<void> {
-  const { error } = await supabase.rpc('employee_report_inventory_loss', {
-    p_product_id: payload.productId,
-    p_uom_id: payload.uomId,
-    p_quantity_in_uom: payload.quantity,
-    p_loss_type: payload.lossType,
-    p_reason: payload.reason,
-  })
+  const { error } = await withTimeout(
+    Promise.resolve(supabase.rpc('employee_report_inventory_loss', {
+      p_product_id: payload.productId,
+      p_uom_id: payload.uomId,
+      p_quantity_in_uom: payload.quantity,
+      p_loss_type: payload.lossType,
+      p_reason: payload.reason,
+    })),
+    30000,
+    'The damage report is taking too long. Check your network and try again.',
+  )
 
   if (error) throw error
 }

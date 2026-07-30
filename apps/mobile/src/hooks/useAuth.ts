@@ -56,14 +56,12 @@ export function useAuth() {
   )
 
   const logout = useCallback(async () => {
-    setLoading(true)
+    clearAuth()
 
-    try {
-      await signOut()
-    } finally {
-      clearAuth()
-    }
-  }, [clearAuth, setLoading])
+    void signOut().catch((error) => {
+      handleError('useAuth.logout', error)
+    })
+  }, [clearAuth])
 
   return {
     user,

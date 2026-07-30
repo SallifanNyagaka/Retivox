@@ -12,6 +12,7 @@ import { GlobalRole, loginSchema } from '@smartretail/shared'
 import { supabase, clearSupabaseStorage } from './client'
 import { getConnectivityState } from '../network/connectivity'
 import { handleError } from '../../utils/errorHandler'
+import { withTimeout } from '../../utils/asyncTimeout'
 import type { UserProfile } from '../../store/authStore'
 
 const OFFLINE_AUTH_CACHE_KEY = 'retivox:offline-auth-cache'
@@ -211,20 +212,38 @@ export async function signIn(email: string, password: string): Promise<SignInRes
  */
 export async function signOut(): Promise<void> {
   try {
-    await supabase.auth.signOut()
+    await withTimeout(supabase.auth.signOut(), 5000, 'Supabase sign-out timed out.')
   } catch (error) {
     handleError('signOut.auth', error)
   }
 
-  await clearSupabaseStorage()
-  await AsyncStorage.clear()
-  await SecureStore.deleteItemAsync(OFFLINE_AUTH_CACHE_KEY)
+  try {
+    await withTimeout(clearSupabaseStorage(), 3000, 'Session storage cleanup timed out.')
+  } catch (error) {
+    handleError('signOut.clearSupabaseStorage', error)
+  }
+
+  try {
+    await withTimeout(AsyncStorage.clear(), 3000, 'App storage cleanup timed out.')
+  } catch (error) {
+    handleError('signOut.clearAsyncStorage', error)
+  }
+
+  try {
+    await withTimeout(SecureStore.deleteItemAsync(OFFLINE_AUTH_CACHE_KEY), 3000, 'Offline cache cleanup timed out.')
+  } catch (error) {
+    handleError('signOut.clearOfflineAuthCache', error)
+  }
 
   try {
     const { database } = await import('../watermelon/database')
-    await database.write(async () => {
-      await database.unsafeResetDatabase()
-    })
+    await withTimeout(
+      database.write(async () => {
+        await database.unsafeResetDatabase()
+      }),
+      5000,
+      'Local database cleanup timed out.',
+    )
   } catch (error) {
     handleError('signOut.clearWatermelon', error)
   }

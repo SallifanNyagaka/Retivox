@@ -34,12 +34,17 @@ export function useOnlineStatus(): OnlineStatus {
       const nextStatus = await getConnectivityState()
 
       if (mounted) {
-        setStatus(nextStatus)
+        setStatus((currentStatus) =>
+          currentStatus.isOnline === nextStatus.isOnline &&
+          currentStatus.connectionType === nextStatus.connectionType
+            ? currentStatus
+            : nextStatus,
+        )
       }
     }
 
     refreshStatus()
-    const interval = setInterval(refreshStatus, 5000)
+    const interval = setInterval(refreshStatus, 15000)
 
     return () => {
       mounted = false

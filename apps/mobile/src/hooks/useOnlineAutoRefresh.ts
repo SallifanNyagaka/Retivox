@@ -5,7 +5,7 @@
  * online so operational changes appear without manual pull-to-refresh.
  */
 
-import { useCallback, useEffect } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { AppState } from 'react-native'
 import { useFocusEffect, useIsFocused } from '@react-navigation/native'
 import { useOnlineStatus } from './useOnlineStatus'
@@ -26,7 +26,8 @@ export type OnlineAutoRefreshOptions = {
 export function useOnlineAutoRefresh(refresh: () => Promise<void>, options: OnlineAutoRefreshOptions = {}): void {
   const onlineStatus = useOnlineStatus()
   const isFocused = useIsFocused()
-  const intervalMs = options.intervalMs ?? 30000
+  const inFlightRef = useRef(false)
+  const intervalMs = options.intervalMs ?? 120000
   const label = options.label ?? 'useOnlineAutoRefresh'
 
   const safeRefresh = useCallback(async () => {
@@ -34,10 +35,18 @@ export function useOnlineAutoRefresh(refresh: () => Promise<void>, options: Onli
       return
     }
 
+    if (inFlightRef.current) {
+      return
+    }
+
+    inFlightRef.current = true
+
     try {
       await refresh()
     } catch (error) {
       handleError(label, error)
+    } finally {
+      inFlightRef.current = false
     }
   }, [isFocused, label, onlineStatus.isOnline, refresh])
 
@@ -51,8 +60,6 @@ export function useOnlineAutoRefresh(refresh: () => Promise<void>, options: Onli
     if (!onlineStatus.isOnline || !isFocused) {
       return undefined
     }
-
-    void safeRefresh()
 
     const interval = setInterval(() => {
       void safeRefresh()
