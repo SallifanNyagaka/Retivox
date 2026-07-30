@@ -11,6 +11,7 @@
     "dev-client": "expo start --dev-client",
     "dev-client:lan": "expo start --dev-client --lan",
     "dev-client:tunnel": "expo start --dev-client --tunnel",
+    "eas-build-post-install": "pnpm --dir ../.. --filter @smartretail/shared run build",
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web"
