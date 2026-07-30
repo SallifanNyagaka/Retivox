@@ -11,6 +11,7 @@ import { Badge, type BadgeVariant } from '../../components/ui/Badge'
 import { Card } from '../../components/ui/Card'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { useTheme } from '../../hooks/useTheme'
+import { resolveEmployeeBranchAssignment } from '../../lib/employee/branchAssignment'
 import { fetchEmployeeDashboardData, fetchEmployeeTransactions, type EmployeeTransaction } from '../../lib/employee/employeeApi'
 import { formatMoney, formatStatusLabel } from '../../lib/employee/pricing'
 import { useAuthStore } from '../../store/authStore'
@@ -39,25 +40,21 @@ function getStatusVariant(status: string): BadgeVariant {
 export default function EmployeeTransactionsScreen() {
   const { theme } = useTheme()
   const user = useAuthStore((state) => state.user)
+  const setUser = useAuthStore((state) => state.setUser)
   const [transactions, setTransactions] = useState<EmployeeTransaction[]>([])
   const [currency, setCurrency] = useState('KES')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   const loadTransactions = useCallback(async () => {
-    if (!user?.branchId) {
-      setError('Your branch assignment is missing.')
-      setLoading(false)
-      return
-    }
-
     setLoading(true)
     setError(null)
 
     try {
+      const assignedUser = await resolveEmployeeBranchAssignment(user, setUser)
       const [dashboardData, transactionRows] = await Promise.all([
-        fetchEmployeeDashboardData(user.businessId, user.branchId, user.id),
-        fetchEmployeeTransactions(user.businessId, user.branchId, user.id),
+        fetchEmployeeDashboardData(assignedUser.businessId, assignedUser.branchId, assignedUser.id),
+        fetchEmployeeTransactions(assignedUser.businessId, assignedUser.branchId, assignedUser.id),
       ])
       setCurrency(dashboardData.currency)
       setTransactions(transactionRows)
@@ -67,7 +64,7 @@ export default function EmployeeTransactionsScreen() {
     } finally {
       setLoading(false)
     }
-  }, [user?.branchId, user?.businessId, user?.id])
+  }, [setUser, user])
 
   useEffect(() => {
     void loadTransactions()

@@ -11,6 +11,7 @@ import { Badge } from '../../components/ui/Badge'
 import { Card } from '../../components/ui/Card'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { useTheme } from '../../hooks/useTheme'
+import { resolveEmployeeBranchAssignment } from '../../lib/employee/branchAssignment'
 import { fetchEmployeeDashboardData, type EmployeeDashboardData } from '../../lib/employee/employeeApi'
 import { formatMoney, formatStatusLabel } from '../../lib/employee/pricing'
 import { useAuthStore } from '../../store/authStore'
@@ -38,29 +39,25 @@ function getGreeting(): string {
 export default function EmployeeHomeScreen() {
   const { theme } = useTheme()
   const user = useAuthStore((state) => state.user)
+  const setUser = useAuthStore((state) => state.setUser)
   const [data, setData] = useState<EmployeeDashboardData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   const loadDashboard = useCallback(async () => {
-    if (!user?.branchId) {
-      setError('Your branch assignment is missing.')
-      setLoading(false)
-      return
-    }
-
     setLoading(true)
     setError(null)
 
     try {
-      setData(await fetchEmployeeDashboardData(user.businessId, user.branchId, user.id))
+      const assignedUser = await resolveEmployeeBranchAssignment(user, setUser)
+      setData(await fetchEmployeeDashboardData(assignedUser.businessId, assignedUser.branchId, assignedUser.id))
     } catch (loadError) {
       const handled = handleError('EmployeeHome.loadDashboard', loadError)
       setError(handled.message)
     } finally {
       setLoading(false)
     }
-  }, [user?.branchId, user?.businessId, user?.id])
+  }, [setUser, user])
 
   useEffect(() => {
     void loadDashboard()

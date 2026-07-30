@@ -29,6 +29,10 @@ type EmployeeBranchRow = {
   branch_name: string | null
 }
 
+type EmployeeProfileRow = EmployeeBranchRow & {
+  id: string
+}
+
 export type SignInResult = {
   session: Session
   user: UserProfile
@@ -90,10 +94,34 @@ export async function loadCurrentUserProfile(): Promise<UserProfile | null> {
     throw new Error('Your account has been deactivated. Please contact your manager.')
   }
 
-  const { data: branchData } = await supabase.rpc('get_my_employee_branch')
-  const branchRow = isEmployeeBranchRow(branchData) ? branchData : null
+  const branchRow = profileRow.global_role === GlobalRole.Employee ? await loadEmployeeBranch(profileRow.id) : null
 
   return normalizeUserProfile(profileRow, branchRow)
+}
+
+/**
+ * Loads the employee's current single active branch from the same RPC used by web.
+ *
+ * @param userId - Authenticated employee id.
+ * @returns Branch row or null when no current branch is assigned.
+ */
+async function loadEmployeeBranch(userId: string): Promise<EmployeeBranchRow | null> {
+  const { data, error } = await supabase.rpc('get_employee_profile', { p_user_id: userId })
+
+  if (error) {
+    throw new Error('Unable to load your branch assignment. Please try again.')
+  }
+
+  const profileRow = getFirstEmployeeProfileRow(data)
+
+  if (!profileRow) {
+    return null
+  }
+
+  return {
+    branch_id: profileRow.branch_id,
+    branch_name: profileRow.branch_name,
+  }
 }
 
 /**
@@ -206,4 +234,20 @@ function isEmployeeBranchRow(value: unknown): value is EmployeeBranchRow {
   return (
     ('branch_id' in value || 'branch_name' in value)
   )
+}
+
+/**
+ * Normalizes Supabase RPC table responses, which can arrive as an array.
+ *
+ * @param value - Unknown RPC response.
+ * @returns First employee profile row or null.
+ */
+function getFirstEmployeeProfileRow(value: unknown): EmployeeProfileRow | null {
+  const row = Array.isArray(value) ? value[0] : value
+
+  if (!isEmployeeBranchRow(row) || !('id' in row)) {
+    return null
+  }
+
+  return row as EmployeeProfileRow
 }

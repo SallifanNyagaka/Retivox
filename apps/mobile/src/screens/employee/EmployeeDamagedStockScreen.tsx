@@ -18,6 +18,7 @@ import { Input } from '../../components/ui/Input'
 import { LoadingSpinner } from '../../components/ui/LoadingSpinner'
 import { Toast } from '../../components/ui/Toast'
 import { useTheme } from '../../hooks/useTheme'
+import { resolveEmployeeBranchAssignment } from '../../lib/employee/branchAssignment'
 import {
   fetchEmployeeDamageReportProducts,
   reportEmployeeDamagedStock,
@@ -60,6 +61,7 @@ function getDefaultDamageUom(product: DamageReportProductOption | null): UomOpti
 export default function EmployeeDamagedStockScreen() {
   const { theme } = useTheme()
   const user = useAuthStore((state) => state.user)
+  const setUser = useAuthStore((state) => state.setUser)
   const { toast, showToast, hideToast } = useUiStore()
   const [products, setProducts] = useState<DamageReportProductOption[]>([])
   const [selectedProductId, setSelectedProductId] = useState('')
@@ -81,17 +83,12 @@ export default function EmployeeDamagedStockScreen() {
   const canSubmit = Boolean(selectedProduct && selectedUom && quantityValue > 0 && reason.trim() && !exceedsAvailable && !submitting)
 
   const loadProducts = useCallback(async () => {
-    if (!user?.branchId) {
-      setError('Your branch assignment is missing.')
-      setLoading(false)
-      return
-    }
-
     setLoading(true)
     setError(null)
 
     try {
-      const nextProducts = await fetchEmployeeDamageReportProducts(user.branchId)
+      const assignedUser = await resolveEmployeeBranchAssignment(user, setUser)
+      const nextProducts = await fetchEmployeeDamageReportProducts(assignedUser.branchId)
       setProducts(nextProducts)
       setSelectedProductId((current) => current || nextProducts[0]?.productId || '')
     } catch (loadError) {
@@ -100,7 +97,7 @@ export default function EmployeeDamagedStockScreen() {
     } finally {
       setLoading(false)
     }
-  }, [user?.branchId])
+  }, [setUser, user])
 
   useEffect(() => {
     void loadProducts()

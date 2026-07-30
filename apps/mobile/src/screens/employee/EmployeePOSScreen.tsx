@@ -18,6 +18,7 @@ import { Input } from '../../components/ui/Input'
 import { LoadingSpinner } from '../../components/ui/LoadingSpinner'
 import { Toast } from '../../components/ui/Toast'
 import { useTheme } from '../../hooks/useTheme'
+import { resolveEmployeeBranchAssignment } from '../../lib/employee/branchAssignment'
 import {
   fetchEmployeeDashboardData,
   fetchEmployeeSaleProducts,
@@ -66,6 +67,7 @@ function getPricingLabel(product: EmployeeProductOption): string {
 export default function EmployeePOSScreen() {
   const { theme } = useTheme()
   const user = useAuthStore((state) => state.user)
+  const setUser = useAuthStore((state) => state.setUser)
   const { toast, showToast, hideToast } = useUiStore()
   const [products, setProducts] = useState<EmployeeProductOption[]>([])
   const [currency, setCurrency] = useState('KES')
@@ -81,19 +83,14 @@ export default function EmployeePOSScreen() {
   const [error, setError] = useState<string | null>(null)
 
   const loadProducts = useCallback(async () => {
-    if (!user?.branchId) {
-      setError('Your branch assignment is missing.')
-      setLoading(false)
-      return
-    }
-
     setLoading(true)
     setError(null)
 
     try {
+      const assignedUser = await resolveEmployeeBranchAssignment(user, setUser)
       const [dashboardData, saleProducts] = await Promise.all([
-        fetchEmployeeDashboardData(user.businessId, user.branchId, user.id),
-        fetchEmployeeSaleProducts(user.branchId),
+        fetchEmployeeDashboardData(assignedUser.businessId, assignedUser.branchId, assignedUser.id),
+        fetchEmployeeSaleProducts(assignedUser.branchId),
       ])
       setCurrency(dashboardData.currency)
       setProducts(saleProducts)
@@ -103,7 +100,7 @@ export default function EmployeePOSScreen() {
     } finally {
       setLoading(false)
     }
-  }, [user?.branchId, user?.businessId, user?.id])
+  }, [setUser, user])
 
   useEffect(() => {
     void loadProducts()

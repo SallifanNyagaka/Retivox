@@ -12,6 +12,7 @@ import { Badge } from '../../components/ui/Badge'
 import { Card } from '../../components/ui/Card'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { useTheme } from '../../hooks/useTheme'
+import { resolveEmployeeBranchAssignment } from '../../lib/employee/branchAssignment'
 import { fetchEmployeeDashboardData, fetchEmployeeSaleProducts, type EmployeeProductOption } from '../../lib/employee/employeeApi'
 import { formatMoney, formatProductAvailability } from '../../lib/employee/pricing'
 import { useAuthStore } from '../../store/authStore'
@@ -26,25 +27,21 @@ import { DashboardScaffold } from '../shared/DashboardScaffold'
 export default function EmployeeStockScreen() {
   const { theme } = useTheme()
   const user = useAuthStore((state) => state.user)
+  const setUser = useAuthStore((state) => state.setUser)
   const [products, setProducts] = useState<EmployeeProductOption[]>([])
   const [currency, setCurrency] = useState('KES')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   const loadProducts = useCallback(async () => {
-    if (!user?.branchId) {
-      setError('Your branch assignment is missing.')
-      setLoading(false)
-      return
-    }
-
     setLoading(true)
     setError(null)
 
     try {
+      const assignedUser = await resolveEmployeeBranchAssignment(user, setUser)
       const [dashboardData, saleProducts] = await Promise.all([
-        fetchEmployeeDashboardData(user.businessId, user.branchId, user.id),
-        fetchEmployeeSaleProducts(user.branchId),
+        fetchEmployeeDashboardData(assignedUser.businessId, assignedUser.branchId, assignedUser.id),
+        fetchEmployeeSaleProducts(assignedUser.branchId),
       ])
       setCurrency(dashboardData.currency)
       setProducts(saleProducts)
@@ -54,7 +51,7 @@ export default function EmployeeStockScreen() {
     } finally {
       setLoading(false)
     }
-  }, [user?.branchId, user?.businessId, user?.id])
+  }, [setUser, user])
 
   useEffect(() => {
     void loadProducts()
