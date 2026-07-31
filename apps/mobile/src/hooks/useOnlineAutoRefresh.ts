@@ -29,7 +29,7 @@ export function useOnlineAutoRefresh(refresh: () => Promise<void>, options: Onli
   const lastSyncedAt = useSyncStore((state) => state.lastSyncedAt)
   const isFocused = useIsFocused()
   const inFlightRef = useRef(false)
-  const intervalMs = options.intervalMs ?? 120000
+  const intervalMs = options.intervalMs ?? 60000
   const label = options.label ?? 'useOnlineAutoRefresh'
 
   const safeRefresh = useCallback(async () => {

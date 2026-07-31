@@ -8,14 +8,15 @@
 import { supabase } from '../supabase/client'
 import { withTimeout } from '../../utils/asyncTimeout'
 import { getConnectivityState } from '../network/connectivity'
-import { enqueueSyncItem } from '../sync/queue'
+import { processSyncQueue } from '../sync/processor'
 import {
-  appendOfflineEmployeeTransaction,
   createOfflineTransactionId,
   mergeEmployeeSnapshot,
   readEmployeeSnapshot,
   readEmployeeSnapshotByBranch,
+  stageEmployeeTransaction,
 } from '../offline/employeeSnapshot'
+import { getBaseQuantity, getDefaultSaleUom, resolvePreviewPricing } from './pricing'
 
 export type PricingMethod = 'fixed_price' | 'assisted_pack' | 'manual_quantity'
 export type RoundingRule = 'none' | 'nearest_5' | 'up_5' | 'down_5' | 'nearest_10'
@@ -122,6 +123,7 @@ export type RecordTransactionResult = {
   queued: boolean
   localId?: string
   serverId?: string
+  status?: string
 }
 
 type EmployeeAvailableProductRow = {
@@ -320,7 +322,7 @@ export async function fetchEmployeeDashboardData(
   today.setHours(0, 0, 0, 0)
 
   try {
-    const [businessResponse, todayResponse, recentResponse, productsResponse] = await Promise.all([
+    const [businessResponse, todayResponse, recentResponse, productsResponse, damageProductsResponse] = await Promise.all([
       supabase.from('businesses').select('currency').eq('id', businessId).single(),
       supabase
         .from('transactions')
@@ -340,12 +342,14 @@ export async function fetchEmployeeDashboardData(
         .order('recorded_at', { ascending: false })
         .range(0, 19),
       supabase.rpc('employee_available_products', { p_branch_id: branchId }),
+      supabase.rpc('employee_damage_report_products', { p_branch_id: branchId }),
     ])
 
     if (businessResponse.error) throw businessResponse.error
     if (todayResponse.error) throw todayResponse.error
     if (recentResponse.error) throw recentResponse.error
     if (productsResponse.error) throw productsResponse.error
+    if (damageProductsResponse.error) throw damageProductsResponse.error
 
     const business = businessResponse.data as BusinessCurrencyRow | null
     const data: EmployeeDashboardData = {
@@ -353,12 +357,19 @@ export async function fetchEmployeeDashboardData(
       todayTransactions: ((todayResponse.data ?? []) as TransactionRow[]).map(mapTransaction),
       recentTransactions: ((recentResponse.data ?? []) as TransactionRow[]).map(mapTransaction),
       products: ((productsResponse.data ?? []) as EmployeeAvailableProductRow[]).map(mapEmployeeProductOption),
-      damageProducts: [],
+      damageProducts: ((damageProductsResponse.data ?? []) as DamageReportProductRow[]).map(mapDamageReportProductOption),
     }
 
     await mergeEmployeeSnapshot(
       { businessId, branchId, employeeId },
-      { currency: data.currency, todayTransactions: data.todayTransactions, recentTransactions: data.recentTransactions, transactions: data.recentTransactions, products: data.products },
+      {
+        currency: data.currency,
+        todayTransactions: data.todayTransactions,
+        recentTransactions: data.recentTransactions,
+        transactions: data.recentTransactions,
+        products: data.products,
+        damageProducts: data.damageProducts,
+      },
     )
 
     return data
@@ -484,7 +495,12 @@ export async function recordEmployeeTransaction(
   payload: RecordTransactionPayload,
   context?: RecordTransactionContext,
 ): Promise<RecordTransactionResult> {
+  if (!context || !context.businessId || !context.branchId || !context.employeeId) {
+    throw new Error('Your sale context is unavailable. Refresh the sale screen and try again.')
+  }
+
   const recordedAt = new Date().toISOString()
+  const localId = createOfflineTransactionId()
   const args = {
     p_items: payload.items,
     p_payment_method: payload.paymentMethod,
@@ -496,68 +512,56 @@ export async function recordEmployeeTransaction(
     p_recorded_at: recordedAt,
   }
 
+  const lines = payload.items.map((item) => {
+    const product = context.products.find((option) => (
+      option.productId === item.productId &&
+      (item.recoveryItemId ? option.recoveryItemId === item.recoveryItemId : option.stockSource === 'normal')
+    ))
+    const selectedUom = product?.uomOptions.find((option) => option.id === item.uomId) ?? getDefaultSaleUom(product ?? null)
+    const baseQuantity = getBaseQuantity(item.quantity, selectedUom ?? null)
+    const pricing = product && baseQuantity ? resolvePreviewPricing(product, baseQuantity, selectedUom?.id ?? null) : null
+
+    if (!product || !selectedUom || !baseQuantity || !pricing) {
+      throw new Error('A product, unit, or approved price changed. Refresh the sale screen before recording this sale.')
+    }
+
+    return {
+      optionId: product.optionId,
+      productId: product.productId,
+      quantityInUom: item.quantity,
+      baseQuantity,
+      unitPrice: Number((pricing.lineTotal / baseQuantity).toFixed(4)),
+      lineTotal: pricing.lineTotal,
+    }
+  })
+
+  // Stage every sale first. This makes online and offline submissions follow
+  // the same durable, idempotent path and prevents network drops losing sales.
+  await stageEmployeeTransaction({
+    identity: context,
+    localId,
+    recordedAt,
+    transaction: { id: localId, status: 'pending_sync', totalAmount: context.totalAmount, recordedAt },
+    lines,
+    paymentMethod: payload.paymentMethod,
+    paymentReference: payload.mpesaRefCode,
+    subtotal: context.subtotal,
+    discountAmount: payload.discountAmount,
+    totalAmount: context.totalAmount,
+    rpcArgs: args,
+  })
+
   const connectivity = await getConnectivityState().catch(() => ({ isOnline: false, connectionType: null }))
   if (!connectivity.isOnline) {
-    if (!context) throw new Error('You are offline. Sale context is unavailable on this screen.')
-    return queueOfflineEmployeeTransaction(payload, args, recordedAt, context)
+    return { queued: true, localId, status: 'pending_sync' }
   }
 
-  try {
-    const { data, error } = await withTimeout(
-      Promise.resolve(supabase.rpc('employee_record_transaction_offline', args)),
-      30000,
-      'The sale is taking too long. Check your network and try again.',
-    )
-
-    if (error) throw error
-    const response = Array.isArray(data) ? data[0] : data
-    const serverId = response && typeof response === 'object' && 'transaction_id' in response
-      ? String((response as { transaction_id: unknown }).transaction_id)
-      : undefined
-    return { queued: false, serverId }
-  } catch (error) {
-    const currentConnectivity = await getConnectivityState().catch(() => ({ isOnline: false, connectionType: null }))
-    if (context && !currentConnectivity.isOnline && isLikelyNetworkError(error)) {
-      return queueOfflineEmployeeTransaction(payload, args, recordedAt, context)
-    }
-    throw error
-  }
-}
-
-async function queueOfflineEmployeeTransaction(
-  payload: RecordTransactionPayload,
-  args: Record<string, unknown>,
-  recordedAt: string,
-  context: RecordTransactionContext,
-): Promise<RecordTransactionResult> {
-  const localId = createOfflineTransactionId()
-  const items = payload.items.map((item) => {
-    const product = context.products.find((option) => option.productId === item.productId && (item.recoveryItemId ? option.recoveryItemId === item.recoveryItemId : option.stockSource === 'normal'))
-    const uom = product?.uomOptions.find((option) => option.id === item.uomId)
-    return { optionId: product?.optionId ?? `${item.recoveryItemId ? 'recovery' : 'normal'}:${item.productId}`, baseQuantity: Number((item.quantity * (uom?.conversionFactor ?? 1)).toFixed(4)) }
-  })
-
-  await enqueueSyncItem({
-    entityType: 'employee_transaction',
-    localId,
-    payload: {
-      kind: 'rpc',
-      rpc: 'employee_record_transaction_offline',
-      args: { ...args, p_local_id: localId },
-    },
-  })
-  await appendOfflineEmployeeTransaction({
-    identity: context,
-    transaction: { id: localId, status: 'pending_sync', totalAmount: context.totalAmount, recordedAt },
-    items,
-  })
-
-  return { queued: true, localId }
-}
-
-function isLikelyNetworkError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase()
-  return ['network', 'fetch', 'timeout', 'offline', 'connection', 'internet', 'taking too long'].some((part) => message.includes(part))
+  const syncResult = await processSyncQueue()
+  const synced = syncResult.syncedTransactions.find((transaction) => transaction.localId === localId)
+  const failed = syncResult.failedTransactions.find((transaction) => transaction.localId === localId)
+  return synced
+    ? { queued: false, localId, serverId: synced.serverId, status: synced.status }
+    : { queued: true, localId, status: failed ? 'sync_failed' : 'pending_sync' }
 }
 
 /**

@@ -7,7 +7,6 @@
 
 import { useCallback, useEffect } from 'react'
 import { runWatermelonSync } from '../lib/watermelon/sync'
-import { scheduleSyncQueueProcessing } from '../lib/sync/processor'
 import { useAuthStore } from '../store/authStore'
 import { useSyncStore } from '../store/syncStore'
 import { useOnlineStatus } from './useOnlineStatus'
@@ -48,7 +47,6 @@ export function useSync() {
 
   useEffect(() => {
     if (onlineStatus.isOnline && profile) {
-      scheduleSyncQueueProcessing()
       void (async () => {
         setSyncing(true)
         try {

@@ -7,10 +7,11 @@
 
 import { useEffect, useRef } from 'react'
 import { AppState } from 'react-native'
-import { processSyncQueue } from '../lib/sync/processor'
 import { getQueueCounts } from '../lib/sync/queue'
+import { runWatermelonSync } from '../lib/watermelon/sync'
 import { useAuthStore } from '../store/authStore'
 import { useSyncStore } from '../store/syncStore'
+import { useUiStore } from '../store/uiStore'
 import { useOnlineStatus } from './useOnlineStatus'
 import { handleError } from '../utils/errorHandler'
 
@@ -21,6 +22,7 @@ export function useAutoSync(): void {
   const setLastSynced = useSyncStore((state) => state.setLastSynced)
   const setPendingCount = useSyncStore((state) => state.setPendingCount)
   const setFailedCount = useSyncStore((state) => state.setFailedCount)
+  const showToast = useUiStore((state) => state.showToast)
   const inFlightRef = useRef(false)
 
   useEffect(() => {
@@ -35,13 +37,19 @@ export function useAutoSync(): void {
 
       try {
         const before = await getQueueCounts()
-        await processSyncQueue()
+        const result = await runWatermelonSync(profile)
         const counts = await getQueueCounts()
         if (mounted) {
           setPendingCount(counts.pendingCount)
           setFailedCount(counts.failedCount)
-          if (before.pendingCount > 0 || before.failedCount > 0 || counts.pendingCount > 0 || counts.failedCount > 0) {
-            setLastSynced(new Date())
+          setLastSynced(new Date())
+
+          if (result.syncedTransactions.length === 1) {
+            showToast(`Offline transaction synced as ${result.syncedTransactions[0].status.replace(/_/g, ' ')}.`, 'success')
+          } else if (result.syncedTransactions.length > 1) {
+            showToast(`${result.syncedTransactions.length} offline transactions synced.`, 'success')
+          } else if (result.failedTransactions.length > 0 && (before.pendingCount > 0 || before.failedCount > 0)) {
+            showToast('One or more offline transactions need review before they can sync.', 'warning')
           }
         }
       } catch (error) {
@@ -55,7 +63,7 @@ export function useAutoSync(): void {
     void sync()
     const interval = setInterval(() => {
       void sync()
-    }, 30000)
+    }, 45000)
     const subscription = AppState.addEventListener('change', (nextState) => {
       if (nextState === 'active') void sync()
     })
@@ -65,5 +73,5 @@ export function useAutoSync(): void {
       clearInterval(interval)
       subscription.remove()
     }
-  }, [onlineStatus.isOnline, profile?.businessId, profile?.id, setFailedCount, setLastSynced, setPendingCount, setSyncing])
+  }, [onlineStatus.isOnline, profile, setFailedCount, setLastSynced, setPendingCount, setSyncing, showToast])
 }

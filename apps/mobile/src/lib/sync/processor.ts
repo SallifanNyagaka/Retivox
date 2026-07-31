@@ -14,7 +14,7 @@ import { getQueueCounts } from './queue'
 import { useSyncStore } from '../../store/syncStore'
 import { handleError } from '../../utils/errorHandler'
 import { withTimeout } from '../../utils/asyncTimeout'
-import { markOfflineEmployeeTransactionSynced } from '../offline/employeeSnapshot'
+import { markOfflineEmployeeTransactionFailed, markOfflineEmployeeTransactionSynced } from '../offline/employeeSnapshot'
 
 type SyncPayload = {
   table: string
@@ -26,7 +26,12 @@ type SyncPayload = {
   args: Record<string, unknown>
 }
 
-let activeProcessing: Promise<void> | null = null
+export type SyncProcessResult = {
+  syncedTransactions: Array<{ localId: string; serverId: string; status: string }>
+  failedTransactions: Array<{ localId: string; message: string }>
+}
+
+let activeProcessing: Promise<SyncProcessResult> | null = null
 
 function isRpcSyncPayload(payload: SyncPayload): payload is Extract<SyncPayload, { kind: 'rpc' }> {
   return 'kind' in payload && payload.kind === 'rpc'
@@ -75,9 +80,10 @@ function parseSyncPayload(value: string): SyncPayload {
  *
  * @returns Promise that resolves after queue processing.
  */
-async function processSyncQueueInternal(): Promise<void> {
+async function processSyncQueueInternal(): Promise<SyncProcessResult> {
   const syncStore = useSyncStore.getState()
   syncStore.setSyncing(true)
+  const result: SyncProcessResult = { syncedTransactions: [], failedTransactions: [] }
 
   try {
     const session = (await getSession()) ?? (await restoreCachedSession())
@@ -85,7 +91,7 @@ async function processSyncQueueInternal(): Promise<void> {
     if (!session) {
       // Keep queued work pending until a valid session is restored. Marking it
       // failed here would make a normal offline login look like a data loss.
-      return
+      return result
     }
 
     const items = await getPendingQueueItems()
@@ -96,11 +102,24 @@ async function processSyncQueueInternal(): Promise<void> {
         const payload = parseSyncPayload(item.payload)
 
         if (isRpcSyncPayload(payload)) {
-          const { data, error } = await withTimeout(
+          let { data, error } = await withTimeout(
             Promise.resolve(supabase.rpc(payload.rpc, payload.args)),
             30000,
             'Offline sale sync timed out.',
           )
+
+          if (error && isSessionError(error)) {
+            const refreshedSession = await restoreCachedSession()
+            if (refreshedSession) {
+              const retry = await withTimeout(
+                Promise.resolve(supabase.rpc(payload.rpc, payload.args)),
+                30000,
+                'Offline sale sync timed out.',
+              )
+              data = retry.data
+              error = retry.error
+            }
+          }
 
           if (error) throw error
 
@@ -114,8 +133,12 @@ async function processSyncQueueInternal(): Promise<void> {
             throw new Error('The server returned an invalid transaction acknowledgement.')
           }
 
-          await markOfflineEmployeeTransactionSynced(item.localId, transactionId)
+          const status = typeof (response as { status?: unknown }).status === 'string'
+            ? String((response as { status: string }).status)
+            : 'pending_verify'
+          await markOfflineEmployeeTransactionSynced(item.localId, transactionId, status)
           await markQueueItemSynced(item)
+          result.syncedTransactions.push({ localId: item.localId, serverId: transactionId, status })
           continue
         }
 
@@ -144,22 +167,30 @@ async function processSyncQueueInternal(): Promise<void> {
       } catch (error) {
         const handled = handleError('processSyncQueue.item', error)
         await markQueueItemFailed(item, handled.message)
+        if (item.entityType === 'employee_transaction') {
+          await markOfflineEmployeeTransactionFailed(item.localId)
+          result.failedTransactions.push({ localId: item.localId, message: handled.message })
+        }
       }
     }
   } finally {
     const counts = await getQueueCounts()
     syncStore.setPendingCount(counts.pendingCount)
     syncStore.setFailedCount(counts.failedCount)
-    syncStore.setLastSynced(new Date())
+    if (result.syncedTransactions.length > 0) {
+      syncStore.setLastSynced(new Date())
+    }
     syncStore.setSyncing(false)
   }
+
+  return result
 }
 
 /**
  * Processes only one queue pass at a time. Several screens can notice the
  * same reconnect, but they must not submit the same local sale twice.
  */
-export function processSyncQueue(): Promise<void> {
+export function processSyncQueue(): Promise<SyncProcessResult> {
   if (activeProcessing) return activeProcessing
 
   activeProcessing = processSyncQueueInternal().finally(() => {
@@ -180,4 +211,9 @@ export function scheduleSyncQueueProcessing(): void {
       handleError('scheduleSyncQueueProcessing', error)
     })
   })
+}
+
+function isSessionError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase()
+  return ['jwt', 'token', 'session', 'not authenticated', 'unauthorized'].some((part) => message.includes(part))
 }

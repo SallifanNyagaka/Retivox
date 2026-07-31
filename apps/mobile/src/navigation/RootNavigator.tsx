@@ -6,11 +6,14 @@
  */
 
 import { Suspense, lazy, useEffect } from 'react'
+import { View } from 'react-native'
 import { NavigationContainer } from '@react-navigation/native'
 import { GlobalRole } from '@smartretail/shared'
 import { LoadingSpinner } from '../components/ui/LoadingSpinner'
 import { useAuth } from '../hooks/useAuth'
 import { useAutoSync } from '../hooks/useAutoSync'
+import { Toast } from '../components/ui/Toast'
+import { useUiStore } from '../store/uiStore'
 import { AuthNavigator } from './AuthNavigator'
 
 const OwnerNavigator = lazy(async () => {
@@ -35,6 +38,8 @@ const EmployeeNavigator = lazy(async () => {
  */
 export function RootNavigator() {
   const { user, isLoading, bootstrap } = useAuth()
+  const toast = useUiStore((state) => state.toast)
+  const hideToast = useUiStore((state) => state.hideToast)
   useAutoSync()
 
   useEffect(() => {
@@ -46,18 +51,21 @@ export function RootNavigator() {
   }
 
   return (
-    <NavigationContainer>
-      <Suspense fallback={<LoadingSpinner label="Loading dashboard..." />}>
-        {!user ? (
-          <AuthNavigator />
-        ) : user.globalRole === GlobalRole.Owner ? (
-          <OwnerNavigator />
-        ) : user.globalRole === GlobalRole.Admin ? (
-          <AdminNavigator />
-        ) : (
-          <EmployeeNavigator />
-        )}
-      </Suspense>
-    </NavigationContainer>
+    <View style={{ flex: 1 }}>
+      <NavigationContainer>
+        <Suspense fallback={<LoadingSpinner label="Loading dashboard..." />}>
+          {!user ? (
+            <AuthNavigator />
+          ) : user.globalRole === GlobalRole.Owner ? (
+            <OwnerNavigator />
+          ) : user.globalRole === GlobalRole.Admin ? (
+            <AdminNavigator />
+          ) : (
+            <EmployeeNavigator />
+          )}
+        </Suspense>
+      </NavigationContainer>
+      {toast ? <Toast message={toast.message} type={toast.type} visible={toast.visible} onDismiss={hideToast} /> : null}
+    </View>
   )
 }

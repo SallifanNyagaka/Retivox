@@ -22,6 +22,14 @@ export function useAuth() {
     setLoading(true)
 
     try {
+      // Render the remembered account immediately. The encrypted Supabase
+      // session is refreshed in the background, so reopening the app never
+      // depends on the network being available first.
+      const cachedProfile = await loadCachedOfflineProfile()
+      if (cachedProfile) {
+        setUser(cachedProfile)
+      }
+
       const existingSession = await getSession()
       setSession(existingSession)
 
@@ -29,12 +37,14 @@ export function useAuth() {
         // A device can have a valid cached profile even when Supabase cannot
         // restore a session without internet. Promote it into the auth store
         // so the role navigator and offline screens are available immediately.
-        setUser(await loadCachedOfflineProfile())
+        if (!cachedProfile) {
+          setUser(await loadCachedOfflineProfile())
+        }
         return
       }
 
       const profile = await loadCurrentUserProfile()
-      setUser(profile)
+      setUser(profile ?? cachedProfile)
     } catch (error) {
       handleError('useAuth.bootstrap', error)
       clearAuth()

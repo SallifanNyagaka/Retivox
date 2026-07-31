@@ -32,7 +32,7 @@ type LoadOptions = {
  */
 function getStatusVariant(status: string): BadgeVariant {
   if (status === 'verified' || status === 'synced') return 'success'
-  if (status === 'rejected' || status === 'flagged') return 'danger'
+  if (status === 'rejected' || status === 'flagged' || status === 'sync_failed') return 'danger'
   if (status === 'pending_verify' || status === 'pending_sync') return 'warning'
   return 'muted'
 }

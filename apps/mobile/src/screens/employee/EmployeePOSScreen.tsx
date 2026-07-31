@@ -16,7 +16,6 @@ import { Card } from '../../components/ui/Card'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { Input } from '../../components/ui/Input'
 import { LoadingSpinner } from '../../components/ui/LoadingSpinner'
-import { Toast } from '../../components/ui/Toast'
 import { useOnlineAutoRefresh } from '../../hooks/useOnlineAutoRefresh'
 import { useTheme } from '../../hooks/useTheme'
 import { resolveEmployeeBranchAssignment } from '../../lib/employee/branchAssignment'
@@ -73,7 +72,7 @@ export default function EmployeePOSScreen() {
   const { theme } = useTheme()
   const user = useAuthStore((state) => state.user)
   const setUser = useAuthStore((state) => state.setUser)
-  const { toast, showToast, hideToast } = useUiStore()
+  const showToast = useUiStore((state) => state.showToast)
   const [products, setProducts] = useState<EmployeeProductOption[]>([])
   const [currency, setCurrency] = useState('KES')
   const [activeTab, setActiveTab] = useState<SaleTab>('normal')
@@ -240,7 +239,11 @@ export default function EmployeePOSScreen() {
       setCustomerName('')
       setCustomerPhone('')
       setMpesaRefCode('')
-      showToast(result.queued ? 'Sale saved offline. It will sync automatically when internet returns.' : 'Transaction recorded successfully.', 'success')
+      if (result.status === 'sync_failed') {
+        showToast('Sale was saved on this device but needs review before it can sync.', 'warning')
+      } else {
+        showToast(result.queued ? 'Sale saved offline. It will sync automatically when internet returns.' : `Transaction recorded as ${result.status?.replace(/_/g, ' ') ?? 'pending verification'}.`, 'success')
+      }
       setSubmitting(false)
       void loadProducts({ silent: true })
     } catch (submitError) {
@@ -258,7 +261,6 @@ export default function EmployeePOSScreen() {
         subtitle={activeTab === 'damaged' ? 'Owner-approved damaged stock' : user?.branchName ?? 'Assigned branch'}
         rightAction={{ label: 'Refresh', icon: <RefreshCcw color={theme.colors.primary} size={16} />, onPress: loadProducts }}
       />
-      {toast ? <Toast message={toast.message} type={toast.type} visible={toast.visible} onDismiss={hideToast} /> : null}
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.keyboard}>
         {loading ? (
           <LoadingSpinner label="Loading sale products..." />

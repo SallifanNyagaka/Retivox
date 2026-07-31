@@ -18,6 +18,18 @@ DROP FUNCTION IF EXISTS public.employee_record_transaction_offline(
   timestamptz
 );
 
+DROP FUNCTION IF EXISTS public.employee_record_transaction_offline(
+  jsonb,
+  text,
+  numeric,
+  text,
+  text,
+  text,
+  text,
+  timestamptz,
+  text
+);
+
 CREATE OR REPLACE FUNCTION public.employee_record_transaction_offline(
   p_items jsonb,
   p_payment_method text,

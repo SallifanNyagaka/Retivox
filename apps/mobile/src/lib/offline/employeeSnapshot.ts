@@ -1,21 +1,28 @@
 /**
- * Offline employee snapshot storage.
+ * Durable employee UI snapshot and offline-sale staging.
  *
- * Supabase remains the source of truth when online. This snapshot keeps the
- * last usable employee dashboard/POS state on the device so the app can open
- * and sell while connectivity is unavailable.
+ * The snapshot, local transaction, payment, line items, and queue entry are
+ * written in one WatermelonDB transaction. A sale therefore survives an app
+ * restart or a connectivity change at any point in the submission flow.
  */
 
+import { Q } from '@nozbe/watermelondb'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import type {
   DamageReportProductOption,
   EmployeeDashboardData,
   EmployeeProductOption,
   EmployeeTransaction,
+  PaymentMethod,
 } from '../employee/employeeApi'
+import { database } from '../watermelon/database'
+import { MobileCacheModel } from '../watermelon/models/MobileCache'
+import { PaymentModel } from '../watermelon/models/Payment'
+import { SyncQueueModel } from '../watermelon/models/SyncQueue'
+import { TransactionItemModel } from '../watermelon/models/TransactionItem'
+import { TransactionModel } from '../watermelon/models/Transaction'
+import { readAllMobileCache, readMobileCache, writeMobileCache } from '../watermelon/cache'
 
-const SNAPSHOT_PREFIX = 'retivox:employee-snapshot:'
-const SNAPSHOT_INDEX_KEY = 'retivox:employee-snapshot-keys'
 let snapshotWriteChain: Promise<unknown> = Promise.resolve()
 
 export type OfflineEmployeeSnapshot = EmployeeDashboardData & {
@@ -24,22 +31,39 @@ export type OfflineEmployeeSnapshot = EmployeeDashboardData & {
   employeeId: string
   transactions: EmployeeTransaction[]
   damageProducts: DamageReportProductOption[]
+  pendingStockDeductions?: Array<{ localId: string; optionId: string; baseQuantity: number }>
   updatedAt: string
 }
 
-function snapshotKey(businessId: string, employeeId: string): string {
-  return `${SNAPSHOT_PREFIX}${businessId}:${employeeId}`
+export type OfflineSaleLine = {
+  optionId: string
+  productId: string
+  quantityInUom: number
+  baseQuantity: number
+  unitPrice: number
+  lineTotal: number
 }
 
-async function rememberSnapshotKey(key: string): Promise<void> {
-  try {
-    const value = await AsyncStorage.getItem(SNAPSHOT_INDEX_KEY)
-    const keys = value ? (JSON.parse(value) as unknown) : []
-    const nextKeys = Array.isArray(keys) ? Array.from(new Set([...keys.filter((item) => typeof item === 'string'), key])) : [key]
-    await AsyncStorage.setItem(SNAPSHOT_INDEX_KEY, JSON.stringify(nextKeys))
-  } catch {
-    // Snapshot persistence is best-effort; the live request must not fail.
-  }
+export type OfflineSaleStageInput = {
+  identity: Pick<OfflineEmployeeSnapshot, 'businessId' | 'branchId' | 'employeeId'>
+  localId: string
+  recordedAt: string
+  transaction: EmployeeTransaction
+  lines: OfflineSaleLine[]
+  paymentMethod: PaymentMethod
+  paymentReference: string
+  subtotal: number
+  discountAmount: number
+  totalAmount: number
+  rpcArgs: Record<string, unknown>
+}
+
+function snapshotKey(businessId: string, employeeId: string): string {
+  return `employee:${businessId}:${employeeId}`
+}
+
+function legacySnapshotKey(businessId: string, employeeId: string): string {
+  return `retivox:employee-snapshot:${businessId}:${employeeId}`
 }
 
 async function withSnapshotWrite<T>(operation: () => Promise<T>): Promise<T> {
@@ -74,164 +98,6 @@ function isSnapshot(value: unknown): value is OfflineEmployeeSnapshot {
   )
 }
 
-/**
- * Reads the latest snapshot for an employee.
- */
-export async function readEmployeeSnapshot(businessId: string, employeeId: string): Promise<OfflineEmployeeSnapshot | null> {
-  try {
-    const value = await AsyncStorage.getItem(snapshotKey(businessId, employeeId))
-    if (!value) return null
-
-    const parsed = JSON.parse(value) as unknown
-    return isSnapshot(parsed) ? parsed : null
-  } catch {
-    return null
-  }
-}
-
-/**
- * Reads a snapshot when the employee id is not available to a screen.
- */
-export async function readEmployeeSnapshotByBranch(branchId: string): Promise<OfflineEmployeeSnapshot | null> {
-  try {
-    const indexValue = await AsyncStorage.getItem(SNAPSHOT_INDEX_KEY)
-    const keys = indexValue ? (JSON.parse(indexValue) as unknown) : []
-
-    if (!Array.isArray(keys)) return null
-
-    for (const key of keys) {
-      if (typeof key !== 'string') continue
-      const value = await AsyncStorage.getItem(key)
-      if (!value) continue
-      const parsed = JSON.parse(value) as unknown
-      if (isSnapshot(parsed) && parsed.branchId === branchId) return parsed
-    }
-  } catch {
-    return null
-  }
-
-  return null
-}
-
-/**
- * Stores the latest loaded employee state.
- */
-export async function writeEmployeeSnapshot(snapshot: OfflineEmployeeSnapshot): Promise<void> {
-  const key = snapshotKey(snapshot.businessId, snapshot.employeeId)
-
-  await withSnapshotWrite(async () => {
-    try {
-      await AsyncStorage.setItem(key, JSON.stringify({ ...snapshot, updatedAt: new Date().toISOString() }))
-      await rememberSnapshotKey(key)
-    } catch {
-      // Offline cache failures should never block the employee workflow.
-    }
-  })
-}
-
-/**
- * Merges a dashboard/POS update into the latest snapshot.
- */
-export async function mergeEmployeeSnapshot(
-  identity: Pick<OfflineEmployeeSnapshot, 'businessId' | 'branchId' | 'employeeId'>,
-  patch: Partial<Pick<OfflineEmployeeSnapshot, 'currency' | 'todayTransactions' | 'recentTransactions' | 'transactions' | 'products' | 'damageProducts'>>,
-): Promise<OfflineEmployeeSnapshot | null> {
-  return withSnapshotWrite(async () => {
-    const current = (await readEmployeeSnapshot(identity.businessId, identity.employeeId)) ?? createEmptySnapshot(identity)
-    const pendingLocalTransactions = current.transactions.filter(isPendingLocalTransaction)
-    const nextTransactions = patch.transactions
-      ? mergePendingTransactions(patch.transactions, pendingLocalTransactions, 50)
-      : current.transactions
-    const nextRecentTransactions = patch.recentTransactions
-      ? mergePendingTransactions(patch.recentTransactions, pendingLocalTransactions, 20)
-      : current.recentTransactions
-    const nextTodayTransactions = patch.todayTransactions
-      ? mergePendingTransactions(patch.todayTransactions, pendingLocalTransactions, 50, true)
-      : current.todayTransactions
-    const next: OfflineEmployeeSnapshot = {
-      ...current,
-      ...patch,
-      ...identity,
-      transactions: nextTransactions,
-      recentTransactions: nextRecentTransactions,
-      todayTransactions: nextTodayTransactions,
-      updatedAt: new Date().toISOString(),
-    }
-    await writeSnapshotUnlocked(next)
-    return next
-  })
-}
-
-/**
- * Adds a locally recorded transaction and deducts its cached stock immediately.
- */
-export async function appendOfflineEmployeeTransaction(input: {
-  identity: Pick<OfflineEmployeeSnapshot, 'businessId' | 'branchId' | 'employeeId'>
-  transaction: EmployeeTransaction
-  items: Array<{ optionId: string; baseQuantity: number }>
-}): Promise<OfflineEmployeeSnapshot> {
-  return withSnapshotWrite(async () => {
-    const current = (await readEmployeeSnapshot(input.identity.businessId, input.identity.employeeId)) ?? createEmptySnapshot(input.identity)
-    const products = current.products.map((product) => {
-      const deduction = input.items
-        .filter((item) => item.optionId === product.optionId)
-        .reduce((sum, item) => sum + item.baseQuantity, 0)
-
-      return deduction > 0
-        ? { ...product, baseQuantityOnHand: Math.max(product.baseQuantityOnHand - deduction, 0), quantityOnHand: Math.max(Math.floor(product.baseQuantityOnHand - deduction), 0) }
-        : product
-    })
-
-    const transactions = [input.transaction, ...current.transactions.filter((item) => item.id !== input.transaction.id)].slice(0, 50)
-    const todayStart = new Date(input.transaction.recordedAt)
-    todayStart.setHours(0, 0, 0, 0)
-    const todayTransactions = transactions.filter((item) => new Date(item.recordedAt) >= todayStart).slice(0, 50)
-    const next: OfflineEmployeeSnapshot = { ...current, ...input.identity, products, todayTransactions, recentTransactions: transactions.slice(0, 20), transactions, updatedAt: new Date().toISOString() }
-
-    await writeSnapshotUnlocked(next)
-    return next
-  })
-}
-
-/**
- * Marks a queued transaction as synced without losing its original timestamp.
- */
-export async function markOfflineEmployeeTransactionSynced(localId: string, serverId?: string): Promise<void> {
-  try {
-    const indexValue = await AsyncStorage.getItem(SNAPSHOT_INDEX_KEY)
-    const keys = indexValue ? (JSON.parse(indexValue) as unknown) : []
-
-    if (!Array.isArray(keys)) return
-
-    await withSnapshotWrite(async () => {
-      for (const key of keys) {
-        if (typeof key !== 'string') continue
-        const value = await AsyncStorage.getItem(key)
-        if (!value) continue
-        const parsed = JSON.parse(value) as unknown
-        if (!isSnapshot(parsed)) continue
-
-        const hasTransaction = parsed.transactions.some((transaction) => transaction.id === localId)
-        if (!hasTransaction) continue
-
-        const update = (transaction: EmployeeTransaction): EmployeeTransaction =>
-          transaction.id === localId ? { ...transaction, id: serverId ?? transaction.id, status: 'pending_verify' } : transaction
-
-        await writeSnapshotUnlocked({
-          ...parsed,
-          todayTransactions: parsed.todayTransactions.map(update),
-          recentTransactions: parsed.recentTransactions.map(update),
-          transactions: parsed.transactions.map(update),
-        })
-        return
-      }
-    })
-  } catch {
-    // A sync acknowledgement must never cause a successful remote sale to
-    // become retryable and potentially duplicate.
-  }
-}
-
 function createEmptySnapshot(identity: Pick<OfflineEmployeeSnapshot, 'businessId' | 'branchId' | 'employeeId'>): OfflineEmployeeSnapshot {
   return {
     ...identity,
@@ -245,44 +111,276 @@ function createEmptySnapshot(identity: Pick<OfflineEmployeeSnapshot, 'businessId
   }
 }
 
-function isPendingLocalTransaction(transaction: EmployeeTransaction): boolean {
-  return transaction.id.startsWith('offline-') && transaction.status === 'pending_sync'
+function withTimestamp(snapshot: OfflineEmployeeSnapshot): OfflineEmployeeSnapshot {
+  return { ...snapshot, updatedAt: new Date().toISOString() }
 }
 
-function mergePendingTransactions(
-  remoteTransactions: EmployeeTransaction[],
-  pendingLocalTransactions: EmployeeTransaction[],
-  limit: number,
-  todayOnly = false,
-): EmployeeTransaction[] {
-  const merged = [...pendingLocalTransactions, ...remoteTransactions]
+function isLocalTransaction(transaction: EmployeeTransaction): boolean {
+  return transaction.id.startsWith('offline-') && ['pending_sync', 'syncing', 'sync_failed'].includes(transaction.status)
+}
+
+function mergeTransactions(remote: EmployeeTransaction[], local: EmployeeTransaction[], limit: number, todayOnly = false): EmployeeTransaction[] {
+  return [...local, ...remote]
     .filter((transaction) => !todayOnly || isSameLocalDay(transaction.recordedAt, new Date()))
     .filter((transaction, index, all) => all.findIndex((candidate) => candidate.id === transaction.id) === index)
     .sort((left, right) => new Date(right.recordedAt).getTime() - new Date(left.recordedAt).getTime())
-
-  return merged.slice(0, limit)
+    .slice(0, limit)
 }
 
 function isSameLocalDay(value: string, reference: Date): boolean {
   const date = new Date(value)
-  return (
-    date.getFullYear() === reference.getFullYear() &&
-    date.getMonth() === reference.getMonth() &&
-    date.getDate() === reference.getDate()
-  )
+  return date.getFullYear() === reference.getFullYear() && date.getMonth() === reference.getMonth() && date.getDate() === reference.getDate()
 }
 
-async function writeSnapshotUnlocked(snapshot: OfflineEmployeeSnapshot): Promise<void> {
-  const key = snapshotKey(snapshot.businessId, snapshot.employeeId)
+/**
+ * Reads the last complete employee state stored on this device.
+ */
+export async function readEmployeeSnapshot(businessId: string, employeeId: string): Promise<OfflineEmployeeSnapshot | null> {
+  const value = await readMobileCache<OfflineEmployeeSnapshot>(snapshotKey(businessId, employeeId))
+  if (isSnapshot(value)) return value
 
+  // Import the previous app version's cache once so upgrading does not leave
+  // a previously signed-in employee with an empty offline dashboard.
   try {
-    await AsyncStorage.setItem(key, JSON.stringify({ ...snapshot, updatedAt: new Date().toISOString() }))
-    await rememberSnapshotKey(key)
+    const legacyValue = await AsyncStorage.getItem(legacySnapshotKey(businessId, employeeId))
+    const legacySnapshot = legacyValue ? (JSON.parse(legacyValue) as unknown) : null
+    if (isSnapshot(legacySnapshot)) {
+      await writeMobileCache(snapshotKey(businessId, employeeId), withTimestamp(legacySnapshot))
+      return legacySnapshot
+    }
   } catch {
-    // Snapshot persistence is best-effort; live and queued workflows continue.
+    // No legacy cache is a normal first-install case.
+  }
+
+  return null
+}
+
+/**
+ * Reads a branch snapshot when the screen has not yet resolved the user id.
+ */
+export async function readEmployeeSnapshotByBranch(branchId: string): Promise<OfflineEmployeeSnapshot | null> {
+  const entries = await readAllMobileCache<OfflineEmployeeSnapshot>()
+  return entries.map((entry) => entry.value).find((value) => isSnapshot(value) && value.branchId === branchId) ?? null
+}
+
+/**
+ * Replaces the durable snapshot after a successful online pull.
+ */
+export async function writeEmployeeSnapshot(snapshot: OfflineEmployeeSnapshot): Promise<void> {
+  await withSnapshotWrite(async () => {
+    await writeMobileCache(snapshotKey(snapshot.businessId, snapshot.employeeId), withTimestamp(snapshot))
+  })
+}
+
+/**
+ * Merges an online response without erasing visible local sales waiting to sync.
+ */
+export async function mergeEmployeeSnapshot(
+  identity: Pick<OfflineEmployeeSnapshot, 'businessId' | 'branchId' | 'employeeId'>,
+  patch: Partial<Pick<OfflineEmployeeSnapshot, 'currency' | 'todayTransactions' | 'recentTransactions' | 'transactions' | 'products' | 'damageProducts'>>,
+): Promise<OfflineEmployeeSnapshot> {
+  return withSnapshotWrite(async () => {
+    const current = (await readEmployeeSnapshot(identity.businessId, identity.employeeId)) ?? createEmptySnapshot(identity)
+    const local = current.transactions.filter(isLocalTransaction)
+    const next: OfflineEmployeeSnapshot = withTimestamp({
+      ...current,
+      ...patch,
+      ...identity,
+      products: patch.products ? deductCachedStock(patch.products, current.pendingStockDeductions ?? []) : current.products,
+      transactions: patch.transactions ? mergeTransactions(patch.transactions, local, 50) : current.transactions,
+      recentTransactions: patch.recentTransactions ? mergeTransactions(patch.recentTransactions, local, 20) : current.recentTransactions,
+      todayTransactions: patch.todayTransactions ? mergeTransactions(patch.todayTransactions, local, 50, true) : current.todayTransactions,
+    })
+    await writeMobileCache(snapshotKey(identity.businessId, identity.employeeId), next)
+    return next
+  })
+}
+
+/**
+ * Stages a sale locally. This is intentionally used for both online and
+ * offline sales; online mode simply runs synchronization immediately after it.
+ */
+export async function stageEmployeeTransaction(input: OfflineSaleStageInput): Promise<void> {
+  await withSnapshotWrite(async () => {
+    await database.write(async () => {
+      const cacheCollection = database.get<MobileCacheModel>('mobile_cache')
+      const cacheRecords = await cacheCollection.query(Q.where('cache_key', snapshotKey(input.identity.businessId, input.identity.employeeId))).fetch()
+      const parsed = cacheRecords[0] ? safeSnapshot(cacheRecords[0].payload) : null
+      const current = parsed ?? createEmptySnapshot(input.identity)
+      const pendingStockDeductions = [
+        ...(current.pendingStockDeductions ?? []),
+        ...input.lines.map((line) => ({ localId: input.localId, optionId: line.optionId, baseQuantity: line.baseQuantity })),
+      ]
+      const products = deductCachedStock(current.products, input.lines)
+      const transactions = [input.transaction, ...current.transactions.filter((item) => item.id !== input.localId)].slice(0, 50)
+      const next = withTimestamp({
+        ...current,
+        ...input.identity,
+        products,
+        pendingStockDeductions,
+        transactions,
+        recentTransactions: transactions.slice(0, 20),
+        todayTransactions: transactions.filter((item) => isSameLocalDay(item.recordedAt, new Date())).slice(0, 50),
+      })
+
+      await database.get<TransactionModel>('transactions').create((record) => {
+        record.branchId = input.identity.branchId
+        record.employeeId = input.identity.employeeId
+        record.businessId = input.identity.businessId
+        record.status = 'pending_sync'
+        record.subtotal = input.subtotal
+        record.discountAmount = input.discountAmount
+        record.totalAmount = input.totalAmount
+        record.origin = 'offline'
+        record.localSyncStatus = 'pending'
+        record.localId = input.localId
+        record.recordedAt = new Date(input.recordedAt)
+      })
+
+      for (const line of input.lines) {
+        await database.get<TransactionItemModel>('transaction_items').create((record) => {
+          record.transactionId = input.localId
+          record.productId = line.productId
+          record.quantity = line.quantityInUom
+          record.unitPriceAtSale = line.unitPrice
+          record.lineTotal = line.lineTotal
+          record.stockStatus = line.optionId.startsWith('recovery:') ? 'recovery_deducted' : 'deducted'
+          record.localSyncStatus = 'pending'
+        })
+      }
+
+      await database.get<PaymentModel>('payments').create((record) => {
+        record.transactionId = input.localId
+        record.paymentMethod = input.paymentMethod
+        record.amount = input.totalAmount
+        record.status = 'pending_verify'
+        record.mpesaRefCode = input.paymentMethod === 'mpesa_manual' ? input.paymentReference : ''
+        record.cashDepositCode = ''
+        record.accountReference = input.localId
+        record.localSyncStatus = 'pending'
+      })
+
+      await database.get<SyncQueueModel>('sync_queue').create((record) => {
+        record.entityType = 'employee_transaction'
+        record.localId = input.localId
+        record.payload = JSON.stringify({
+          kind: 'rpc',
+          rpc: 'employee_record_transaction_offline',
+          args: { ...input.rpcArgs, p_local_id: input.localId },
+        })
+        record.status = 'pending'
+        record.retryCount = 0
+        record.errorMessage = ''
+        record.createdLocallyAt = new Date(input.recordedAt)
+      })
+
+      if (cacheRecords[0]) {
+        await cacheRecords[0].update((record) => {
+          record.payload = JSON.stringify(next)
+          record.updatedAt = new Date()
+        })
+      } else {
+        await cacheCollection.create((record) => {
+          record.cacheKey = snapshotKey(input.identity.businessId, input.identity.employeeId)
+          record.payload = JSON.stringify(next)
+          record.updatedAt = new Date()
+        })
+      }
+    })
+  })
+}
+
+/**
+ * Reconciles a staged transaction once the server confirms its idempotent RPC.
+ */
+export async function markOfflineEmployeeTransactionSynced(localId: string, serverId: string, status: string): Promise<void> {
+  await withSnapshotWrite(async () => {
+    await database.write(async () => {
+      const transactions = await database.get<TransactionModel>('transactions').query(Q.where('local_id', localId)).fetch()
+      if (transactions[0]) {
+        await transactions[0].update((record) => {
+          record.serverId = serverId
+          record.status = status
+          record.localSyncStatus = 'synced'
+          record.syncedAt = new Date()
+        })
+      }
+
+      await updateSnapshotInDatabase(localId, (transaction) => ({ ...transaction, id: serverId, status }), true)
+    })
+  })
+}
+
+/**
+ * Keeps a rejected server sale visible to the employee instead of silently
+ * deleting it after a failed synchronization attempt.
+ */
+export async function markOfflineEmployeeTransactionFailed(localId: string): Promise<void> {
+  await withSnapshotWrite(async () => {
+    await database.write(async () => {
+      const transactions = await database.get<TransactionModel>('transactions').query(Q.where('local_id', localId)).fetch()
+      if (transactions[0]) {
+        await transactions[0].update((record) => {
+          record.status = 'sync_failed'
+          record.localSyncStatus = 'failed'
+        })
+      }
+      await updateSnapshotInDatabase(localId, (transaction) => ({ ...transaction, status: 'sync_failed' }), true)
+    })
+  })
+}
+
+async function updateSnapshotInDatabase(
+  localId: string,
+  update: (transaction: EmployeeTransaction) => EmployeeTransaction,
+  clearPendingDeduction = false,
+): Promise<void> {
+  const cacheCollection = database.get<MobileCacheModel>('mobile_cache')
+  const cacheRecords = await cacheCollection.query().fetch()
+  const cacheRecord = cacheRecords.find((record) => {
+    const snapshot = safeSnapshot(record.payload)
+    return snapshot?.transactions.some((transaction) => transaction.id === localId)
+  })
+  const snapshot = cacheRecord ? safeSnapshot(cacheRecord.payload) : null
+  if (!cacheRecord || !snapshot) return
+
+  const mapTransactions = (transactions: EmployeeTransaction[]) => transactions.map((transaction) => transaction.id === localId ? update(transaction) : transaction)
+  const next = withTimestamp({
+    ...snapshot,
+    transactions: mapTransactions(snapshot.transactions),
+    recentTransactions: mapTransactions(snapshot.recentTransactions),
+    todayTransactions: mapTransactions(snapshot.todayTransactions),
+    pendingStockDeductions: clearPendingDeduction
+      ? (snapshot.pendingStockDeductions ?? []).filter((deduction) => deduction.localId !== localId)
+      : snapshot.pendingStockDeductions,
+  })
+  await cacheRecord.update((record) => {
+    record.payload = JSON.stringify(next)
+    record.updatedAt = new Date()
+  })
+}
+
+function deductCachedStock(
+  products: EmployeeProductOption[],
+  lines: Array<Pick<OfflineSaleLine, 'optionId' | 'baseQuantity'>>,
+): EmployeeProductOption[] {
+  return products.map((product) => {
+    const deduction = lines.filter((line) => line.optionId === product.optionId).reduce((sum, line) => sum + line.baseQuantity, 0)
+    if (deduction <= 0) return product
+    const baseQuantityOnHand = Math.max(product.baseQuantityOnHand - deduction, 0)
+    return { ...product, baseQuantityOnHand, quantityOnHand: Math.max(Math.floor(baseQuantityOnHand), 0) }
+  })
+}
+
+function safeSnapshot(value: string): OfflineEmployeeSnapshot | null {
+  try {
+    const parsed = JSON.parse(value) as unknown
+    return isSnapshot(parsed) ? parsed : null
+  } catch {
+    return null
   }
 }
 
 export function createOfflineTransactionId(): string {
-  return `offline-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  return `offline-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 }

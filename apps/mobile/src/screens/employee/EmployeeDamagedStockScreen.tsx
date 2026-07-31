@@ -16,7 +16,6 @@ import { Card } from '../../components/ui/Card'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { Input } from '../../components/ui/Input'
 import { LoadingSpinner } from '../../components/ui/LoadingSpinner'
-import { Toast } from '../../components/ui/Toast'
 import { useOnlineAutoRefresh } from '../../hooks/useOnlineAutoRefresh'
 import { useTheme } from '../../hooks/useTheme'
 import { resolveEmployeeBranchAssignment } from '../../lib/employee/branchAssignment'
@@ -67,7 +66,7 @@ export default function EmployeeDamagedStockScreen() {
   const { theme } = useTheme()
   const user = useAuthStore((state) => state.user)
   const setUser = useAuthStore((state) => state.setUser)
-  const { toast, showToast, hideToast } = useUiStore()
+  const showToast = useUiStore((state) => state.showToast)
   const [products, setProducts] = useState<DamageReportProductOption[]>([])
   const [selectedProductId, setSelectedProductId] = useState('')
   const [quantity, setQuantity] = useState('')
@@ -154,7 +153,6 @@ export default function EmployeeDamagedStockScreen() {
         subtitle={user?.branchName ?? 'Assigned branch'}
         rightAction={{ label: 'Refresh', icon: <RefreshCcw color={theme.colors.primary} size={16} />, onPress: loadProducts }}
       />
-      {toast ? <Toast message={toast.message} type={toast.type} visible={toast.visible} onDismiss={hideToast} /> : null}
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.keyboard}>
         {loading ? (
           <LoadingSpinner label="Loading stock..." />

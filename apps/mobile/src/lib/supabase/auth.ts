@@ -44,7 +44,9 @@ export type SignInResult = {
 
 type OfflineAuthCache = {
   email: string
-  password: string
+  // Older app versions stored this value. New versions intentionally do not;
+  // Supabase persists its encrypted session in SecureStore instead.
+  password?: string
   profile: UserProfile
   updatedAt: string
 }
@@ -257,7 +259,7 @@ export async function signIn(email: string, password: string): Promise<SignInRes
     throw new Error('Account profile could not be loaded.')
   }
 
-  await saveOfflineAuthCache(normalizedEmail, validation.data.password, profile)
+  await saveOfflineAuthCache(normalizedEmail, profile)
   await recordDeviceSession(profile.id)
 
   return {
@@ -267,7 +269,7 @@ export async function signIn(email: string, password: string): Promise<SignInRes
 }
 
 /**
- * Signs out the active session while preserving offline operational data.
+ * Signs out the active session and removes the remembered-account marker.
  *
  * @returns Promise that resolves when local state is cleared.
  */
@@ -284,32 +286,21 @@ export async function signOut(): Promise<void> {
     handleError('signOut.clearSupabaseStorage', error)
   }
 
-  // Keep the offline profile, dashboard snapshot, and pending queue. The
-  // active Supabase session is cleared above, but local operational data must
-  // survive logout so the next offline login can continue safely.
+  await clearOfflineAuthCache()
 }
 
 /**
- * Restores a cached Supabase session when an offline login becomes online.
+ * Restores the encrypted Supabase session when the device comes online.
  *
  * @returns A fresh session or null when no cached credentials exist.
  */
 export async function restoreCachedSession(): Promise<Session | null> {
-  const cache = await loadOfflineAuthCache()
-
-  if (!cache) return null
-
   try {
-    const { data, error } = await withTimeout(
-      supabase.auth.signInWithPassword({ email: cache.email, password: cache.password }),
-      10000,
-      'Session restore timed out.',
-    )
-
-    if (error || !data.session) return null
-    return data.session
+    const { data, error } = await withTimeout(supabase.auth.refreshSession(), 10000, 'Session restore timed out.')
+    if (!error && data.session) return data.session
+    return getSession()
   } catch {
-    return null
+    return getSession()
   }
 }
 
@@ -323,7 +314,7 @@ export async function restoreCachedSession(): Promise<Session | null> {
 async function authenticateOffline(email: string, password: string): Promise<UserProfile> {
   const cache = await loadOfflineAuthCache()
 
-  if (!cache || cache.email !== email || cache.password !== password) {
+  if (!cache || cache.email !== email || !cache.password || cache.password !== password) {
     throw new Error('You are offline. Connect once with this account on this device before offline login can work.')
   }
 
@@ -341,20 +332,19 @@ export async function loadCachedOfflineProfile(): Promise<UserProfile | null> {
 }
 
 /**
- * Persists credentials and profile in OS-backed secure storage for offline login.
+ * Persists the last successful profile in OS-backed secure storage. Supabase
+ * stores the encrypted session separately, so no password is retained here.
  *
  * @param email - Normalized email.
- * @param password - Current password.
  * @param profile - Fresh online profile.
  * @returns Promise resolving after save.
  */
-async function saveOfflineAuthCache(email: string, password: string, profile: UserProfile): Promise<void> {
+async function saveOfflineAuthCache(email: string, profile: UserProfile): Promise<void> {
   try {
     await SecureStore.setItemAsync(
       OFFLINE_AUTH_CACHE_KEY,
       JSON.stringify({
         email,
-        password,
         profile,
         updatedAt: new Date().toISOString(),
       } satisfies OfflineAuthCache),
@@ -365,7 +355,7 @@ async function saveOfflineAuthCache(email: string, password: string, profile: Us
 }
 
 /**
- * Updates cached profile after online profile refresh while preserving credentials.
+ * Updates cached profile after online profile refresh.
  *
  * @param profile - Latest online profile.
  * @returns Promise resolving after best-effort save.
@@ -377,7 +367,7 @@ async function updateCachedOfflineProfile(profile: UserProfile): Promise<void> {
     return
   }
 
-  await saveOfflineAuthCache(cache.email, cache.password, profile)
+  await saveOfflineAuthCache(cache.email, profile)
 }
 
 /**
@@ -397,7 +387,6 @@ async function loadOfflineAuthCache(): Promise<OfflineAuthCache | null> {
 
     if (
       typeof parsed.email === 'string' &&
-      typeof parsed.password === 'string' &&
       parsed.profile &&
       typeof parsed.profile.id === 'string'
     ) {
@@ -408,6 +397,14 @@ async function loadOfflineAuthCache(): Promise<OfflineAuthCache | null> {
   } catch (error) {
     handleError('loadOfflineAuthCache', error)
     return null
+  }
+}
+
+async function clearOfflineAuthCache(): Promise<void> {
+  try {
+    await SecureStore.deleteItemAsync(OFFLINE_AUTH_CACHE_KEY)
+  } catch (error) {
+    handleError('clearOfflineAuthCache', error)
   }
 }
 

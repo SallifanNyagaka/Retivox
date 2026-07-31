@@ -8,7 +8,7 @@
 import { appSchema, tableSchema } from '@nozbe/watermelondb'
 
 export const watermelonSchema = appSchema({
-  version: 1,
+  version: 2,
   tables: [
     tableSchema({
       name: 'transactions',
@@ -102,6 +102,17 @@ export const watermelonSchema = appSchema({
         { name: 'error_message', type: 'string', isOptional: true },
         { name: 'created_locally_at', type: 'number' },
         { name: 'synced_at', type: 'number', isOptional: true },
+      ],
+    }),
+    tableSchema({
+      // Full screen snapshots are deliberately kept separate from normalized
+      // POS records. This lets the app render its last known state offline
+      // while queued sales remain independently durable and auditable.
+      name: 'mobile_cache',
+      columns: [
+        { name: 'cache_key', type: 'string', isIndexed: true },
+        { name: 'payload', type: 'string' },
+        { name: 'updated_at', type: 'number' },
       ],
     }),
   ],

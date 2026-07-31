@@ -7,6 +7,7 @@
 
 import { Database } from '@nozbe/watermelondb'
 import SQLiteAdapter from '@nozbe/watermelondb/adapters/sqlite'
+import { watermelonMigrations } from './migrations'
 import { watermelonSchema } from './schema'
 import { BranchProductPriceModel } from './models/BranchProductPrice'
 import { BranchStockModel } from './models/BranchStock'
@@ -15,9 +16,11 @@ import { ProductModel } from './models/Product'
 import { SyncQueueModel } from './models/SyncQueue'
 import { TransactionModel } from './models/Transaction'
 import { TransactionItemModel } from './models/TransactionItem'
+import { MobileCacheModel } from './models/MobileCache'
 
 const adapter = new SQLiteAdapter({
   schema: watermelonSchema,
+  migrations: watermelonMigrations,
   dbName: 'retivox_mobile',
   jsi: true,
   onSetUpError: (error) => {
@@ -35,5 +38,6 @@ export const database = new Database({
     ProductModel,
     BranchProductPriceModel,
     SyncQueueModel,
+    MobileCacheModel,
   ],
 })
