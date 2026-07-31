@@ -6,6 +6,7 @@
  */
 
 import type { Session } from '@supabase/supabase-js'
+import AsyncStorage from '@react-native-async-storage/async-storage'
 import * as SecureStore from 'expo-secure-store'
 import { GlobalRole, loginSchema } from '@smartretail/shared'
 import { supabase, clearSupabaseStorage } from './client'
@@ -15,6 +16,7 @@ import { withTimeout } from '../../utils/asyncTimeout'
 import type { UserProfile } from '../../store/authStore'
 
 const OFFLINE_AUTH_CACHE_KEY = 'retivox:offline-auth-cache'
+const DEVICE_PROFILE_CACHE_KEY = 'retivox:remembered-device-profile'
 
 type UserRow = {
   id: string
@@ -148,7 +150,9 @@ export async function loadCurrentUserProfile(): Promise<UserProfile | null> {
   }
 
   const profile = normalizeUserProfile(profileRow, branchRow)
-  await updateCachedOfflineProfile(profile)
+  // Keep the remembered-device profile current even if this is the first
+  // successful login and no previous cache row exists yet.
+  await saveOfflineAuthCache(profile.email, profile)
 
   return profile
 }
@@ -340,34 +344,26 @@ export async function loadCachedOfflineProfile(): Promise<UserProfile | null> {
  * @returns Promise resolving after save.
  */
 async function saveOfflineAuthCache(email: string, profile: UserProfile): Promise<void> {
+  const serialized = JSON.stringify({
+    email,
+    profile,
+    updatedAt: new Date().toISOString(),
+  } satisfies OfflineAuthCache)
+
   try {
-    await SecureStore.setItemAsync(
-      OFFLINE_AUTH_CACHE_KEY,
-      JSON.stringify({
-        email,
-        profile,
-        updatedAt: new Date().toISOString(),
-      } satisfies OfflineAuthCache),
-    )
+    await SecureStore.setItemAsync(OFFLINE_AUTH_CACHE_KEY, serialized)
   } catch (error) {
     handleError('saveOfflineAuthCache', error)
   }
-}
 
-/**
- * Updates cached profile after online profile refresh.
- *
- * @param profile - Latest online profile.
- * @returns Promise resolving after best-effort save.
- */
-async function updateCachedOfflineProfile(profile: UserProfile): Promise<void> {
-  const cache = await loadOfflineAuthCache()
-
-  if (!cache) {
-    return
+  // This contains profile data only, never a password or access token. It is
+  // a resilient fallback for Android devices where SecureStore is temporarily
+  // unavailable during cold launch.
+  try {
+    await AsyncStorage.setItem(DEVICE_PROFILE_CACHE_KEY, serialized)
+  } catch (error) {
+    handleError('saveOfflineAuthCache.fallback', error)
   }
-
-  await saveOfflineAuthCache(cache.email, profile)
 }
 
 /**
@@ -377,23 +373,11 @@ async function updateCachedOfflineProfile(profile: UserProfile): Promise<void> {
  */
 async function loadOfflineAuthCache(): Promise<OfflineAuthCache | null> {
   try {
-    const value = await SecureStore.getItemAsync(OFFLINE_AUTH_CACHE_KEY)
+    const secureValue = await SecureStore.getItemAsync(OFFLINE_AUTH_CACHE_KEY)
+    const secureCache = parseOfflineAuthCache(secureValue)
+    if (secureCache) return secureCache
 
-    if (!value) {
-      return null
-    }
-
-    const parsed = JSON.parse(value) as Partial<OfflineAuthCache>
-
-    if (
-      typeof parsed.email === 'string' &&
-      parsed.profile &&
-      typeof parsed.profile.id === 'string'
-    ) {
-      return parsed as OfflineAuthCache
-    }
-
-    return null
+    return parseOfflineAuthCache(await AsyncStorage.getItem(DEVICE_PROFILE_CACHE_KEY))
   } catch (error) {
     handleError('loadOfflineAuthCache', error)
     return null
@@ -405,6 +389,25 @@ async function clearOfflineAuthCache(): Promise<void> {
     await SecureStore.deleteItemAsync(OFFLINE_AUTH_CACHE_KEY)
   } catch (error) {
     handleError('clearOfflineAuthCache', error)
+  }
+
+  try {
+    await AsyncStorage.removeItem(DEVICE_PROFILE_CACHE_KEY)
+  } catch (error) {
+    handleError('clearOfflineAuthCache.fallback', error)
+  }
+}
+
+function parseOfflineAuthCache(value: string | null): OfflineAuthCache | null {
+  if (!value) return null
+
+  try {
+    const parsed = JSON.parse(value) as Partial<OfflineAuthCache>
+    return typeof parsed.email === 'string' && parsed.profile && typeof parsed.profile.id === 'string'
+      ? (parsed as OfflineAuthCache)
+      : null
+  } catch {
+    return null
   }
 }
 

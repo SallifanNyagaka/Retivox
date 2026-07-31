@@ -8,7 +8,6 @@
 import { supabase } from '../supabase/client'
 import { withTimeout } from '../../utils/asyncTimeout'
 import { getConnectivityState } from '../network/connectivity'
-import { processSyncQueue } from '../sync/processor'
 import {
   createOfflineTransactionId,
   mergeEmployeeSnapshot,
@@ -512,6 +511,40 @@ export async function recordEmployeeTransaction(
     p_recorded_at: recordedAt,
   }
 
+  const connectivity = await getConnectivityState().catch(() => ({ isOnline: false, connectionType: null }))
+  if (connectivity.isOnline) {
+    try {
+      const { data, error } = await withTimeout(
+        Promise.resolve(supabase.rpc('employee_record_transaction_offline', args)),
+        30000,
+        'The sale is taking too long. Check your network and try again.',
+      )
+
+      if (error) throw error
+
+      const response = Array.isArray(data) ? data[0] : data
+      const serverId = response && typeof response === 'object' && typeof (response as { transaction_id?: unknown }).transaction_id === 'string'
+        ? (response as { transaction_id: string }).transaction_id
+        : undefined
+      const status = response && typeof response === 'object' && typeof (response as { status?: unknown }).status === 'string'
+        ? (response as { status: string }).status
+        : 'pending_verify'
+
+      if (!serverId) {
+        throw new Error('The server did not confirm this transaction. Please try again.')
+      }
+
+      return { queued: false, serverId, status }
+    } catch (error) {
+      const currentConnectivity = await getConnectivityState().catch(() => ({ isOnline: false, connectionType: null }))
+      if (currentConnectivity.isOnline && !isLikelyNetworkError(error)) {
+        throw error
+      }
+      // The request was interrupted by connectivity. Fall through and preserve
+      // the sale locally instead of making the employee enter it again.
+    }
+  }
+
   const lines = payload.items.map((item) => {
     const product = context.products.find((option) => (
       option.productId === item.productId &&
@@ -535,8 +568,7 @@ export async function recordEmployeeTransaction(
     }
   })
 
-  // Stage every sale first. This makes online and offline submissions follow
-  // the same durable, idempotent path and prevents network drops losing sales.
+  // Only unavailable/interrupted connections use the durable local queue.
   await stageEmployeeTransaction({
     identity: context,
     localId,
@@ -551,17 +583,12 @@ export async function recordEmployeeTransaction(
     rpcArgs: args,
   })
 
-  const connectivity = await getConnectivityState().catch(() => ({ isOnline: false, connectionType: null }))
-  if (!connectivity.isOnline) {
-    return { queued: true, localId, status: 'pending_sync' }
-  }
+  return { queued: true, localId, status: 'pending_sync' }
+}
 
-  const syncResult = await processSyncQueue()
-  const synced = syncResult.syncedTransactions.find((transaction) => transaction.localId === localId)
-  const failed = syncResult.failedTransactions.find((transaction) => transaction.localId === localId)
-  return synced
-    ? { queued: false, localId, serverId: synced.serverId, status: synced.status }
-    : { queued: true, localId, status: failed ? 'sync_failed' : 'pending_sync' }
+function isLikelyNetworkError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase()
+  return ['network', 'fetch', 'timeout', 'offline', 'connection', 'internet', 'taking too long'].some((part) => message.includes(part))
 }
 
 /**

@@ -36,7 +36,6 @@ export function useAutoSync(): void {
       setSyncing(true)
 
       try {
-        const before = await getQueueCounts()
         const result = await runWatermelonSync(profile)
         const counts = await getQueueCounts()
         if (mounted) {
@@ -48,8 +47,6 @@ export function useAutoSync(): void {
             showToast(`Offline transaction synced as ${result.syncedTransactions[0].status.replace(/_/g, ' ')}.`, 'success')
           } else if (result.syncedTransactions.length > 1) {
             showToast(`${result.syncedTransactions.length} offline transactions synced.`, 'success')
-          } else if (result.failedTransactions.length > 0 && (before.pendingCount > 0 || before.failedCount > 0)) {
-            showToast('One or more offline transactions need review before they can sync.', 'warning')
           }
         }
       } catch (error) {
