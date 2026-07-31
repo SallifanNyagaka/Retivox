@@ -34,12 +34,15 @@ export function useAutoSync(): void {
       setSyncing(true)
 
       try {
+        const before = await getQueueCounts()
         await processSyncQueue()
         const counts = await getQueueCounts()
         if (mounted) {
           setPendingCount(counts.pendingCount)
           setFailedCount(counts.failedCount)
-          setLastSynced(new Date())
+          if (before.pendingCount > 0 || before.failedCount > 0 || counts.pendingCount > 0 || counts.failedCount > 0) {
+            setLastSynced(new Date())
+          }
         }
       } catch (error) {
         handleError('useAutoSync', error)
@@ -50,14 +53,17 @@ export function useAutoSync(): void {
     }
 
     void sync()
+    const interval = setInterval(() => {
+      void sync()
+    }, 30000)
     const subscription = AppState.addEventListener('change', (nextState) => {
       if (nextState === 'active') void sync()
     })
 
     return () => {
       mounted = false
+      clearInterval(interval)
       subscription.remove()
     }
   }, [onlineStatus.isOnline, profile?.businessId, profile?.id, setFailedCount, setLastSynced, setPendingCount, setSyncing])
 }
-

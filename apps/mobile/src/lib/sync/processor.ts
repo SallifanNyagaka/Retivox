@@ -105,11 +105,16 @@ async function processSyncQueueInternal(): Promise<void> {
           if (error) throw error
 
           const response = Array.isArray(data) ? data[0] : data
-          const serverId = response && typeof response === 'object' && 'transaction_id' in response
-            ? String((response as { transaction_id: unknown }).transaction_id)
-            : undefined
+          if (!response || typeof response !== 'object' || !('transaction_id' in response)) {
+            throw new Error('The server did not acknowledge the offline transaction.')
+          }
 
-          await markOfflineEmployeeTransactionSynced(item.localId, serverId)
+          const transactionId = (response as { transaction_id: unknown }).transaction_id
+          if (typeof transactionId !== 'string' || transactionId.length === 0) {
+            throw new Error('The server returned an invalid transaction acknowledgement.')
+          }
+
+          await markOfflineEmployeeTransactionSynced(item.localId, transactionId)
           await markQueueItemSynced(item)
           continue
         }

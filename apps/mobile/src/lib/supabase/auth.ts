@@ -120,6 +120,9 @@ export async function loadCurrentUserProfile(): Promise<UserProfile | null> {
   }
 
   if (profileError || !profileData) {
+    if (!(await getSafeConnectivityState()).isOnline) {
+      return loadCachedOfflineProfile()
+    }
     throw profileError ?? new Error('User profile not found.')
   }
 
@@ -130,7 +133,17 @@ export async function loadCurrentUserProfile(): Promise<UserProfile | null> {
     throw new Error('Your account has been deactivated. Please contact your manager.')
   }
 
-  const branchRow = profileRow.global_role === GlobalRole.Employee ? await loadEmployeeBranch(profileRow.id) : null
+  let branchRow: EmployeeBranchRow | null = null
+  if (profileRow.global_role === GlobalRole.Employee) {
+    try {
+      branchRow = await loadEmployeeBranch(profileRow.id)
+    } catch (error) {
+      if (!(await getSafeConnectivityState()).isOnline) {
+        return loadCachedOfflineProfile()
+      }
+      throw error
+    }
+  }
 
   const profile = normalizeUserProfile(profileRow, branchRow)
   await updateCachedOfflineProfile(profile)
@@ -322,7 +335,7 @@ async function authenticateOffline(email: string, password: string): Promise<Use
  *
  * @returns Cached profile or null.
  */
-async function loadCachedOfflineProfile(): Promise<UserProfile | null> {
+export async function loadCachedOfflineProfile(): Promise<UserProfile | null> {
   const cache = await loadOfflineAuthCache()
   return cache?.profile ?? null
 }

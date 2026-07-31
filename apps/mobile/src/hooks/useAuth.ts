@@ -6,7 +6,7 @@
  */
 
 import { useCallback } from 'react'
-import { getSession, loadCurrentUserProfile, signIn, signOut } from '../lib/supabase/auth'
+import { getSession, loadCachedOfflineProfile, loadCurrentUserProfile, signIn, signOut } from '../lib/supabase/auth'
 import { handleError } from '../utils/errorHandler'
 import { useAuthStore } from '../store/authStore'
 
@@ -26,7 +26,10 @@ export function useAuth() {
       setSession(existingSession)
 
       if (!existingSession) {
-        setUser(null)
+        // A device can have a valid cached profile even when Supabase cannot
+        // restore a session without internet. Promote it into the auth store
+        // so the role navigator and offline screens are available immediately.
+        setUser(await loadCachedOfflineProfile())
         return
       }
 

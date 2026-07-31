@@ -138,7 +138,25 @@ export async function mergeEmployeeSnapshot(
 ): Promise<OfflineEmployeeSnapshot | null> {
   return withSnapshotWrite(async () => {
     const current = (await readEmployeeSnapshot(identity.businessId, identity.employeeId)) ?? createEmptySnapshot(identity)
-    const next: OfflineEmployeeSnapshot = { ...current, ...patch, ...identity, updatedAt: new Date().toISOString() }
+    const pendingLocalTransactions = current.transactions.filter(isPendingLocalTransaction)
+    const nextTransactions = patch.transactions
+      ? mergePendingTransactions(patch.transactions, pendingLocalTransactions, 50)
+      : current.transactions
+    const nextRecentTransactions = patch.recentTransactions
+      ? mergePendingTransactions(patch.recentTransactions, pendingLocalTransactions, 20)
+      : current.recentTransactions
+    const nextTodayTransactions = patch.todayTransactions
+      ? mergePendingTransactions(patch.todayTransactions, pendingLocalTransactions, 50, true)
+      : current.todayTransactions
+    const next: OfflineEmployeeSnapshot = {
+      ...current,
+      ...patch,
+      ...identity,
+      transactions: nextTransactions,
+      recentTransactions: nextRecentTransactions,
+      todayTransactions: nextTodayTransactions,
+      updatedAt: new Date().toISOString(),
+    }
     await writeSnapshotUnlocked(next)
     return next
   })
@@ -225,6 +243,33 @@ function createEmptySnapshot(identity: Pick<OfflineEmployeeSnapshot, 'businessId
     damageProducts: [],
     updatedAt: new Date().toISOString(),
   }
+}
+
+function isPendingLocalTransaction(transaction: EmployeeTransaction): boolean {
+  return transaction.id.startsWith('offline-') && transaction.status === 'pending_sync'
+}
+
+function mergePendingTransactions(
+  remoteTransactions: EmployeeTransaction[],
+  pendingLocalTransactions: EmployeeTransaction[],
+  limit: number,
+  todayOnly = false,
+): EmployeeTransaction[] {
+  const merged = [...pendingLocalTransactions, ...remoteTransactions]
+    .filter((transaction) => !todayOnly || isSameLocalDay(transaction.recordedAt, new Date()))
+    .filter((transaction, index, all) => all.findIndex((candidate) => candidate.id === transaction.id) === index)
+    .sort((left, right) => new Date(right.recordedAt).getTime() - new Date(left.recordedAt).getTime())
+
+  return merged.slice(0, limit)
+}
+
+function isSameLocalDay(value: string, reference: Date): boolean {
+  const date = new Date(value)
+  return (
+    date.getFullYear() === reference.getFullYear() &&
+    date.getMonth() === reference.getMonth() &&
+    date.getDate() === reference.getDate()
+  )
 }
 
 async function writeSnapshotUnlocked(snapshot: OfflineEmployeeSnapshot): Promise<void> {

@@ -45,7 +45,10 @@ export async function enqueueSyncItem(input: QueuePayload): Promise<void> {
 export async function getPendingQueueItems(): Promise<SyncQueueModel[]> {
   return database
     .get<SyncQueueModel>('sync_queue')
-    .query(Q.where('status', Q.oneOf(['pending', 'failed', 'syncing'])), Q.where('retry_count', Q.lt(3)), Q.sortBy('created_locally_at', Q.asc))
+    // Failed writes remain durable and retry on every reconnect/online pass.
+    // A capped retry count made valid offline sales disappear after transient
+    // network or session failures.
+    .query(Q.where('status', Q.oneOf(['pending', 'failed', 'syncing'])), Q.sortBy('created_locally_at', Q.asc))
     .fetch()
 }
 

@@ -540,7 +540,11 @@ async function queueOfflineEmployeeTransaction(
   await enqueueSyncItem({
     entityType: 'employee_transaction',
     localId,
-    payload: { kind: 'rpc', rpc: 'employee_record_transaction_offline', args },
+    payload: {
+      kind: 'rpc',
+      rpc: 'employee_record_transaction_offline',
+      args: { ...args, p_local_id: localId },
+    },
   })
   await appendOfflineEmployeeTransaction({
     identity: context,

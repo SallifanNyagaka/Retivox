@@ -9,6 +9,7 @@ import { useCallback, useEffect, useRef } from 'react'
 import { AppState } from 'react-native'
 import { useFocusEffect, useIsFocused } from '@react-navigation/native'
 import { useOnlineStatus } from './useOnlineStatus'
+import { useSyncStore } from '../store/syncStore'
 import { handleError } from '../utils/errorHandler'
 
 export type OnlineAutoRefreshOptions = {
@@ -25,6 +26,7 @@ export type OnlineAutoRefreshOptions = {
  */
 export function useOnlineAutoRefresh(refresh: () => Promise<void>, options: OnlineAutoRefreshOptions = {}): void {
   const onlineStatus = useOnlineStatus()
+  const lastSyncedAt = useSyncStore((state) => state.lastSyncedAt)
   const isFocused = useIsFocused()
   const inFlightRef = useRef(false)
   const intervalMs = options.intervalMs ?? 120000
@@ -67,4 +69,9 @@ export function useOnlineAutoRefresh(refresh: () => Promise<void>, options: Onli
 
     return () => clearInterval(interval)
   }, [intervalMs, isFocused, onlineStatus.isOnline, safeRefresh])
+
+  useEffect(() => {
+    if (!lastSyncedAt || !onlineStatus.isOnline || !isFocused) return
+    void safeRefresh()
+  }, [isFocused, lastSyncedAt, onlineStatus.isOnline, safeRefresh])
 }
