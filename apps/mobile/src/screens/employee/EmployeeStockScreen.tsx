@@ -48,7 +48,7 @@ export default function EmployeeStockScreen() {
       const assignedUser = await resolveEmployeeBranchAssignment(user, setUser)
       const [dashboardData, saleProducts] = await Promise.all([
         fetchEmployeeDashboardData(assignedUser.businessId, assignedUser.branchId, assignedUser.id),
-        fetchEmployeeSaleProducts(assignedUser.branchId),
+        fetchEmployeeSaleProducts(assignedUser.branchId, assignedUser.id, assignedUser.businessId),
       ])
       setCurrency(dashboardData.currency)
       setProducts(saleProducts)

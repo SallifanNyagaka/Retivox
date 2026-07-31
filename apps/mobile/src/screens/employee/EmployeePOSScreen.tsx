@@ -97,7 +97,7 @@ export default function EmployeePOSScreen() {
       const assignedUser = await resolveEmployeeBranchAssignment(user, setUser)
       const [dashboardData, saleProducts] = await Promise.all([
         fetchEmployeeDashboardData(assignedUser.businessId, assignedUser.branchId, assignedUser.id),
-        fetchEmployeeSaleProducts(assignedUser.branchId),
+        fetchEmployeeSaleProducts(assignedUser.branchId, assignedUser.id, assignedUser.businessId),
       ])
       setCurrency(dashboardData.currency)
       setProducts(saleProducts)
@@ -214,7 +214,7 @@ export default function EmployeePOSScreen() {
     setSubmitting(true)
 
     try {
-      await recordEmployeeTransaction({
+      const result = await recordEmployeeTransaction({
         items: cart.map((item) => ({
           productId: item.product.productId,
           uomId: item.uomId,
@@ -226,6 +226,13 @@ export default function EmployeePOSScreen() {
         customerName: customerName.trim(),
         customerPhone: customerPhone.trim(),
         mpesaRefCode: mpesaRefCode.trim(),
+      }, {
+        businessId: user?.businessId ?? '',
+        branchId: user?.branchId ?? '',
+        employeeId: user?.id ?? '',
+        products,
+        subtotal,
+        totalAmount: total,
       })
 
       setCart([])
@@ -233,8 +240,9 @@ export default function EmployeePOSScreen() {
       setCustomerName('')
       setCustomerPhone('')
       setMpesaRefCode('')
-      showToast('Transaction recorded successfully.', 'success')
-      await loadProducts()
+      showToast(result.queued ? 'Sale saved offline. It will sync automatically when internet returns.' : 'Transaction recorded successfully.', 'success')
+      setSubmitting(false)
+      void loadProducts({ silent: true })
     } catch (submitError) {
       const handled = handleError('EmployeePOS.submitSale', submitError)
       showToast(handled.message, 'error')

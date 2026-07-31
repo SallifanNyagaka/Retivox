@@ -7,6 +7,15 @@
 
 import { supabase } from '../supabase/client'
 import { withTimeout } from '../../utils/asyncTimeout'
+import { getConnectivityState } from '../network/connectivity'
+import { enqueueSyncItem } from '../sync/queue'
+import {
+  appendOfflineEmployeeTransaction,
+  createOfflineTransactionId,
+  mergeEmployeeSnapshot,
+  readEmployeeSnapshot,
+  readEmployeeSnapshotByBranch,
+} from '../offline/employeeSnapshot'
 
 export type PricingMethod = 'fixed_price' | 'assisted_pack' | 'manual_quantity'
 export type RoundingRule = 'none' | 'nearest_5' | 'up_5' | 'down_5' | 'nearest_10'
@@ -74,6 +83,7 @@ export type EmployeeDashboardData = {
   todayTransactions: EmployeeTransaction[]
   recentTransactions: EmployeeTransaction[]
   products: EmployeeProductOption[]
+  damageProducts: DamageReportProductOption[]
 }
 
 export type RecordTransactionPayload = {
@@ -97,6 +107,21 @@ export type DamageReportPayload = {
   quantity: number
   lossType: LossType
   reason: string
+}
+
+export type RecordTransactionContext = {
+  businessId: string
+  branchId: string
+  employeeId: string
+  products: EmployeeProductOption[]
+  subtotal: number
+  totalAmount: number
+}
+
+export type RecordTransactionResult = {
+  queued: boolean
+  localId?: string
+  serverId?: string
 }
 
 type EmployeeAvailableProductRow = {
@@ -217,6 +242,8 @@ export function mapEmployeeProductOption(row: EmployeeAvailableProductRow): Empl
   const saleUomIds = new Set(uomOptions.map((option) => option.id))
   const recoveryItemId = row.recovery_item_id ?? null
 
+  const stockSource: StockSource = row.stock_source === 'recovery' || Boolean(recoveryItemId) ? 'recovery' : 'normal'
+
   return {
     optionId: recoveryItemId ? `recovery:${recoveryItemId}` : `normal:${row.product_id}`,
     productId: row.product_id,
@@ -234,7 +261,7 @@ export function mapEmployeeProductOption(row: EmployeeAvailableProductRow): Empl
     baseQuantityOnHand: toNumber(row.base_quantity_on_hand ?? row.quantity_on_hand),
     baseQuantityReserved: toNumber(row.base_quantity_reserved ?? row.quantity_reserved),
     recoveryItemId,
-    stockSource: row.stock_source ?? 'normal',
+    stockSource,
   }
 }
 
@@ -283,43 +310,62 @@ export async function fetchEmployeeDashboardData(
   branchId: string,
   employeeId: string,
 ): Promise<EmployeeDashboardData> {
+  const connectivity = await getConnectivityState().catch(() => ({ isOnline: false, connectionType: null }))
+  if (!connectivity.isOnline) {
+    const cached = await readEmployeeSnapshot(businessId, employeeId)
+    if (cached) return cached
+  }
+
   const today = new Date()
   today.setHours(0, 0, 0, 0)
 
-  const [businessResponse, todayResponse, recentResponse, productsResponse] = await Promise.all([
-    supabase.from('businesses').select('currency').eq('id', businessId).single(),
-    supabase
-      .from('transactions')
-      .select('id, status, total_amount, recorded_at')
-      .eq('business_id', businessId)
-      .eq('branch_id', branchId)
-      .eq('employee_id', employeeId)
-      .gte('recorded_at', today.toISOString())
-      .order('recorded_at', { ascending: false })
-      .range(0, 49),
-    supabase
-      .from('transactions')
-      .select('id, status, total_amount, recorded_at')
-      .eq('business_id', businessId)
-      .eq('branch_id', branchId)
-      .eq('employee_id', employeeId)
-      .order('recorded_at', { ascending: false })
-      .range(0, 19),
-    supabase.rpc('employee_available_products', { p_branch_id: branchId }),
-  ])
+  try {
+    const [businessResponse, todayResponse, recentResponse, productsResponse] = await Promise.all([
+      supabase.from('businesses').select('currency').eq('id', businessId).single(),
+      supabase
+        .from('transactions')
+        .select('id, status, total_amount, recorded_at')
+        .eq('business_id', businessId)
+        .eq('branch_id', branchId)
+        .eq('employee_id', employeeId)
+        .gte('recorded_at', today.toISOString())
+        .order('recorded_at', { ascending: false })
+        .range(0, 49),
+      supabase
+        .from('transactions')
+        .select('id, status, total_amount, recorded_at')
+        .eq('business_id', businessId)
+        .eq('branch_id', branchId)
+        .eq('employee_id', employeeId)
+        .order('recorded_at', { ascending: false })
+        .range(0, 19),
+      supabase.rpc('employee_available_products', { p_branch_id: branchId }),
+    ])
 
-  if (businessResponse.error) throw businessResponse.error
-  if (todayResponse.error) throw todayResponse.error
-  if (recentResponse.error) throw recentResponse.error
-  if (productsResponse.error) throw productsResponse.error
+    if (businessResponse.error) throw businessResponse.error
+    if (todayResponse.error) throw todayResponse.error
+    if (recentResponse.error) throw recentResponse.error
+    if (productsResponse.error) throw productsResponse.error
 
-  const business = businessResponse.data as BusinessCurrencyRow | null
+    const business = businessResponse.data as BusinessCurrencyRow | null
+    const data: EmployeeDashboardData = {
+      currency: business?.currency ?? 'KES',
+      todayTransactions: ((todayResponse.data ?? []) as TransactionRow[]).map(mapTransaction),
+      recentTransactions: ((recentResponse.data ?? []) as TransactionRow[]).map(mapTransaction),
+      products: ((productsResponse.data ?? []) as EmployeeAvailableProductRow[]).map(mapEmployeeProductOption),
+      damageProducts: [],
+    }
 
-  return {
-    currency: business?.currency ?? 'KES',
-    todayTransactions: ((todayResponse.data ?? []) as TransactionRow[]).map(mapTransaction),
-    recentTransactions: ((recentResponse.data ?? []) as TransactionRow[]).map(mapTransaction),
-    products: ((productsResponse.data ?? []) as EmployeeAvailableProductRow[]).map(mapEmployeeProductOption),
+    await mergeEmployeeSnapshot(
+      { businessId, branchId, employeeId },
+      { currency: data.currency, todayTransactions: data.todayTransactions, recentTransactions: data.recentTransactions, transactions: data.recentTransactions, products: data.products },
+    )
+
+    return data
+  } catch (error) {
+    const cached = await readEmployeeSnapshot(businessId, employeeId)
+    if (cached) return cached
+    throw error
   }
 }
 
@@ -329,12 +375,30 @@ export async function fetchEmployeeDashboardData(
  * @param branchId - Assigned branch id.
  * @returns Product options.
  */
-export async function fetchEmployeeSaleProducts(branchId: string): Promise<EmployeeProductOption[]> {
-  const { data, error } = await supabase.rpc('employee_available_products', { p_branch_id: branchId })
+export async function fetchEmployeeSaleProducts(branchId: string, employeeId?: string, businessId?: string): Promise<EmployeeProductOption[]> {
+  const connectivity = await getConnectivityState().catch(() => ({ isOnline: false, connectionType: null }))
+  if (!connectivity.isOnline) {
+    const cached = employeeId && businessId
+      ? await readEmployeeSnapshot(businessId, employeeId)
+      : await readEmployeeSnapshotByBranch(branchId)
+    if (cached) return cached.products
+  }
 
-  if (error) throw error
+  try {
+    const { data, error } = await supabase.rpc('employee_available_products', { p_branch_id: branchId })
 
-  return ((data ?? []) as EmployeeAvailableProductRow[]).map(mapEmployeeProductOption)
+    if (error) throw error
+
+    const products = ((data ?? []) as EmployeeAvailableProductRow[]).map(mapEmployeeProductOption)
+    if (employeeId && businessId) await mergeEmployeeSnapshot({ businessId, branchId, employeeId }, { products })
+    return products
+  } catch (error) {
+    const cached = employeeId && businessId
+      ? await readEmployeeSnapshot(businessId, employeeId)
+      : await readEmployeeSnapshotByBranch(branchId)
+    if (cached) return cached.products
+    throw error
+  }
 }
 
 /**
@@ -343,12 +407,30 @@ export async function fetchEmployeeSaleProducts(branchId: string): Promise<Emplo
  * @param branchId - Assigned branch id.
  * @returns Product options.
  */
-export async function fetchEmployeeDamageReportProducts(branchId: string): Promise<DamageReportProductOption[]> {
-  const { data, error } = await supabase.rpc('employee_damage_report_products', { p_branch_id: branchId })
+export async function fetchEmployeeDamageReportProducts(branchId: string, employeeId?: string, businessId?: string): Promise<DamageReportProductOption[]> {
+  const connectivity = await getConnectivityState().catch(() => ({ isOnline: false, connectionType: null }))
+  if (!connectivity.isOnline) {
+    const cached = employeeId && businessId
+      ? await readEmployeeSnapshot(businessId, employeeId)
+      : await readEmployeeSnapshotByBranch(branchId)
+    if (cached) return cached.damageProducts
+  }
 
-  if (error) throw error
+  try {
+    const { data, error } = await supabase.rpc('employee_damage_report_products', { p_branch_id: branchId })
 
-  return ((data ?? []) as DamageReportProductRow[]).map(mapDamageReportProductOption)
+    if (error) throw error
+
+    const products = ((data ?? []) as DamageReportProductRow[]).map(mapDamageReportProductOption)
+    if (employeeId && businessId) await mergeEmployeeSnapshot({ businessId, branchId, employeeId }, { damageProducts: products })
+    return products
+  } catch (error) {
+    const cached = employeeId && businessId
+      ? await readEmployeeSnapshot(businessId, employeeId)
+      : await readEmployeeSnapshotByBranch(branchId)
+    if (cached) return cached.damageProducts
+    throw error
+  }
 }
 
 /**
@@ -364,18 +446,32 @@ export async function fetchEmployeeTransactions(
   branchId: string,
   employeeId: string,
 ): Promise<EmployeeTransaction[]> {
-  const { data, error } = await supabase
-    .from('transactions')
-    .select('id, status, total_amount, recorded_at')
-    .eq('business_id', businessId)
-    .eq('branch_id', branchId)
-    .eq('employee_id', employeeId)
-    .order('recorded_at', { ascending: false })
-    .range(0, 49)
+  const connectivity = await getConnectivityState().catch(() => ({ isOnline: false, connectionType: null }))
+  if (!connectivity.isOnline) {
+    const cached = await readEmployeeSnapshot(businessId, employeeId)
+    if (cached) return cached.transactions
+  }
 
-  if (error) throw error
+  try {
+    const { data, error } = await supabase
+      .from('transactions')
+      .select('id, status, total_amount, recorded_at')
+      .eq('business_id', businessId)
+      .eq('branch_id', branchId)
+      .eq('employee_id', employeeId)
+      .order('recorded_at', { ascending: false })
+      .range(0, 49)
 
-  return ((data ?? []) as TransactionRow[]).map(mapTransaction)
+    if (error) throw error
+
+    const transactions = ((data ?? []) as TransactionRow[]).map(mapTransaction)
+    await mergeEmployeeSnapshot({ businessId, branchId, employeeId }, { transactions, recentTransactions: transactions })
+    return transactions
+  } catch (error) {
+    const cached = await readEmployeeSnapshot(businessId, employeeId)
+    if (cached) return cached.transactions
+    throw error
+  }
 }
 
 /**
@@ -384,22 +480,80 @@ export async function fetchEmployeeTransactions(
  * @param payload - Transaction payload.
  * @returns Void.
  */
-export async function recordEmployeeTransaction(payload: RecordTransactionPayload): Promise<void> {
-  const { error } = await withTimeout(
-    Promise.resolve(supabase.rpc('employee_record_transaction', {
-      p_items: payload.items,
-      p_payment_method: payload.paymentMethod,
-      p_discount_amount: payload.discountAmount,
-      p_customer_name: payload.customerName || null,
-      p_customer_phone: payload.customerPhone || null,
-      p_mpesa_ref_code: payload.mpesaRefCode || null,
-      p_cash_deposit_code: null,
-    })),
-    30000,
-    'The sale is taking too long. Check your network and try again.',
-  )
+export async function recordEmployeeTransaction(
+  payload: RecordTransactionPayload,
+  context?: RecordTransactionContext,
+): Promise<RecordTransactionResult> {
+  const recordedAt = new Date().toISOString()
+  const args = {
+    p_items: payload.items,
+    p_payment_method: payload.paymentMethod,
+    p_discount_amount: payload.discountAmount,
+    p_customer_name: payload.customerName || null,
+    p_customer_phone: payload.customerPhone || null,
+    p_mpesa_ref_code: payload.mpesaRefCode || null,
+    p_cash_deposit_code: null,
+    p_recorded_at: recordedAt,
+  }
 
-  if (error) throw error
+  const connectivity = await getConnectivityState().catch(() => ({ isOnline: false, connectionType: null }))
+  if (!connectivity.isOnline) {
+    if (!context) throw new Error('You are offline. Sale context is unavailable on this screen.')
+    return queueOfflineEmployeeTransaction(payload, args, recordedAt, context)
+  }
+
+  try {
+    const { data, error } = await withTimeout(
+      Promise.resolve(supabase.rpc('employee_record_transaction_offline', args)),
+      30000,
+      'The sale is taking too long. Check your network and try again.',
+    )
+
+    if (error) throw error
+    const response = Array.isArray(data) ? data[0] : data
+    const serverId = response && typeof response === 'object' && 'transaction_id' in response
+      ? String((response as { transaction_id: unknown }).transaction_id)
+      : undefined
+    return { queued: false, serverId }
+  } catch (error) {
+    const currentConnectivity = await getConnectivityState().catch(() => ({ isOnline: false, connectionType: null }))
+    if (context && !currentConnectivity.isOnline && isLikelyNetworkError(error)) {
+      return queueOfflineEmployeeTransaction(payload, args, recordedAt, context)
+    }
+    throw error
+  }
+}
+
+async function queueOfflineEmployeeTransaction(
+  payload: RecordTransactionPayload,
+  args: Record<string, unknown>,
+  recordedAt: string,
+  context: RecordTransactionContext,
+): Promise<RecordTransactionResult> {
+  const localId = createOfflineTransactionId()
+  const items = payload.items.map((item) => {
+    const product = context.products.find((option) => option.productId === item.productId && (item.recoveryItemId ? option.recoveryItemId === item.recoveryItemId : option.stockSource === 'normal'))
+    const uom = product?.uomOptions.find((option) => option.id === item.uomId)
+    return { optionId: product?.optionId ?? `${item.recoveryItemId ? 'recovery' : 'normal'}:${item.productId}`, baseQuantity: Number((item.quantity * (uom?.conversionFactor ?? 1)).toFixed(4)) }
+  })
+
+  await enqueueSyncItem({
+    entityType: 'employee_transaction',
+    localId,
+    payload: { kind: 'rpc', rpc: 'employee_record_transaction_offline', args },
+  })
+  await appendOfflineEmployeeTransaction({
+    identity: context,
+    transaction: { id: localId, status: 'pending_sync', totalAmount: context.totalAmount, recordedAt },
+    items,
+  })
+
+  return { queued: true, localId }
+}
+
+function isLikelyNetworkError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase()
+  return ['network', 'fetch', 'timeout', 'offline', 'connection', 'internet', 'taking too long'].some((part) => message.includes(part))
 }
 
 /**

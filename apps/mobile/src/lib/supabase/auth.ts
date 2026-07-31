@@ -5,7 +5,6 @@
  * policy, device-session recording, and shared-device-safe sign-out cleanup.
  */
 
-import AsyncStorage from '@react-native-async-storage/async-storage'
 import type { Session } from '@supabase/supabase-js'
 import * as SecureStore from 'expo-secure-store'
 import { GlobalRole, loginSchema } from '@smartretail/shared'
@@ -83,18 +82,42 @@ function normalizeUserProfile(row: UserRow, branch: EmployeeBranchRow | null): U
  * @returns User profile or null when no valid user exists.
  */
 export async function loadCurrentUserProfile(): Promise<UserProfile | null> {
-  const { data: userData, error: authError } = await supabase.auth.getUser()
+  let userData: Awaited<ReturnType<typeof supabase.auth.getUser>>['data']
+  let authError: Awaited<ReturnType<typeof supabase.auth.getUser>>['error']
+
+  try {
+    const result = await withTimeout(supabase.auth.getUser(), 6000, 'Profile request timed out.')
+    userData = result.data
+    authError = result.error
+  } catch {
+    return loadCachedOfflineProfile()
+  }
 
   if (authError || !userData.user) {
-    const connectivity = await getConnectivityState()
+    const connectivity = await getSafeConnectivityState()
     return connectivity.isOnline ? null : loadCachedOfflineProfile()
   }
 
-  const { data: profileData, error: profileError } = await supabase
-    .from('users')
-    .select('id, business_id, name, email, phone, global_role, is_active, last_login_at, created_at')
-    .eq('id', userData.user.id)
-    .maybeSingle()
+  let profileData: unknown
+  let profileError: unknown
+
+  try {
+    const result = await withTimeout(
+      Promise.resolve(
+        supabase
+          .from('users')
+          .select('id, business_id, name, email, phone, global_role, is_active, last_login_at, created_at')
+          .eq('id', userData.user.id)
+          .maybeSingle(),
+      ),
+      6000,
+      'Profile request timed out.',
+    )
+    profileData = result.data
+    profileError = result.error
+  } catch {
+    return loadCachedOfflineProfile()
+  }
 
   if (profileError || !profileData) {
     throw profileError ?? new Error('User profile not found.')
@@ -146,13 +169,15 @@ async function loadEmployeeBranch(userId: string): Promise<EmployeeBranchRow | n
  * @returns Supabase session or null.
  */
 export async function getSession(): Promise<Session | null> {
-  const { data, error } = await supabase.auth.getSession()
+  try {
+    const { data, error } = await withTimeout(supabase.auth.getSession(), 4000, 'Session request timed out.')
 
-  if (error) {
+    if (error) return null
+
+    return data.session
+  } catch {
     return null
   }
-
-  return data.session
 }
 
 /**
@@ -170,7 +195,7 @@ export async function signIn(email: string, password: string): Promise<SignInRes
   }
 
   const normalizedEmail = validation.data.email.trim().toLowerCase()
-  const connectivity = await getConnectivityState()
+  const connectivity = await getSafeConnectivityState()
 
   if (!connectivity.isOnline) {
     const cachedUser = await authenticateOffline(normalizedEmail, validation.data.password)
@@ -181,12 +206,35 @@ export async function signIn(email: string, password: string): Promise<SignInRes
     }
   }
 
-  const { data, error } = await supabase.auth.signInWithPassword({
-    email: normalizedEmail,
-    password: validation.data.password,
-  })
+  let data: Awaited<ReturnType<typeof supabase.auth.signInWithPassword>>['data']
+  let error: Awaited<ReturnType<typeof supabase.auth.signInWithPassword>>['error']
+
+  try {
+    const result = await withTimeout(
+      supabase.auth.signInWithPassword({
+        email: normalizedEmail,
+        password: validation.data.password,
+      }),
+      10000,
+      'Login request timed out.',
+    )
+    data = result.data
+    error = result.error
+  } catch (caughtError) {
+    if (isLikelyNetworkError(caughtError) || !(await getSafeConnectivityState()).isOnline) {
+      const cachedUser = await authenticateOffline(normalizedEmail, validation.data.password)
+      return { session: null, user: cachedUser }
+    }
+
+    throw caughtError
+  }
 
   if (error || !data.session) {
+    if (isLikelyNetworkError(error) || !(await getSafeConnectivityState()).isOnline) {
+      const cachedUser = await authenticateOffline(normalizedEmail, validation.data.password)
+      return { session: null, user: cachedUser }
+    }
+
     throw new Error('Invalid email or password.')
   }
 
@@ -206,7 +254,7 @@ export async function signIn(email: string, password: string): Promise<SignInRes
 }
 
 /**
- * Signs out and clears all local data for shared-device safety.
+ * Signs out the active session while preserving offline operational data.
  *
  * @returns Promise that resolves when local state is cleared.
  */
@@ -223,29 +271,32 @@ export async function signOut(): Promise<void> {
     handleError('signOut.clearSupabaseStorage', error)
   }
 
-  try {
-    await withTimeout(AsyncStorage.clear(), 3000, 'App storage cleanup timed out.')
-  } catch (error) {
-    handleError('signOut.clearAsyncStorage', error)
-  }
+  // Keep the offline profile, dashboard snapshot, and pending queue. The
+  // active Supabase session is cleared above, but local operational data must
+  // survive logout so the next offline login can continue safely.
+}
+
+/**
+ * Restores a cached Supabase session when an offline login becomes online.
+ *
+ * @returns A fresh session or null when no cached credentials exist.
+ */
+export async function restoreCachedSession(): Promise<Session | null> {
+  const cache = await loadOfflineAuthCache()
+
+  if (!cache) return null
 
   try {
-    await withTimeout(SecureStore.deleteItemAsync(OFFLINE_AUTH_CACHE_KEY), 3000, 'Offline cache cleanup timed out.')
-  } catch (error) {
-    handleError('signOut.clearOfflineAuthCache', error)
-  }
-
-  try {
-    const { database } = await import('../watermelon/database')
-    await withTimeout(
-      database.write(async () => {
-        await database.unsafeResetDatabase()
-      }),
-      5000,
-      'Local database cleanup timed out.',
+    const { data, error } = await withTimeout(
+      supabase.auth.signInWithPassword({ email: cache.email, password: cache.password }),
+      10000,
+      'Session restore timed out.',
     )
-  } catch (error) {
-    handleError('signOut.clearWatermelon', error)
+
+    if (error || !data.session) return null
+    return data.session
+  } catch {
+    return null
   }
 }
 
@@ -367,6 +418,19 @@ async function recordDeviceSession(userId: string): Promise<void> {
   } catch (error) {
     handleError('recordDeviceSession', error)
   }
+}
+
+async function getSafeConnectivityState() {
+  try {
+    return await withTimeout(getConnectivityState(), 2500, 'Connectivity check timed out.')
+  } catch {
+    return { isOnline: false, connectionType: null }
+  }
+}
+
+function isLikelyNetworkError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase()
+  return ['network', 'fetch', 'timeout', 'offline', 'connection', 'internet'].some((part) => message.includes(part))
 }
 
 /**

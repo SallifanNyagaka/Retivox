@@ -20,7 +20,9 @@ export type OnlineStatus = {
  * @returns Current online status and connection type.
  */
 export function useOnlineStatus(): OnlineStatus {
-  const [status, setStatus] = useState<OnlineStatus>({ isOnline: true, connectionType: null })
+  // Start conservatively until the first real network check completes. This
+  // prevents offline startup from launching network requests optimistically.
+  const [status, setStatus] = useState<OnlineStatus>({ isOnline: false, connectionType: null })
 
   useEffect(() => {
     let mounted = true

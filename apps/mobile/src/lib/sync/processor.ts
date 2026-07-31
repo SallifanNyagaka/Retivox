@@ -6,18 +6,30 @@
  */
 
 import { InteractionManager } from 'react-native'
-import { getSession } from '../supabase/auth'
+import { getSession, restoreCachedSession } from '../supabase/auth'
 import { supabase } from '../supabase/client'
-import { createDuplicateConflict, createSessionConflict } from './conflicts'
+import { createDuplicateConflict } from './conflicts'
 import { getPendingQueueItems, markQueueItemFailed, markQueueItemSynced, markQueueItemSyncing } from './queue'
 import { getQueueCounts } from './queue'
 import { useSyncStore } from '../../store/syncStore'
 import { handleError } from '../../utils/errorHandler'
+import { withTimeout } from '../../utils/asyncTimeout'
+import { markOfflineEmployeeTransactionSynced } from '../offline/employeeSnapshot'
 
 type SyncPayload = {
   table: string
   values: Record<string, unknown>
   localId?: string
+} | {
+  kind: 'rpc'
+  rpc: 'employee_record_transaction_offline'
+  args: Record<string, unknown>
+}
+
+let activeProcessing: Promise<void> | null = null
+
+function isRpcSyncPayload(payload: SyncPayload): payload is Extract<SyncPayload, { kind: 'rpc' }> {
+  return 'kind' in payload && payload.kind === 'rpc'
 }
 
 /**
@@ -33,7 +45,19 @@ function parseSyncPayload(value: string): SyncPayload {
     throw new Error('Invalid sync payload.')
   }
 
-  const record = parsed as { table?: unknown; values?: unknown; localId?: unknown }
+  const record = parsed as { table?: unknown; values?: unknown; localId?: unknown; kind?: unknown; rpc?: unknown; args?: unknown }
+
+  if (record.kind === 'rpc') {
+    if (record.rpc !== 'employee_record_transaction_offline' || !record.args || typeof record.args !== 'object') {
+      throw new Error('Invalid offline transaction payload.')
+    }
+
+    return {
+      kind: 'rpc',
+      rpc: 'employee_record_transaction_offline',
+      args: record.args as Record<string, unknown>,
+    }
+  }
 
   if (typeof record.table !== 'string' || !record.values || typeof record.values !== 'object') {
     throw new Error('Invalid sync payload shape.')
@@ -51,17 +75,16 @@ function parseSyncPayload(value: string): SyncPayload {
  *
  * @returns Promise that resolves after queue processing.
  */
-export async function processSyncQueue(): Promise<void> {
+async function processSyncQueueInternal(): Promise<void> {
   const syncStore = useSyncStore.getState()
   syncStore.setSyncing(true)
 
   try {
-    const session = await getSession()
+    const session = (await getSession()) ?? (await restoreCachedSession())
 
     if (!session) {
-      const sessionConflict = createSessionConflict()
-      const items = await getPendingQueueItems()
-      await Promise.all(items.map((item) => markQueueItemFailed(item, sessionConflict.message)))
+      // Keep queued work pending until a valid session is restored. Marking it
+      // failed here would make a normal offline login look like a data loss.
       return
     }
 
@@ -71,6 +94,25 @@ export async function processSyncQueue(): Promise<void> {
       try {
         await markQueueItemSyncing(item)
         const payload = parseSyncPayload(item.payload)
+
+        if (isRpcSyncPayload(payload)) {
+          const { data, error } = await withTimeout(
+            Promise.resolve(supabase.rpc(payload.rpc, payload.args)),
+            30000,
+            'Offline sale sync timed out.',
+          )
+
+          if (error) throw error
+
+          const response = Array.isArray(data) ? data[0] : data
+          const serverId = response && typeof response === 'object' && 'transaction_id' in response
+            ? String((response as { transaction_id: unknown }).transaction_id)
+            : undefined
+
+          await markOfflineEmployeeTransactionSynced(item.localId, serverId)
+          await markQueueItemSynced(item)
+          continue
+        }
 
         if (payload.localId) {
           const { data: existing } = await supabase
@@ -106,6 +148,20 @@ export async function processSyncQueue(): Promise<void> {
     syncStore.setLastSynced(new Date())
     syncStore.setSyncing(false)
   }
+}
+
+/**
+ * Processes only one queue pass at a time. Several screens can notice the
+ * same reconnect, but they must not submit the same local sale twice.
+ */
+export function processSyncQueue(): Promise<void> {
+  if (activeProcessing) return activeProcessing
+
+  activeProcessing = processSyncQueueInternal().finally(() => {
+    activeProcessing = null
+  })
+
+  return activeProcessing
 }
 
 /**

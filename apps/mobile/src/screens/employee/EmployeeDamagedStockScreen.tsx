@@ -95,7 +95,7 @@ export default function EmployeeDamagedStockScreen() {
 
     try {
       const assignedUser = await resolveEmployeeBranchAssignment(user, setUser)
-      const nextProducts = await fetchEmployeeDamageReportProducts(assignedUser.branchId)
+      const nextProducts = await fetchEmployeeDamageReportProducts(assignedUser.branchId, assignedUser.id, assignedUser.businessId)
       setProducts(nextProducts)
       setSelectedProductId((current) => current || nextProducts[0]?.productId || '')
     } catch (loadError) {

@@ -6,6 +6,8 @@
  */
 
 import { supabase } from '../supabase/client'
+import { getConnectivityState } from '../network/connectivity'
+import { readRoleDashboardSnapshot, writeRoleDashboardSnapshot } from '../offline/roleSnapshot'
 
 export type OwnerDashboardSummary = {
   currency: string
@@ -89,6 +91,21 @@ async function fetchCurrency(businessId: string): Promise<string> {
  * @returns Owner summary.
  */
 export async function fetchOwnerDashboardSummary(businessId: string): Promise<OwnerDashboardSummary> {
+  const connectivity = await getConnectivityState().catch(() => ({ isOnline: false, connectionType: null }))
+  const cached = await readRoleDashboardSnapshot<OwnerDashboardSummary>('owner', businessId)
+  if (!connectivity.isOnline && cached) return cached
+
+  try {
+    const summary = await fetchOwnerDashboardSummaryOnline(businessId)
+    await writeRoleDashboardSnapshot('owner', businessId, summary)
+    return summary
+  } catch (error) {
+    if (cached) return cached
+    throw error
+  }
+}
+
+async function fetchOwnerDashboardSummaryOnline(businessId: string): Promise<OwnerDashboardSummary> {
   const today = new Date()
   today.setHours(0, 0, 0, 0)
 
@@ -142,6 +159,21 @@ export async function fetchOwnerDashboardSummary(businessId: string): Promise<Ow
  * @returns Admin summary.
  */
 export async function fetchAdminDashboardSummary(businessId: string): Promise<AdminDashboardSummary> {
+  const connectivity = await getConnectivityState().catch(() => ({ isOnline: false, connectionType: null }))
+  const cached = await readRoleDashboardSnapshot<AdminDashboardSummary>('admin', businessId)
+  if (!connectivity.isOnline && cached) return cached
+
+  try {
+    const summary = await fetchAdminDashboardSummaryOnline(businessId)
+    await writeRoleDashboardSnapshot('admin', businessId, summary)
+    return summary
+  } catch (error) {
+    if (cached) return cached
+    throw error
+  }
+}
+
+async function fetchAdminDashboardSummaryOnline(businessId: string): Promise<AdminDashboardSummary> {
   const today = new Date()
   today.setHours(0, 0, 0, 0)
 
