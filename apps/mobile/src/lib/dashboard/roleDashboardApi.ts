@@ -43,6 +43,10 @@ type AdminProductRow = {
   branch_id: string
 }
 
+type AccessibleBranchRow = {
+  branch_id: string
+}
+
 /**
  * Converts values into finite numbers.
  *
@@ -177,30 +181,35 @@ async function fetchAdminDashboardSummaryOnline(businessId: string): Promise<Adm
   const today = new Date()
   today.setHours(0, 0, 0, 0)
 
-  const [currency, reportsResponse, productsResponse] = await Promise.all([
+  const [currency, reportsResponse, productsResponse, branchScopeResponse] = await Promise.all([
     fetchCurrency(businessId),
     supabase.rpc('admin_managed_inventory_loss_reports', { p_limit: 100 }),
     supabase.rpc('admin_damage_report_products'),
+    supabase.rpc('my_accessible_branch_ids', { p_min_role: 'employee' }),
   ])
 
   if (reportsResponse.error) throw reportsResponse.error
   if (productsResponse.error) throw productsResponse.error
+  if (branchScopeResponse.error) throw branchScopeResponse.error
 
   const reports = (reportsResponse.data ?? []) as AdminReportRow[]
   const adminProducts = (productsResponse.data ?? []) as AdminProductRow[]
-  const branchIds = new Set<string>()
+  const branchIds = new Set<string>(((branchScopeResponse.data ?? []) as AccessibleBranchRow[]).map((branch) => branch.branch_id))
 
   reports.forEach((report) => {
     if (report.branch_id) branchIds.add(report.branch_id)
   })
   adminProducts.forEach((product) => branchIds.add(product.branch_id))
 
-  const transactionResponse = await supabase
-    .from('transactions')
-    .select('total_amount')
-    .eq('business_id', businessId)
-    .gte('recorded_at', today.toISOString())
-    .neq('status', 'rejected')
+  const transactionResponse = branchIds.size > 0
+    ? await supabase
+      .from('transactions')
+      .select('total_amount')
+      .eq('business_id', businessId)
+      .in('branch_id', [...branchIds])
+      .gte('recorded_at', today.toISOString())
+      .neq('status', 'rejected')
+    : { data: [], error: null }
 
   if (transactionResponse.error) throw transactionResponse.error
 

@@ -21,6 +21,7 @@ import { useTheme } from '../../hooks/useTheme'
 import { resolveEmployeeBranchAssignment } from '../../lib/employee/branchAssignment'
 import {
   fetchEmployeeDashboardData,
+  fetchEmployeeBranchStockLevels,
   fetchEmployeeSaleProducts,
   recordEmployeeTransaction,
   type EmployeeProductOption,
@@ -75,6 +76,7 @@ export default function EmployeePOSScreen() {
   const showToast = useUiStore((state) => state.showToast)
   const [products, setProducts] = useState<EmployeeProductOption[]>([])
   const [currency, setCurrency] = useState('KES')
+  const [physicalStockCount, setPhysicalStockCount] = useState(0)
   const [activeTab, setActiveTab] = useState<SaleTab>('normal')
   const [cart, setCart] = useState<CartItem[]>([])
   const [discountAmount, setDiscountAmount] = useState('0')
@@ -94,12 +96,14 @@ export default function EmployeePOSScreen() {
 
     try {
       const assignedUser = await resolveEmployeeBranchAssignment(user, setUser)
-      const [dashboardData, saleProducts] = await Promise.all([
+      const [dashboardData, saleProducts, branchStock] = await Promise.all([
         fetchEmployeeDashboardData(assignedUser.businessId, assignedUser.branchId, assignedUser.id),
         fetchEmployeeSaleProducts(assignedUser.branchId, assignedUser.id, assignedUser.businessId),
+        fetchEmployeeBranchStockLevels(assignedUser.businessId, assignedUser.branchId, assignedUser.id),
       ])
       setCurrency(dashboardData.currency)
       setProducts(saleProducts)
+      setPhysicalStockCount(branchStock.length)
     } catch (loadError) {
       const handled = handleError('EmployeePOS.loadProducts', loadError)
       setError(handled.message)
@@ -290,7 +294,16 @@ export default function EmployeePOSScreen() {
             ) : null}
 
             {visibleProducts.length === 0 ? (
-              <EmptyState heading={`No ${activeTab === 'damaged' ? 'damaged' : 'normal'} stock`} subtitle="Pull refresh or check again after stock is approved." />
+              <EmptyState
+                heading={activeTab === 'damaged' ? 'No damaged stock' : physicalStockCount > 0 ? 'No sellable normal stock' : 'No normal stock'}
+                subtitle={
+                  activeTab === 'damaged'
+                    ? 'Damaged products appear after an owner approves a recovery price.'
+                    : physicalStockCount > 0
+                      ? 'Physical stock exists, but it needs an active sale unit and approved price before it can be sold.'
+                      : 'Pull refresh or check again after stock is received and approved.'
+                }
+              />
             ) : (
               <View style={styles.productGrid}>
                 {visibleProducts.map((product) => (

@@ -11,6 +11,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage'
 import type {
   DamageReportProductOption,
   EmployeeDashboardData,
+  EmployeeBranchStockLevel,
   EmployeeProductOption,
   EmployeeTransaction,
   PaymentMethod,
@@ -31,6 +32,7 @@ export type OfflineEmployeeSnapshot = EmployeeDashboardData & {
   employeeId: string
   transactions: EmployeeTransaction[]
   damageProducts: DamageReportProductOption[]
+  physicalStock?: EmployeeBranchStockLevel[]
   pendingStockDeductions?: Array<{ localId: string; optionId: string; baseQuantity: number }>
   updatedAt: string
 }
@@ -107,6 +109,7 @@ function createEmptySnapshot(identity: Pick<OfflineEmployeeSnapshot, 'businessId
     transactions: [],
     products: [],
     damageProducts: [],
+    physicalStock: [],
     updatedAt: new Date().toISOString(),
   }
 }
@@ -177,7 +180,7 @@ export async function writeEmployeeSnapshot(snapshot: OfflineEmployeeSnapshot): 
  */
 export async function mergeEmployeeSnapshot(
   identity: Pick<OfflineEmployeeSnapshot, 'businessId' | 'branchId' | 'employeeId'>,
-  patch: Partial<Pick<OfflineEmployeeSnapshot, 'currency' | 'todayTransactions' | 'recentTransactions' | 'transactions' | 'products' | 'damageProducts'>>,
+  patch: Partial<Pick<OfflineEmployeeSnapshot, 'currency' | 'todayTransactions' | 'recentTransactions' | 'transactions' | 'products' | 'damageProducts' | 'physicalStock'>>,
 ): Promise<OfflineEmployeeSnapshot> {
   return withSnapshotWrite(async () => {
     const current = (await readEmployeeSnapshot(identity.businessId, identity.employeeId)) ?? createEmptySnapshot(identity)
@@ -187,6 +190,7 @@ export async function mergeEmployeeSnapshot(
       ...patch,
       ...identity,
       products: patch.products ? deductCachedStock(patch.products, current.pendingStockDeductions ?? []) : current.products,
+      physicalStock: patch.physicalStock ?? current.physicalStock,
       transactions: patch.transactions ? mergeTransactions(patch.transactions, local, 50) : current.transactions,
       recentTransactions: patch.recentTransactions ? mergeTransactions(patch.recentTransactions, local, 20) : current.recentTransactions,
       todayTransactions: patch.todayTransactions ? mergeTransactions(patch.todayTransactions, local, 50, true) : current.todayTransactions,

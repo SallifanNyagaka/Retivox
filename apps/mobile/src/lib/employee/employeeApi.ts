@@ -71,6 +71,23 @@ export type DamageReportProductOption = {
   uomOptions: UomOption[]
 }
 
+/**
+ * Physical stock at an employee's assigned branch. Unlike a sale option, this
+ * remains visible even if a product still needs a price or sale UOM.
+ */
+export type EmployeeBranchStockLevel = {
+  productId: string
+  name: string
+  sku: string
+  category: string
+  unit: string
+  quantityOnHand: number
+  quantityReserved: number
+  baseQuantityOnHand: number
+  baseQuantityReserved: number
+  lowStockThreshold: number
+}
+
 export type EmployeeTransaction = {
   id: string
   status: string
@@ -158,6 +175,25 @@ type TransactionRow = {
   status: string
   total_amount: number | string | null
   recorded_at: string
+}
+
+type EmployeeBranchStockRow = {
+  product_id: string
+  name?: string | null
+  sku?: string | null
+  category?: string | null
+  unit?: string | null
+  quantity_on_hand: number | string | null
+  quantity_reserved: number | string | null
+  base_quantity_on_hand: number | string | null
+  base_quantity_reserved: number | string | null
+  low_stock_threshold: number | string | null
+  products?: {
+    name?: string | null
+    sku?: string | null
+    category?: string | null
+    unit?: string | null
+  } | null
 }
 
 type BusinessCurrencyRow = {
@@ -301,6 +337,33 @@ function mapTransaction(row: TransactionRow): EmployeeTransaction {
 }
 
 /**
+ * Maps a physical branch-stock row into the mobile stock-level shape.
+ */
+function mapEmployeeBranchStockLevel(row: EmployeeBranchStockRow): EmployeeBranchStockLevel {
+  const product = row.products ?? null
+  const quantityOnHand = toNumber(row.quantity_on_hand)
+  const quantityReserved = toNumber(row.quantity_reserved)
+  const reportedBaseQuantity = toNumber(row.base_quantity_on_hand)
+  const reportedBaseReserved = toNumber(row.base_quantity_reserved)
+
+  return {
+    productId: row.product_id,
+    name: row.name ?? product?.name ?? 'Unnamed product',
+    sku: row.sku ?? product?.sku ?? '',
+    category: row.category ?? product?.category ?? '',
+    unit: row.unit ?? product?.unit ?? 'units',
+    quantityOnHand,
+    quantityReserved,
+    // Older rows occasionally have their legacy quantity populated while the
+    // base quantity is zero. Keep those products visible while the server-side
+    // repair normalizes the source of truth.
+    baseQuantityOnHand: reportedBaseQuantity > 0 || quantityOnHand === 0 ? reportedBaseQuantity : quantityOnHand,
+    baseQuantityReserved: reportedBaseReserved > 0 || quantityReserved === 0 ? reportedBaseReserved : quantityReserved,
+    lowStockThreshold: toNumber(row.low_stock_threshold),
+  }
+}
+
+/**
  * Loads employee dashboard data.
  *
  * @param businessId - Current business id.
@@ -409,6 +472,58 @@ export async function fetchEmployeeSaleProducts(branchId: string, employeeId?: s
       ? await readEmployeeSnapshot(businessId, employeeId)
       : await readEmployeeSnapshotByBranch(branchId)
     if (cached) return cached.products
+    throw error
+  }
+}
+
+/**
+ * Loads every physical product at an employee's assigned branch. This is
+ * deliberately separate from employee_available_products, which only returns
+ * stock that is currently ready to sell at an approved price.
+ */
+export async function fetchEmployeeBranchStockLevels(
+  businessId: string,
+  branchId: string,
+  employeeId: string,
+): Promise<EmployeeBranchStockLevel[]> {
+  const connectivity = await getConnectivityState().catch(() => ({ isOnline: false, connectionType: null }))
+  const cached = await readEmployeeSnapshot(businessId, employeeId)
+
+  if (!connectivity.isOnline) {
+    return cached?.physicalStock ?? []
+  }
+
+  try {
+    const { data, error } = await supabase.rpc('employee_branch_stock_levels', { p_branch_id: branchId })
+    if (error) {
+      if (!isMissingBranchStockRpc(error)) throw error
+
+      // Keep the mobile update compatible until the accompanying database
+      // migration is applied. Existing branch-stock RLS remains the fallback.
+      const fallback = await supabase
+        .from('branch_stock')
+        .select('product_id, quantity_on_hand, quantity_reserved, base_quantity_on_hand, base_quantity_reserved, low_stock_threshold, products!inner(name, sku, category, unit)')
+        .eq('business_id', businessId)
+        .eq('branch_id', branchId)
+        .gt('quantity_on_hand', 0)
+        .order('product_id')
+
+      if (fallback.error) throw fallback.error
+
+      const physicalStock = ((fallback.data ?? []) as EmployeeBranchStockRow[]).map(mapEmployeeBranchStockLevel)
+      await mergeEmployeeSnapshot({ businessId, branchId, employeeId }, { physicalStock })
+      return physicalStock
+    }
+
+    const physicalStock = ((data ?? []) as EmployeeBranchStockRow[]).map(mapEmployeeBranchStockLevel)
+    await mergeEmployeeSnapshot({ businessId, branchId, employeeId }, { physicalStock })
+    return physicalStock
+  } catch (error) {
+    const currentConnectivity = await getConnectivityState().catch(() => ({ isOnline: false, connectionType: null }))
+    if (!currentConnectivity.isOnline && cached) {
+      return cached.physicalStock ?? []
+    }
+
     throw error
   }
 }
@@ -614,6 +729,11 @@ export async function recordEmployeeTransaction(
 function isLikelyNetworkError(error: unknown): boolean {
   const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase()
   return ['network', 'fetch', 'timeout', 'offline', 'connection', 'internet', 'taking too long'].some((part) => message.includes(part))
+}
+
+function isMissingBranchStockRpc(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase()
+  return message.includes('employee_branch_stock_levels') && message.includes('function')
 }
 
 /**

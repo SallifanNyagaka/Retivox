@@ -2,7 +2,7 @@
  * Owner notifications screen for Retivox mobile.
  */
 
-import { DashboardScaffold } from '../shared/DashboardScaffold'
+import { NotificationsScreen } from '../shared/NotificationsScreen'
 
 /**
  * Renders owner notifications.
@@ -10,12 +10,5 @@ import { DashboardScaffold } from '../shared/DashboardScaffold'
  * @returns Owner notifications screen.
  */
 export default function OwnerNotificationsScreen() {
-  return (
-    <DashboardScaffold
-      title="Notifications"
-      subtitle="Owner alerts"
-      emptyTitle="No notifications"
-      emptySubtitle="Approvals, sync conflicts, and branch alerts will appear here."
-    />
-  )
+  return <NotificationsScreen title="Notifications" subtitle="Owner alerts" />
 }

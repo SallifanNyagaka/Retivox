@@ -6,6 +6,7 @@
  */
 
 import { loadCurrentUserProfile } from '../supabase/auth'
+import { getConnectivityState } from '../network/connectivity'
 import type { UserProfile } from '../../store/authStore'
 
 /**
@@ -19,6 +20,22 @@ export async function resolveEmployeeBranchAssignment(
   user: UserProfile | null,
   setUser: (user: UserProfile | null) => void,
 ): Promise<UserProfile & { branchId: string }> {
+  const connectivity = await getConnectivityState().catch(() => ({ isOnline: false, connectionType: null }))
+
+  // Branch transfers happen on the web as well. When the device is online,
+  // always refresh this small profile record before querying scoped stock so
+  // the app never keeps using an employee's former store.
+  if (connectivity.isOnline) {
+    const refreshedUser = await loadCurrentUserProfile()
+    setUser(refreshedUser)
+
+    if (!refreshedUser?.branchId) {
+      throw new Error('Your branch assignment is missing. Ask your manager to confirm your store is active, then retry.')
+    }
+
+    return refreshedUser as UserProfile & { branchId: string }
+  }
+
   if (user?.branchId) {
     return user as UserProfile & { branchId: string }
   }

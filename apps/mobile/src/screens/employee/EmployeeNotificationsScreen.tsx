@@ -5,7 +5,7 @@
  * alerts, sync conflicts, and account messages.
  */
 
-import { DashboardScaffold } from '../shared/DashboardScaffold'
+import { NotificationsScreen } from '../shared/NotificationsScreen'
 
 /**
  * Renders employee notifications.
@@ -13,12 +13,5 @@ import { DashboardScaffold } from '../shared/DashboardScaffold'
  * @returns Employee notifications screen.
  */
 export default function EmployeeNotificationsScreen() {
-  return (
-    <DashboardScaffold
-      title="Notifications"
-      subtitle="Employee alerts"
-      emptyTitle="No notifications"
-      emptySubtitle="Sale reviews, sync conflicts, and manager messages will appear here."
-    />
-  )
+  return <NotificationsScreen title="Notifications" subtitle="Employee alerts" />
 }

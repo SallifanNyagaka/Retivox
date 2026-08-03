@@ -18,6 +18,7 @@ import { EmptyState } from '../ui/EmptyState'
 import { LoadingSpinner } from '../ui/LoadingSpinner'
 import { useTheme } from '../../hooks/useTheme'
 import { WEB_APP_URL } from '../../lib/config/env'
+import { useAuthStore } from '../../store/authStore'
 
 export type WebDashboardScreenProps = {
   title: string
@@ -31,13 +32,13 @@ export type WebDashboardScreenProps = {
  * @param path - Dashboard path.
  * @returns Absolute URL or null.
  */
-function buildDashboardUrl(path: string): string | null {
+function buildSessionHandoffUrl(): string | null {
   if (!WEB_APP_URL) {
     return null
   }
 
   try {
-    return new URL(path, WEB_APP_URL.endsWith('/') ? WEB_APP_URL : `${WEB_APP_URL}/`).toString()
+    return new URL('/api/mobile/session', WEB_APP_URL.endsWith('/') ? WEB_APP_URL : `${WEB_APP_URL}/`).toString()
   } catch {
     return null
   }
@@ -61,10 +62,11 @@ function isLocalhostUrl(url: string): boolean {
  */
 export function WebDashboardScreen({ title, subtitle, path }: WebDashboardScreenProps) {
   const { theme } = useTheme()
+  const session = useAuthStore((state) => state.session)
   const webViewRef = useRef<WebViewType>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const url = useMemo(() => buildDashboardUrl(path), [path])
+  const url = useMemo(() => buildSessionHandoffUrl(), [])
   const showLocalhostHint = Boolean(url && Platform.OS !== 'web' && isLocalhostUrl(url))
 
   if (!url) {
@@ -80,6 +82,31 @@ export function WebDashboardScreen({ title, subtitle, path }: WebDashboardScreen
       </SafeAreaView>
     )
   }
+
+  if (!session?.access_token || !session.refresh_token) {
+    return (
+      <SafeAreaView edges={['bottom']} style={[styles.safeArea, { backgroundColor: theme.colors.background }]}>
+        <ScreenHeader title={title} subtitle={subtitle} />
+        <View style={styles.center}>
+          <EmptyState
+            heading="Reconnect to open this section"
+            subtitle="Management pages need an active connection. Once online, Retivox will securely open this dashboard without asking you to sign in again."
+          />
+        </View>
+      </SafeAreaView>
+    )
+  }
+
+  const source = useMemo(() => ({
+    uri: url,
+    method: 'POST' as const,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      accessToken: session.access_token,
+      refreshToken: session.refresh_token,
+      path,
+    }),
+  }), [path, session.access_token, session.refresh_token, url])
 
   return (
     <SafeAreaView edges={['bottom']} style={[styles.safeArea, { backgroundColor: theme.colors.background }]}>
@@ -120,11 +147,16 @@ export function WebDashboardScreen({ title, subtitle, path }: WebDashboardScreen
         ) : null}
         <WebView
           ref={webViewRef}
-          source={{ uri: url }}
+          key={`${path}-${session.user.id}-${session.access_token.slice(-12)}`}
+          source={source}
           onLoadEnd={() => setLoading(false)}
           onError={(event) => {
             setLoading(false)
             setError(event.nativeEvent.description || 'The web app could not be reached.')
+          }}
+          onHttpError={(event) => {
+            setLoading(false)
+            setError(`The dashboard could not be opened (HTTP ${event.nativeEvent.statusCode}).`)
           }}
           sharedCookiesEnabled
           thirdPartyCookiesEnabled
