@@ -27,9 +27,9 @@ export const config = {
      * - api routes
      * - _next/static (static files)
      * - _next/image (image optimization)
-     * - favicon.ico
+     * - favicon.ico, the PWA manifest, and the service worker
      * - Any file with an extension (svg, png, jpg, jpeg, gif, webp)
      */
-    '/((?!api|_next/static|_next/image|favicon.ico|[^?]*\\.(?:svg|png|jpg|jpeg|gif|webp)).*)',
+    '/((?!api|_next/static|_next/image|favicon.ico|sw\\.js|manifest\\.webmanifest|[^?]*\\.(?:svg|png|jpg|jpeg|gif|webp)).*)',
   ],
 }

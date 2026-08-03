@@ -12,6 +12,8 @@ import { useRouter } from 'next/navigation'
 import LoadingOverlay from '../../../../../components/ui/LoadingOverlay'
 import Toast from '../../../../../components/ui/Toast'
 import { useToast } from '../../../../../lib/hooks/useToast'
+import { queueOfflineEmployeeSale } from '../../../../../lib/pwa/offlineEmployeeSales'
+import { createClient } from '../../../../../lib/supabase/client'
 import { recordEmployeeTransaction, type EmployeeTransactionFormState } from './actions'
 
 type RecordTransactionAction = (
@@ -79,6 +81,7 @@ type Props = {
   stayOnSuccess?: boolean
   submitLabel?: string
   pendingMessage?: string
+  offlineQueueEnabled?: boolean
 }
 
 type PreviewPricing = {
@@ -341,6 +344,7 @@ export default function RecordEmployeeTransactionForm({
   stayOnSuccess = false,
   submitLabel = 'Record transaction',
   pendingMessage = 'Recording transaction...',
+  offlineQueueEnabled = false,
 }: Props) {
   const router = useRouter()
   const previousPending = useRef(false)
@@ -350,6 +354,8 @@ export default function RecordEmployeeTransactionForm({
   const [customerName, setCustomerName] = useState('')
   const [customerPhone, setCustomerPhone] = useState('')
   const [mpesaRefCode, setMpesaRefCode] = useState('')
+  const [isOfflineSubmitting, setIsOfflineSubmitting] = useState(false)
+  const [offlineDeductedByOption, setOfflineDeductedByOption] = useState<Map<string, number>>(() => new Map())
   const [state, action, isPending] = useActionState<EmployeeTransactionFormState, FormData>(recordTransactionAction, {
     success: false,
     error: null,
@@ -365,7 +371,9 @@ export default function RecordEmployeeTransactionForm({
     const quantity = Number(row.quantity)
     const baseQuantity = getBaseQuantity(quantity, selectedUom)
     const pricing = product && baseQuantity ? resolvePreviewPricing(product, baseQuantity, selectedUom?.id ?? null) : null
-    const availableBaseQuantity = product ? product.baseQuantityOnHand - product.baseQuantityReserved : 0
+    const availableBaseQuantity = product
+      ? product.baseQuantityOnHand - product.baseQuantityReserved - (offlineDeductedByOption.get(product.optionId) ?? 0)
+      : 0
 
     return {
       row,
@@ -410,6 +418,7 @@ export default function RecordEmployeeTransactionForm({
   const hasValidLine = lineSummaries.some((summary) => summary.product && summary.selectedUom && summary.quantity > 0)
   const canSubmit =
     !isPending &&
+    !isOfflineSubmitting &&
     products.length > 0 &&
     hasValidLine &&
     !invalidPriceSummary &&
@@ -450,6 +459,12 @@ export default function RecordEmployeeTransactionForm({
       }
     }
   }, [isPending, products, redirectPath, router, state.error, state.message, state.success, stayOnSuccess, toast])
+
+  useEffect(() => {
+    const refreshAfterSync = () => router.refresh()
+    window.addEventListener('retivox:offline-sales-synced', refreshAfterSync)
+    return () => window.removeEventListener('retivox:offline-sales-synced', refreshAfterSync)
+  }, [router])
 
   /**
    * Updates one line item draft field.
@@ -512,26 +527,74 @@ export default function RecordEmployeeTransactionForm({
       return
     }
 
+    const saleItems = rows
+      .map((row) => ({
+        row,
+        product: products.find((product) => product.optionId === row.optionId) ?? null,
+      }))
+      .filter(({ row, product }) => product && row.uomId && Number(row.quantity) > 0)
+      .map(({ row, product }) => ({
+        productId: product?.productId ?? '',
+        uomId: row.uomId,
+        quantity: Number(row.quantity),
+        recoveryItemId: product?.stockSource === 'recovery' ? product.recoveryItemId : null,
+      }))
+
+    if (offlineQueueEnabled && !navigator.onLine) {
+      setIsOfflineSubmitting(true)
+
+      void (async () => {
+        try {
+          const { data } = await createClient().auth.getSession()
+          const userId = data.session?.user.id
+
+          if (!userId) {
+            toast.error('Connect once to restore your secure Retivox session before recording offline sales.')
+            return
+          }
+
+          await queueOfflineEmployeeSale({
+            userId,
+            items: saleItems,
+            paymentMethod,
+            discountAmount: safeDiscountValue,
+            customerName: customerName.trim() || null,
+            customerPhone: customerPhone.trim() || null,
+            mpesaRefCode: mpesaRefCode.trim() || null,
+            recordedAt: new Date().toISOString(),
+          })
+
+          setOfflineDeductedByOption((current) => {
+            const next = new Map(current)
+            lineSummaries.forEach((summary) => {
+              if (summary.product && summary.baseQuantity) {
+                next.set(summary.product.optionId, (next.get(summary.product.optionId) ?? 0) + summary.baseQuantity)
+              }
+            })
+            return next
+          })
+          setRows(getInitialLineItems(products, `-offline-${Date.now()}`))
+          setDiscountAmount('0')
+          setCustomerName('')
+          setCustomerPhone('')
+          setMpesaRefCode('')
+          toast.success('Sale saved on this device. It will sync automatically when you are online.')
+        } catch {
+          toast.error('Unable to save this sale offline. Check your device storage and try again.')
+        } finally {
+          setIsOfflineSubmitting(false)
+        }
+      })()
+      return
+    }
+
     const formData = new FormData()
     if (branchId) {
       formData.set('branchId', branchId)
     }
     formData.set(
       'itemsJson',
-      JSON.stringify(
-        rows
-          .map((row) => ({
-            row,
-            product: products.find((product) => product.optionId === row.optionId) ?? null,
-          }))
-          .filter(({ row, product }) => product && row.uomId && Number(row.quantity) > 0)
-          .map(({ row, product }) => ({
-            productId: product?.productId,
-            uomId: row.uomId,
-            quantity: Number(row.quantity),
-            recoveryItemId: product?.recoveryItemId ?? null,
-          }))
-      )
+      JSON.stringify(saleItems)
     )
     formData.set('paymentMethod', paymentMethod)
     formData.set('discountAmount', discountAmount)
@@ -546,7 +609,7 @@ export default function RecordEmployeeTransactionForm({
 
   return (
     <>
-      {isPending && <LoadingOverlay message={pendingMessage} />}
+      {(isPending || isOfflineSubmitting) && <LoadingOverlay message={isOfflineSubmitting ? 'Saving sale offline...' : pendingMessage} />}
       {toastState && (
         <Toast
           message={toastState.message}
@@ -584,7 +647,7 @@ export default function RecordEmployeeTransactionForm({
             const baseQuantity = getBaseQuantity(quantity, selectedUom)
             const previewPricing = selectedProduct && baseQuantity ? resolvePreviewPricing(selectedProduct, baseQuantity, selectedUom?.id ?? null) : null
             const availableBaseQuantity = selectedProduct
-              ? selectedProduct.baseQuantityOnHand - selectedProduct.baseQuantityReserved
+              ? selectedProduct.baseQuantityOnHand - selectedProduct.baseQuantityReserved - (offlineDeductedByOption.get(selectedProduct.optionId) ?? 0)
               : 0
             const requestedBaseQuantity = selectedProduct
               ? requestedBaseQuantityByOption.get(selectedProduct.optionId) ?? 0
@@ -926,13 +989,13 @@ export default function RecordEmployeeTransactionForm({
           disabled={!canSubmit}
           style={{ padding: '10px 20px', borderRadius: 8, opacity: !canSubmit ? 0.75 : 1 }}
         >
-          {isPending ? (
+          {isPending || isOfflineSubmitting ? (
             <span className="flex items-center justify-center gap-2">
               <svg className="h-4 w-4 animate-spin text-white" fill="none" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
               </svg>
-              {pendingMessage}
+              {isOfflineSubmitting ? 'Saving sale offline...' : pendingMessage}
             </span>
           ) : (
             submitLabel

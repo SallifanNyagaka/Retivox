@@ -8,6 +8,7 @@
 import type { Metadata, Viewport } from 'next'
 import type { ReactNode } from 'react'
 import NavigationPendingProvider from '../components/navigation/NavigationPendingProvider'
+import PwaRuntime from '../components/pwa/PwaRuntime'
 import './globals.css'
 
 export const metadata: Metadata = {
@@ -20,6 +21,13 @@ export const metadata: Metadata = {
   authors: [{ name: 'Retivox' }],
   creator: 'Retivox',
   metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'),
+  manifest: '/manifest.webmanifest',
+  applicationName: 'Retivox',
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: 'default',
+    title: 'Retivox',
+  },
 }
 
 export const viewport: Viewport = {
@@ -40,7 +48,10 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           color: 'var(--color-text-primary)',
         }}
       >
-        <NavigationPendingProvider>{children}</NavigationPendingProvider>
+        <NavigationPendingProvider>
+          <PwaRuntime />
+          {children}
+        </NavigationPendingProvider>
       </body>
     </html>
   )

@@ -121,7 +121,7 @@ export default async function EmployeeNewTransactionPage() {
               </p>
             </div>
           ) : (
-            <RecordEmployeeTransactionForm products={products} currency={currency} />
+            <RecordEmployeeTransactionForm products={products} currency={currency} offlineQueueEnabled />
           )}
         </Card>
       </div>

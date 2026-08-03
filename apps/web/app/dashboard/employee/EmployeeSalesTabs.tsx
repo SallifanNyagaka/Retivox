@@ -50,7 +50,7 @@ export default function EmployeeSalesTabs({ normalProducts, damagedProducts, cur
       )}
 
       {selectedProducts.length > 0 ? (
-        <RecordEmployeeTransactionForm key={activeTab} products={selectedProducts} currency={currency} />
+        <RecordEmployeeTransactionForm key={activeTab} products={selectedProducts} currency={currency} offlineQueueEnabled />
       ) : (
         <div style={{ padding: '28px 16px', textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 13 }}>
           No {activeTab === 'damaged' ? 'damaged' : 'normal'} stock is currently available to sell.
