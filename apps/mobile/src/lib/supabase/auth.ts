@@ -350,19 +350,21 @@ async function saveOfflineAuthCache(email: string, profile: UserProfile): Promis
     updatedAt: new Date().toISOString(),
   } satisfies OfflineAuthCache)
 
-  try {
-    await SecureStore.setItemAsync(OFFLINE_AUTH_CACHE_KEY, serialized)
-  } catch (error) {
-    handleError('saveOfflineAuthCache', error)
-  }
-
-  // This contains profile data only, never a password or access token. It is
-  // a resilient fallback for Android devices where SecureStore is temporarily
-  // unavailable during cold launch.
+  // AsyncStorage is the primary cold-start cache. Unlike Android Keystore,
+  // it is available immediately while the device is offline or has just
+  // restarted. The value contains only a profile, never credentials.
   try {
     await AsyncStorage.setItem(DEVICE_PROFILE_CACHE_KEY, serialized)
   } catch (error) {
-    handleError('saveOfflineAuthCache.fallback', error)
+    handleError('saveOfflineAuthCache.deviceProfile', error)
+  }
+
+  // Keep a second encrypted copy when it is available, but never let a slow
+  // Keystore operation prevent the device profile from being cached.
+  try {
+    await withTimeout(SecureStore.setItemAsync(OFFLINE_AUTH_CACHE_KEY, serialized), 2000, 'Secure profile cache timed out.')
+  } catch (error) {
+    handleError('saveOfflineAuthCache.secureProfile', error)
   }
 }
 
@@ -372,16 +374,25 @@ async function saveOfflineAuthCache(email: string, profile: UserProfile): Promis
  * @returns Cache row or null.
  */
 async function loadOfflineAuthCache(): Promise<OfflineAuthCache | null> {
+  // Read the non-sensitive profile cache first. On some Android devices the
+  // Keystore is not ready during an offline cold launch, which previously
+  // made the app incorrectly fall back to the login screen.
   try {
-    const secureValue = await SecureStore.getItemAsync(OFFLINE_AUTH_CACHE_KEY)
-    const secureCache = parseOfflineAuthCache(secureValue)
-    if (secureCache) return secureCache
-
-    return parseOfflineAuthCache(await AsyncStorage.getItem(DEVICE_PROFILE_CACHE_KEY))
+    const deviceCache = parseOfflineAuthCache(await AsyncStorage.getItem(DEVICE_PROFILE_CACHE_KEY))
+    if (deviceCache) return deviceCache
   } catch (error) {
-    handleError('loadOfflineAuthCache', error)
-    return null
+    handleError('loadOfflineAuthCache.deviceProfile', error)
   }
+
+  try {
+    return parseOfflineAuthCache(
+      await withTimeout(SecureStore.getItemAsync(OFFLINE_AUTH_CACHE_KEY), 2000, 'Secure profile cache timed out.'),
+    )
+  } catch (error) {
+    handleError('loadOfflineAuthCache.secureProfile', error)
+  }
+
+  return null
 }
 
 async function clearOfflineAuthCache(): Promise<void> {

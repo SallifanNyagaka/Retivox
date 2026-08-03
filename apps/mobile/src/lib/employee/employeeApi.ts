@@ -241,9 +241,11 @@ function mapPricingOptions(value: unknown, saleUomIds: Set<string>): PricingOpti
 export function mapEmployeeProductOption(row: EmployeeAvailableProductRow): EmployeeProductOption {
   const uomOptions = mapUomOptions(row.uom_options)
   const saleUomIds = new Set(uomOptions.map((option) => option.id))
-  const recoveryItemId = row.recovery_item_id ?? null
-
-  const stockSource: StockSource = row.stock_source === 'recovery' || Boolean(recoveryItemId) ? 'recovery' : 'normal'
+  // The server explicitly marks damaged rows. Never infer their source from
+  // an incidental recovery id, otherwise a stale RPC/cache row can make a
+  // normal product use the damaged-stock price.
+  const stockSource: StockSource = row.stock_source === 'recovery' ? 'recovery' : 'normal'
+  const recoveryItemId = stockSource === 'recovery' ? row.recovery_item_id ?? null : null
 
   return {
     optionId: recoveryItemId ? `recovery:${recoveryItemId}` : `normal:${row.product_id}`,
@@ -500,8 +502,34 @@ export async function recordEmployeeTransaction(
 
   const recordedAt = new Date().toISOString()
   const localId = createOfflineTransactionId()
+  const saleItems = payload.items.map((item) => {
+    const product = context.products.find((option) => (
+      option.productId === item.productId &&
+      (item.recoveryItemId
+        ? option.stockSource === 'recovery' && option.recoveryItemId === item.recoveryItemId
+        : option.stockSource === 'normal')
+    ))
+
+    if (!product) {
+      throw new Error('The selected stock type changed. Refresh the sale screen before recording this sale.')
+    }
+
+    return {
+      ...item,
+      // A normal line must always be sent without a recovery id. This is the
+      // boundary that prevents recovery pricing or recovery deductions from
+      // being used for ordinary stock.
+      recoveryItemId: product.stockSource === 'recovery' ? product.recoveryItemId : null,
+      product,
+    }
+  })
   const args = {
-    p_items: payload.items,
+    p_items: saleItems.map((item) => ({
+      productId: item.productId,
+      uomId: item.uomId,
+      quantity: item.quantity,
+      recoveryItemId: item.recoveryItemId,
+    })),
     p_payment_method: payload.paymentMethod,
     p_discount_amount: payload.discountAmount,
     p_customer_name: payload.customerName || null,
@@ -545,11 +573,8 @@ export async function recordEmployeeTransaction(
     }
   }
 
-  const lines = payload.items.map((item) => {
-    const product = context.products.find((option) => (
-      option.productId === item.productId &&
-      (item.recoveryItemId ? option.recoveryItemId === item.recoveryItemId : option.stockSource === 'normal')
-    ))
+  const lines = saleItems.map((item) => {
+    const product = item.product
     const selectedUom = product?.uomOptions.find((option) => option.id === item.uomId) ?? getDefaultSaleUom(product ?? null)
     const baseQuantity = getBaseQuantity(item.quantity, selectedUom ?? null)
     const pricing = product && baseQuantity ? resolvePreviewPricing(product, baseQuantity, selectedUom?.id ?? null) : null

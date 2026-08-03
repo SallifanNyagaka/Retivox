@@ -218,7 +218,7 @@ export default function EmployeePOSScreen() {
           productId: item.product.productId,
           uomId: item.uomId,
           quantity: Number(item.quantity),
-          recoveryItemId: item.product.recoveryItemId,
+          recoveryItemId: item.product.stockSource === 'recovery' ? item.product.recoveryItemId : null,
         })),
         paymentMethod,
         discountAmount: discountValue,
