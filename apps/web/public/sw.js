@@ -2,7 +2,7 @@
 const VERSION = 'retivox-pwa-v1'
 const STATIC_CACHE = `${VERSION}-static`
 const PAGE_CACHE = `${VERSION}-pages`
-const STATIC_URLS = ['/', '/offline', '/manifest.webmanifest', '/retivox-icon.svg']
+const STATIC_URLS = ['/', '/login', '/offline', '/manifest.webmanifest', '/retivox-icon.svg']
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(STATIC_CACHE).then((cache) => cache.addAll(STATIC_URLS)))
@@ -90,6 +90,23 @@ self.addEventListener('fetch', (event) => {
 })
 
 self.addEventListener('message', (event) => {
+  if (event.data?.type === 'CACHE_CURRENT_PAGE' && typeof event.data.url === 'string') {
+    event.waitUntil(
+      cacheNetworkResponse(PAGE_CACHE, new Request(event.data.url, { credentials: 'include' })).catch(() => undefined),
+    )
+    return
+  }
+
+  if (event.data?.type === 'CACHE_STATIC_ASSETS' && Array.isArray(event.data.urls)) {
+    const urls = event.data.urls.filter((url) => typeof url === 'string').slice(0, 100)
+    event.waitUntil(
+      Promise.all(
+        urls.map((url) => cacheNetworkResponse(STATIC_CACHE, new Request(url)).catch(() => undefined)),
+      ),
+    )
+    return
+  }
+
   if (event.data?.type !== 'CLEAR_PRIVATE_PWA_CACHE') {
     return
   }

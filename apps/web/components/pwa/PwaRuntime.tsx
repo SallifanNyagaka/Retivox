@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { syncOfflineEmployeeSales } from '../../lib/pwa/offlineEmployeeSales'
+import { clearTrustedDeviceSession } from '../../lib/pwa/trustedDevice'
 import { createClient } from '../../lib/supabase/client'
 
 const ACTIVE_ACCOUNT_KEY = 'retivox-pwa-active-account'
@@ -23,7 +24,22 @@ export default function PwaRuntime() {
       return
     }
 
-    void navigator.serviceWorker.register('/sw.js')
+    void navigator.serviceWorker.register('/sw.js').then(async (registration) => {
+      const readyRegistration = await navigator.serviceWorker.ready
+      const worker = readyRegistration.active ?? registration.active
+      worker?.postMessage({ type: 'CACHE_CURRENT_PAGE', url: window.location.href })
+      const staticAssets = performance
+        .getEntriesByType('resource')
+        .map((entry) => entry.name)
+        .filter((url) => {
+          const assetUrl = new URL(url)
+          return assetUrl.origin === window.location.origin && assetUrl.pathname.startsWith('/_next/static/')
+        })
+
+      if (staticAssets.length > 0) {
+        worker?.postMessage({ type: 'CACHE_STATIC_ASSETS', urls: staticAssets })
+      }
+    })
   }, [])
 
   useEffect(() => {
@@ -42,6 +58,7 @@ export default function PwaRuntime() {
       if (!userId) {
         if (previousUserId) {
           clearPrivatePageCache()
+          clearTrustedDeviceSession()
           window.localStorage.removeItem(ACTIVE_ACCOUNT_KEY)
         }
         return
@@ -49,6 +66,7 @@ export default function PwaRuntime() {
 
       if (previousUserId && previousUserId !== userId) {
         clearPrivatePageCache()
+        clearTrustedDeviceSession()
       }
       window.localStorage.setItem(ACTIVE_ACCOUNT_KEY, userId)
 

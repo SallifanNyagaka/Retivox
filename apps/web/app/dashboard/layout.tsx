@@ -12,6 +12,7 @@ import { createClient } from '../../lib/supabase/server'
 import { redirect } from 'next/navigation'
 import { Sidebar } from '../../components/dashboard/Sidebar'
 import DashboardThemeProvider from '../../components/dashboard/DashboardThemeProvider'
+import TrustedDeviceSession from '../../components/pwa/TrustedDeviceSession'
 
 function RoleBadge({ role }: { role: string }) {
   const r = (role || 'employee').toLowerCase()
@@ -50,6 +51,7 @@ export default async function DashboardLayout({ children }: { children: ReactNod
     return (
       <DashboardThemeProvider userId={profile.id}>
         <div className="min-h-screen" style={{ backgroundColor: 'var(--color-background)' }}>
+          <TrustedDeviceSession userId={profile.id} role="employee" />
           {children}
         </div>
       </DashboardThemeProvider>
@@ -74,6 +76,7 @@ export default async function DashboardLayout({ children }: { children: ReactNod
         className="flex min-h-screen"
         style={{ backgroundColor: 'var(--color-background)' }}
       >
+      <TrustedDeviceSession userId={profile.id} role={profile.global_role === 'admin' ? 'admin' : 'owner'} />
       {/* Sidebar */}
       <Sidebar
         role={profile.global_role ?? 'employee'}
