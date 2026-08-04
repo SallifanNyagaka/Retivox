@@ -6,9 +6,25 @@ import { clearTrustedDeviceSession } from '../../lib/pwa/trustedDevice'
 import { createClient } from '../../lib/supabase/client'
 
 const ACTIVE_ACCOUNT_KEY = 'retivox-pwa-active-account'
+const PAGE_CACHE = 'retivox-pwa-v2-pages'
 
 function clearPrivatePageCache() {
   navigator.serviceWorker?.controller?.postMessage({ type: 'CLEAR_PRIVATE_PWA_CACHE' })
+}
+
+async function snapshotCurrentTrustedPage() {
+  if (!('caches' in window)) {
+    return
+  }
+
+  const pageMarkup = `<!DOCTYPE html>${document.documentElement.outerHTML}`
+  const cache = await caches.open(PAGE_CACHE)
+  await cache.put(
+    window.location.href,
+    new Response(pageMarkup, {
+      headers: { 'content-type': 'text/html; charset=utf-8' },
+    }),
+  )
 }
 
 /**
@@ -20,6 +36,12 @@ export default function PwaRuntime() {
   const [notice, setNotice] = useState<string | null>(null)
 
   useEffect(() => {
+    // This snapshot is immediate. The worker then refreshes the same page in
+    // the background, so the first authenticated launch is available offline.
+    if (window.localStorage.getItem('retivox-pwa-trusted-device')) {
+      void snapshotCurrentTrustedPage()
+    }
+
     if (!('serviceWorker' in navigator)) {
       return
     }
