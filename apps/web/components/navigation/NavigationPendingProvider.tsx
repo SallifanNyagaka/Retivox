@@ -1,10 +1,11 @@
 'use client'
 /**
- * Global navigation pending indicator for Retivox.
+ * Global PWA activity feedback for Retivox.
  *
- * Next.js loading boundaries render after navigation begins. This client helper
- * starts visual feedback immediately when users click internal links or submit
- * forms, then clears it when the route changes or after a safety timeout.
+ * A single observer covers internal navigation, form submissions, Server
+ * Actions, direct Supabase mutations, and App Router refresh requests. Local
+ * forms may still render their own detailed overlay; this indicator ensures a
+ * user always receives feedback when a request takes longer than a tap.
  */
 
 import { useEffect, useRef, useState, type ReactNode } from 'react'
@@ -14,12 +15,16 @@ type NavigationPendingProviderProps = {
   children: ReactNode
 }
 
-/**
- * Returns whether an anchor points to an internal Retivox route.
- *
- * @param anchor - Clicked anchor.
- * @returns Whether navigation should show pending feedback.
- */
+type Activity = {
+  id: number
+  label: string
+}
+
+type ActivityRecord = Activity & {
+  timeout: number
+}
+
+/** Returns whether an anchor points to an internal Retivox route. */
 function isInternalAnchor(anchor: HTMLAnchorElement): boolean {
   if (!anchor.href || anchor.target || anchor.hasAttribute('download')) {
     return false
@@ -29,44 +34,94 @@ function isInternalAnchor(anchor: HTMLAnchorElement): boolean {
   return url.origin === window.location.origin && `${url.pathname}${url.search}` !== `${window.location.pathname}${window.location.search}`
 }
 
+/** Identifies browser requests that represent a user-visible operation. */
+function getActivityLabel(input: RequestInfo | URL, init?: RequestInit): string | null {
+  const request = input instanceof Request ? input : null
+  const requestUrl = request?.url ?? String(input)
+  const method = (init?.method ?? request?.method ?? 'GET').toUpperCase()
+
+  try {
+    const url = new URL(requestUrl, window.location.origin)
+
+    if (url.origin === window.location.origin) {
+      if (method !== 'GET') {
+        return 'Saving changes...'
+      }
+
+      if (url.searchParams.has('_rsc')) {
+        return 'Loading page...'
+      }
+    }
+
+    // Supabase writes and RPC calls power the direct client-side controls.
+    if (url.hostname.endsWith('.supabase.co') && method !== 'GET') {
+      return 'Saving changes...'
+    }
+  } catch {
+    // A malformed URL should never block the original request.
+  }
+
+  return null
+}
+
 /**
- * Provides global pending feedback around the app.
- *
- * @param props - Provider props.
- * @returns Children plus pending UI.
+ * Provides a visible, non-blocking activity indicator for every meaningful
+ * PWA operation. Fast requests settle before users notice the indicator.
  */
 export default function NavigationPendingProvider({ children }: NavigationPendingProviderProps) {
   const pathname = usePathname()
-  const [pending, setPending] = useState(false)
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [activity, setActivity] = useState<Activity | null>(null)
+  const activitiesRef = useRef(new Map<number, ActivityRecord>())
+  const nextActivityIdRef = useRef(0)
+  const routeActivityIdRef = useRef<number | null>(null)
 
-  useEffect(() => {
-    if (!pending) return
+  const refreshVisibleActivity = () => {
+    const currentActivity = activitiesRef.current.values().next().value as ActivityRecord | undefined
+    setActivity(currentActivity ? { id: currentActivity.id, label: currentActivity.label } : null)
+  }
 
-    setPending(false)
-  }, [pathname, pending])
+  const finishActivity = (id: number) => {
+    const record = activitiesRef.current.get(id)
 
-  useEffect(() => {
-    document.documentElement.classList.toggle('retivox-route-pending', pending)
-
-    if (!pending) {
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current)
-        timeoutRef.current = null
-      }
+    if (!record) {
       return
     }
 
-    timeoutRef.current = setTimeout(() => setPending(false), 8000)
+    window.clearTimeout(record.timeout)
+    activitiesRef.current.delete(id)
+
+    if (routeActivityIdRef.current === id) {
+      routeActivityIdRef.current = null
+    }
+
+    refreshVisibleActivity()
+  }
+
+  const beginActivity = (label: string, timeoutMs = 12000) => {
+    const id = ++nextActivityIdRef.current
+    const timeout = window.setTimeout(() => finishActivity(id), timeoutMs)
+
+    activitiesRef.current.set(id, { id, label, timeout })
+    refreshVisibleActivity()
+
+    return () => finishActivity(id)
+  }
+
+  useEffect(() => {
+    const routeActivityId = routeActivityIdRef.current
+
+    if (routeActivityId !== null) {
+      finishActivity(routeActivityId)
+    }
+  }, [pathname])
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('retivox-route-pending', activity !== null)
 
     return () => {
       document.documentElement.classList.remove('retivox-route-pending')
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current)
-        timeoutRef.current = null
-      }
     }
-  }, [pending])
+  }, [activity])
 
   useEffect(() => {
     const handleClick = (event: MouseEvent) => {
@@ -78,37 +133,64 @@ export default function NavigationPendingProvider({ children }: NavigationPendin
       const anchor = target?.closest('a')
 
       if (anchor instanceof HTMLAnchorElement && isInternalAnchor(anchor)) {
-        setPending(true)
+        const stopActivity = beginActivity('Loading page...')
+        routeActivityIdRef.current = nextActivityIdRef.current
+
+        // A failed navigation must never leave the PWA visually busy forever.
+        window.setTimeout(stopActivity, 10000)
       }
     }
 
     const handleSubmit = (event: SubmitEvent) => {
-      if (event.defaultPrevented) {
+      if (event.defaultPrevented || !(event.target instanceof HTMLFormElement)) {
         return
       }
 
-      const form = event.target
-      if (form instanceof HTMLFormElement) {
-        setPending(true)
+      // The fetch observer below takes over for Server Actions. This short
+      // bridge makes a form tap feel responsive even before its request begins.
+      const stopActivity = beginActivity('Processing request...', 1000)
+      window.setTimeout(stopActivity, 450)
+    }
+
+    const originalFetch = window.fetch.bind(window)
+    const wrappedFetch: typeof window.fetch = async (input, init) => {
+      const label = getActivityLabel(input, init)
+      const stopActivity = label ? beginActivity(label) : null
+
+      try {
+        return await originalFetch(input, init)
+      } finally {
+        stopActivity?.()
       }
     }
 
+    window.fetch = wrappedFetch
     document.addEventListener('click', handleClick, true)
     document.addEventListener('submit', handleSubmit, true)
 
     return () => {
       document.removeEventListener('click', handleClick, true)
       document.removeEventListener('submit', handleSubmit, true)
+
+      if (window.fetch === wrappedFetch) {
+        window.fetch = originalFetch
+      }
+
+      activitiesRef.current.forEach((record) => window.clearTimeout(record.timeout))
+      activitiesRef.current.clear()
     }
   }, [])
 
   return (
     <>
       {children}
-      {pending ? (
-        <div className="retivox-navigation-loader" role="status" aria-live="polite">
+      {activity ? (
+        <div className="retivox-navigation-loader" role="status" aria-live="polite" aria-label={activity.label}>
           <span className="retivox-navigation-loader-bar" />
-          <span className="retivox-navigation-loader-pill">Loading...</span>
+          <span className="retivox-navigation-loader-pill">
+            <span className="retivox-navigation-loader-spinner" aria-hidden="true" />
+            {activity.label}
+          </span>
         </div>
       ) : null}
     </>
