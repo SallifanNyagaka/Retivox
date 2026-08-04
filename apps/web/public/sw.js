@@ -1,5 +1,5 @@
 /* Retivox PWA service worker. Private dashboard pages are cleared when accounts change. */
-const VERSION = 'retivox-pwa-v1'
+const VERSION = 'retivox-pwa-v2'
 const STATIC_CACHE = `${VERSION}-static`
 const PAGE_CACHE = `${VERSION}-pages`
 const STATIC_URLS = ['/', '/login', '/offline', '/manifest.webmanifest', '/retivox-icon.svg']

@@ -243,7 +243,6 @@ export default function LoginPage() {
     success: false,
   })
   const [showPassword, setShowPassword] = useState(false)
-  const [restoringTrustedSession, setRestoringTrustedSession] = useState(true)
 
   // Track field values to hide icons when text is present
   const [emailValue, setEmailValue] = useState('')
@@ -256,66 +255,46 @@ export default function LoginPage() {
   const currentYear = new Date().getFullYear()
 
   useEffect(() => {
-    let cancelled = false
-
-    const restoreTrustedSession = async () => {
+    const restoreTrustedSession = () => {
       const trustedSession = getTrustedDeviceSession()
 
       if (!trustedSession) {
-        if (!cancelled) setRestoringTrustedSession(false)
         return
       }
 
-      try {
-        const sessionResult = await Promise.race([
-          createClient().auth.getSession(),
-          new Promise<never>((_, reject) => {
-            window.setTimeout(() => reject(new Error('Session check timed out')), 1500)
-          }),
-        ])
-        const { data } = sessionResult
+      // A trusted device can immediately reopen its already-cached dashboard
+      // without waiting on a network or token refresh.
+      if (!navigator.onLine) {
+        router.replace(trustedSession.dashboardPath)
+        return
+      }
 
+      void createClient().auth.getSession().then(({ data }) => {
         if (data.session?.user.id === trustedSession.userId) {
           router.replace(trustedSession.dashboardPath)
           return
         }
 
-        // Offline launches cannot verify a session remotely. The route itself
-        // is served only from this device's account-scoped PWA cache.
+        // The connection may disappear during the local session read. In that
+        // case the trusted cached dashboard is still safe to restore.
         if (!navigator.onLine) {
           router.replace(trustedSession.dashboardPath)
           return
         }
 
         clearTrustedDeviceSession()
-      } catch {
+      }).catch(() => {
         if (!navigator.onLine) {
           router.replace(trustedSession.dashboardPath)
           return
         }
 
         clearTrustedDeviceSession()
-      }
-
-      if (!cancelled) setRestoringTrustedSession(false)
+      })
     }
 
-    void restoreTrustedSession()
-    return () => {
-      cancelled = true
-    }
+    restoreTrustedSession()
   }, [router])
-
-  if (restoringTrustedSession) {
-    return (
-      <div className="flex min-h-screen w-full items-center justify-center" style={{ backgroundColor: 'var(--color-surface)' }}>
-        <div className="flex flex-col items-center gap-3 text-center">
-          <span className="h-7 w-7 animate-spin rounded-full border-2 border-transparent" style={{ borderTopColor: 'var(--color-primary)', borderRightColor: 'var(--color-primary)' }} />
-          <p style={{ color: 'var(--color-text-muted)', fontSize: 14, margin: 0 }}>Opening Retivox...</p>
-        </div>
-      </div>
-    )
-  }
 
   return (
     <div className="min-h-screen w-full flex flex-col lg:flex-row">

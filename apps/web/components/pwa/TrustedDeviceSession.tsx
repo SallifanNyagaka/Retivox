@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect } from 'react'
+import { useLayoutEffect } from 'react'
 import { saveTrustedDeviceSession, type TrustedDashboardRole } from '../../lib/pwa/trustedDevice'
 
 type Props = {
@@ -14,7 +14,7 @@ type Props = {
  * without ever storing a password locally.
  */
 export default function TrustedDeviceSession({ userId, role }: Props) {
-  useEffect(() => {
+  useLayoutEffect(() => {
     saveTrustedDeviceSession(userId, role)
   }, [role, userId])
 

@@ -27,7 +27,6 @@ export default function PwaRuntime() {
     void navigator.serviceWorker.register('/sw.js').then(async (registration) => {
       const readyRegistration = await navigator.serviceWorker.ready
       const worker = readyRegistration.active ?? registration.active
-      worker?.postMessage({ type: 'CACHE_CURRENT_PAGE', url: window.location.href })
       const staticAssets = performance
         .getEntriesByType('resource')
         .map((entry) => entry.name)
@@ -39,6 +38,7 @@ export default function PwaRuntime() {
       if (staticAssets.length > 0) {
         worker?.postMessage({ type: 'CACHE_STATIC_ASSETS', urls: staticAssets })
       }
+      worker?.postMessage({ type: 'CACHE_CURRENT_PAGE', url: window.location.href })
     })
   }, [])
 
