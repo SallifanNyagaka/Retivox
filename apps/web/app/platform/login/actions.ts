@@ -1,11 +1,13 @@
 'use server'
 
+import { timingSafeEqual } from 'node:crypto'
 import { redirect } from 'next/navigation'
 import { z } from 'zod'
 import {
   bootstrapPlatformUserIfNeeded,
   createPlatformSession,
   hashPlatformPassword,
+  isPlatformLoginRateLimited,
   recordLoginAttempt,
 } from '../../../lib/platform/auth'
 import { createServiceRoleClient } from '../../../lib/supabase/admin'
@@ -38,8 +40,12 @@ export async function loginPlatformUser(_prevState: PlatformLoginState, formData
   const { email, password } = validation.data
 
   try {
+    if (await isPlatformLoginRateLimited(email)) {
+      return { success: false, error: 'Invalid platform email or password' }
+    }
+
     const serviceClient = createServiceRoleClient()
-    let { data: user, error } = await serviceClient
+    const { data: platformUser, error } = await serviceClient
       .from('platform_users')
       .select('id, name, email, role, password_salt, password_hash, is_active')
       .eq('email', email)
@@ -49,6 +55,7 @@ export async function loginPlatformUser(_prevState: PlatformLoginState, formData
       throw new Error(error.message)
     }
 
+    let user = platformUser
     if (!user) {
       user = await bootstrapPlatformUserIfNeeded(email, password)
     }
@@ -63,9 +70,13 @@ export async function loginPlatformUser(_prevState: PlatformLoginState, formData
       return { success: false, error: 'Invalid platform email or password' }
     }
 
-    const passwordHash = hashPlatformPassword(password, user.password_salt)
+    const passwordHash = await hashPlatformPassword(password, user.password_salt)
 
-    if (passwordHash !== user.password_hash) {
+    const candidateHash = Buffer.from(passwordHash, 'hex')
+    const storedHash = Buffer.from(user.password_hash, 'hex')
+    const passwordMatches = candidateHash.length === storedHash.length && timingSafeEqual(candidateHash, storedHash)
+
+    if (!passwordMatches) {
       await recordLoginAttempt({
         email,
         platformUserId: user.id,

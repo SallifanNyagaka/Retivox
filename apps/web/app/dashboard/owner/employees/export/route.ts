@@ -26,6 +26,8 @@ type EmployeeTransactionCountRow = {
   count: number
 }
 
+const MAX_EXPORT_ROWS = 1000
+
 /**
  * Handles employee spreadsheet downloads.
  */
@@ -47,17 +49,19 @@ export async function GET(request: Request) {
     const [usersResponse, branchesResponse, rolesResponse, countsResponse] = await Promise.all([
       supabase
         .from('users')
-        .select('id, name, email, phone, is_active, created_at')
+        .select('id, name, email, phone, is_active, created_at', { count: 'exact' })
         .eq('business_id', businessId)
         .eq('global_role', 'employee')
         .is('deleted_at', null)
-        .order('created_at', { ascending: true }),
-      supabase.from('branches').select('id, name').eq('business_id', businessId).is('deleted_at', null),
+        .order('created_at', { ascending: true })
+        .limit(MAX_EXPORT_ROWS + 1),
+      supabase.from('branches').select('id, name', { count: 'exact' }).eq('business_id', businessId).is('deleted_at', null).limit(MAX_EXPORT_ROWS + 1),
       supabase
         .from('user_branch_roles')
-        .select('user_id, branch_id')
+        .select('user_id, branch_id', { count: 'exact' })
         .eq('business_id', businessId)
-        .eq('role', 'employee'),
+        .eq('role', 'employee')
+        .limit(MAX_EXPORT_ROWS + 1),
       supabase.rpc('owner_employee_transaction_counts'),
     ])
 
@@ -65,6 +69,12 @@ export async function GET(request: Request) {
     if (branchesResponse.error) throw branchesResponse.error
     if (rolesResponse.error) throw rolesResponse.error
     if (countsResponse.error) throw countsResponse.error
+    if (
+      [usersResponse.count, branchesResponse.count, rolesResponse.count].some((count) => (count ?? 0) > MAX_EXPORT_ROWS) ||
+      (countsResponse.data?.length ?? 0) > MAX_EXPORT_ROWS
+    ) {
+      return new Response(`Refine the filters to export no more than ${MAX_EXPORT_ROWS} records.`, { status: 413 })
+    }
 
     const branchMap = new Map(((branchesResponse.data ?? []) as Array<{ id: string; name: string }>).map((branch) => [branch.id, branch.name]))
     const roleMap = new Map(((rolesResponse.data ?? []) as Array<{ user_id: string; branch_id: string }>).map((role) => [role.user_id, role.branch_id]))

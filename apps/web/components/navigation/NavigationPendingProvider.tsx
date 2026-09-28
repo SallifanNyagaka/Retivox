@@ -8,7 +8,7 @@
  * user always receives feedback when a request takes longer than a tap.
  */
 
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { usePathname } from 'next/navigation'
 
 type NavigationPendingProviderProps = {
@@ -22,6 +22,7 @@ type Activity = {
 
 type ActivityRecord = Activity & {
   timeout: number
+  showTimeout: number
 }
 
 /** Returns whether an anchor points to an internal Retivox route. */
@@ -31,7 +32,7 @@ function isInternalAnchor(anchor: HTMLAnchorElement): boolean {
   }
 
   const url = new URL(anchor.href)
-  return url.origin === window.location.origin && `${url.pathname}${url.search}` !== `${window.location.pathname}${window.location.search}`
+  return url.origin === window.location.origin && url.pathname !== window.location.pathname
 }
 
 /** Identifies browser requests that represent a user-visible operation. */
@@ -46,10 +47,6 @@ function getActivityLabel(input: RequestInfo | URL, init?: RequestInit): string 
     if (url.origin === window.location.origin) {
       if (method !== 'GET') {
         return 'Saving changes...'
-      }
-
-      if (url.searchParams.has('_rsc')) {
-        return 'Loading page...'
       }
     }
 
@@ -75,12 +72,12 @@ export default function NavigationPendingProvider({ children }: NavigationPendin
   const nextActivityIdRef = useRef(0)
   const routeActivityIdRef = useRef<number | null>(null)
 
-  const refreshVisibleActivity = () => {
+  const refreshVisibleActivity = useCallback(() => {
     const currentActivity = activitiesRef.current.values().next().value as ActivityRecord | undefined
     setActivity(currentActivity ? { id: currentActivity.id, label: currentActivity.label } : null)
-  }
+  }, [])
 
-  const finishActivity = (id: number) => {
+  const finishActivity = useCallback((id: number) => {
     const record = activitiesRef.current.get(id)
 
     if (!record) {
@@ -88,6 +85,7 @@ export default function NavigationPendingProvider({ children }: NavigationPendin
     }
 
     window.clearTimeout(record.timeout)
+    window.clearTimeout(record.showTimeout)
     activitiesRef.current.delete(id)
 
     if (routeActivityIdRef.current === id) {
@@ -95,17 +93,21 @@ export default function NavigationPendingProvider({ children }: NavigationPendin
     }
 
     refreshVisibleActivity()
-  }
+  }, [refreshVisibleActivity])
 
-  const beginActivity = (label: string, timeoutMs = 12000) => {
+  const beginActivity = useCallback((label: string, timeoutMs = 12000) => {
     const id = ++nextActivityIdRef.current
     const timeout = window.setTimeout(() => finishActivity(id), timeoutMs)
+    const showTimeout = window.setTimeout(() => {
+      if (activitiesRef.current.has(id)) {
+        refreshVisibleActivity()
+      }
+    }, 200)
 
-    activitiesRef.current.set(id, { id, label, timeout })
-    refreshVisibleActivity()
+    activitiesRef.current.set(id, { id, label, timeout, showTimeout })
 
     return () => finishActivity(id)
-  }
+  }, [finishActivity, refreshVisibleActivity])
 
   useEffect(() => {
     const routeActivityId = routeActivityIdRef.current
@@ -113,7 +115,7 @@ export default function NavigationPendingProvider({ children }: NavigationPendin
     if (routeActivityId !== null) {
       finishActivity(routeActivityId)
     }
-  }, [pathname])
+  }, [finishActivity, pathname])
 
   useEffect(() => {
     document.documentElement.classList.toggle('retivox-route-pending', activity !== null)
@@ -124,6 +126,7 @@ export default function NavigationPendingProvider({ children }: NavigationPendin
   }, [activity])
 
   useEffect(() => {
+    const activeActivities = activitiesRef.current
     const handleClick = (event: MouseEvent) => {
       if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
         return
@@ -176,10 +179,13 @@ export default function NavigationPendingProvider({ children }: NavigationPendin
         window.fetch = originalFetch
       }
 
-      activitiesRef.current.forEach((record) => window.clearTimeout(record.timeout))
-      activitiesRef.current.clear()
+      activeActivities.forEach((record) => {
+        window.clearTimeout(record.timeout)
+        window.clearTimeout(record.showTimeout)
+      })
+      activeActivities.clear()
     }
-  }, [])
+  }, [beginActivity])
 
   return (
     <>

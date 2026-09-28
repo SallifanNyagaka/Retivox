@@ -69,6 +69,8 @@ type UnitExportLookupRow = {
   conversion_factor: string | number
 }
 
+const MAX_EXPORT_ROWS = 1000
+
 /**
  * Returns a unique, sorted dropdown list with useful defaults first.
  */
@@ -118,17 +120,22 @@ export async function GET(request: Request) {
     const [branchesResponse, unitsResponse] = await Promise.all([
       supabase
         .from('branches')
-        .select('id, name')
-        .eq('business_id', businessId),
+        .select('id, name', { count: 'exact' })
+        .eq('business_id', businessId)
+        .limit(MAX_EXPORT_ROWS + 1),
       supabase
         .from('units_of_measure')
-        .select('name, abbreviation, conversion_factor')
+        .select('name, abbreviation, conversion_factor', { count: 'exact' })
         .eq('business_id', businessId)
-        .eq('is_active', true),
+        .eq('is_active', true)
+        .limit(MAX_EXPORT_ROWS + 1),
     ])
 
     if (branchesResponse.error) throw branchesResponse.error
     if (unitsResponse.error) throw unitsResponse.error
+    if ([branchesResponse.count, unitsResponse.count].some((count) => (count ?? 0) > MAX_EXPORT_ROWS)) {
+      return new Response(`Refine the product or branch data to export no more than ${MAX_EXPORT_ROWS} lookup records.`, { status: 413 })
+    }
 
     const branches = (branchesResponse.data ?? []) as Array<{ id: string; name: string }>
     const units = (unitsResponse.data ?? []) as UnitExportLookupRow[]
@@ -137,11 +144,13 @@ export async function GET(request: Request) {
     let productQuery = supabase
       .from('products')
       .select(
-        'name, sku, product_kind, category, subcategory, brand_family, unit, description, is_active, created_at, product_pricing(base_price, min_price, max_price), product_pricing_models(branch_id, pricing_method, rounding_rule, status, product_price_points(quantity_in_uom, uom_id, price, max_discount_amount))'
+        'name, sku, product_kind, category, subcategory, brand_family, unit, description, is_active, created_at, product_pricing(base_price, min_price, max_price), product_pricing_models(branch_id, pricing_method, rounding_rule, status, product_price_points(quantity_in_uom, uom_id, price, max_discount_amount))',
+        { count: 'exact' }
       )
       .eq('business_id', businessId)
       .is('deleted_at', null)
       .order('created_at', { ascending: false })
+      .limit(MAX_EXPORT_ROWS + 1)
 
     if (status === 'active') {
       productQuery = productQuery.eq('is_active', true)
@@ -151,10 +160,13 @@ export async function GET(request: Request) {
       productQuery = productQuery.eq('is_active', false)
     }
 
-    const { data, error } = await productQuery
+    const { data, error, count } = await productQuery
 
     if (error) {
       throw error
+    }
+    if ((count ?? 0) > MAX_EXPORT_ROWS) {
+      return new Response(`Refine the filters to export no more than ${MAX_EXPORT_ROWS} products.`, { status: 413 })
     }
 
     const rows = ((data ?? []) as ProductQueryRow[])

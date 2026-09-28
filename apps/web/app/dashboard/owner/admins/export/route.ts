@@ -20,6 +20,8 @@ type AdminExportRow = {
   Created: string
 }
 
+const MAX_EXPORT_ROWS = 1000
+
 /**
  * Handles admin spreadsheet downloads.
  */
@@ -41,25 +43,36 @@ export async function GET(request: Request) {
     const [usersResponse, branchesResponse, rolesResponse] = await Promise.all([
       supabase
         .from('users')
-        .select('id, name, email, phone, is_active, created_at')
+        .select('id, name, email, phone, is_active, created_at', { count: 'exact' })
         .eq('business_id', businessId)
         .eq('global_role', 'admin')
         .is('deleted_at', null)
-        .order('created_at', { ascending: true }),
-      supabase.from('branches').select('id, name').eq('business_id', businessId).is('deleted_at', null),
+        .order('created_at', { ascending: true })
+        .limit(MAX_EXPORT_ROWS + 1),
+      supabase.from('branches').select('id, name', { count: 'exact' }).eq('business_id', businessId).is('deleted_at', null).limit(MAX_EXPORT_ROWS + 1),
       supabase
         .from('user_branch_roles')
-        .select('user_id, branch_id')
+        .select('user_id, branch_id', { count: 'exact' })
         .eq('business_id', businessId)
-        .eq('role', 'admin'),
+        .eq('role', 'admin')
+        .limit(MAX_EXPORT_ROWS + 1),
     ])
 
     if (usersResponse.error) throw usersResponse.error
     if (branchesResponse.error) throw branchesResponse.error
     if (rolesResponse.error) throw rolesResponse.error
+    if ([usersResponse.count, branchesResponse.count, rolesResponse.count].some((count) => (count ?? 0) > MAX_EXPORT_ROWS)) {
+      return new Response(`Refine the filters to export no more than ${MAX_EXPORT_ROWS} records.`, { status: 413 })
+    }
 
     const branchMap = new Map(((branchesResponse.data ?? []) as Array<{ id: string; name: string }>).map((branch) => [branch.id, branch.name]))
     const roleRows = (rolesResponse.data ?? []) as Array<{ user_id: string; branch_id: string }>
+    const branchIdsByUser = new Map<string, string[]>()
+    roleRows.forEach((role) => {
+      const branchIds = branchIdsByUser.get(role.user_id) ?? []
+      branchIds.push(role.branch_id)
+      branchIdsByUser.set(role.user_id, branchIds)
+    })
 
     const rows = ((usersResponse.data ?? []) as Array<{
       id: string
@@ -70,7 +83,7 @@ export async function GET(request: Request) {
       created_at: string
     }>)
       .map((admin) => {
-        const assignedBranchIds = roleRows.filter((role) => role.user_id === admin.id).map((role) => role.branch_id)
+        const assignedBranchIds = branchIdsByUser.get(admin.id) ?? []
         const assignedBranchNames = assignedBranchIds.map((branchId) => branchMap.get(branchId)).filter((name): name is string => Boolean(name))
 
         return {

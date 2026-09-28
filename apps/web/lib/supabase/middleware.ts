@@ -15,6 +15,11 @@ export async function updateSession(request: NextRequest) {
     },
   })
 
+  const hasSupabaseSessionCookie = request.cookies.getAll().some(({ name }) => /^sb-.+-auth-token(?:\.\d+)?$/.test(name))
+  if (!hasSupabaseSessionCookie) {
+    return response
+  }
+
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 
@@ -38,7 +43,7 @@ export async function updateSession(request: NextRequest) {
       },
     })
 
-    await supabase.auth.getUser()
+    await supabase.auth.getSession()
   } catch (error) {
     console.error('Supabase middleware session refresh failed', error)
   }

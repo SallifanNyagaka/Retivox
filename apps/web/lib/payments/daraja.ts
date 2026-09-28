@@ -25,6 +25,13 @@ export type DarajaStkPushResponse = {
   errorMessage?: string
 }
 
+type DarajaStkQueryResponse = {
+  ResponseCode?: string | number
+  ResultCode?: string | number
+  ResultDesc?: string
+  ResponseDescription?: string
+}
+
 export type DarajaPromptConfiguration = {
   environment: 'sandbox' | 'production'
   shortcode: string
@@ -324,4 +331,42 @@ export async function initiateDarajaStkPush(input: {
   }
 
   return payload
+}
+
+export async function verifyDarajaStkCheckout(checkoutRequestId: string): Promise<number> {
+  const resolution = await resolveDarajaConfig()
+
+  if (!resolution.config) {
+    throw new Error(`Subscription M-Pesa STK Push is not configured. Missing: ${resolution.missing.join(', ')}.`)
+  }
+
+  const config = resolution.config
+  const accessToken = await getAccessToken(config)
+  const timestamp = getTimestamp()
+  const password = Buffer.from(`${config.shortcode}${config.passkey}${timestamp}`).toString('base64')
+  const response = await fetch(`${config.baseUrl}/mpesa/stkpushquery/v1/query`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      BusinessShortCode: config.shortcode,
+      Password: password,
+      Timestamp: timestamp,
+      CheckoutRequestID: checkoutRequestId,
+    }),
+    cache: 'no-store',
+    signal: AbortSignal.timeout(10000),
+  })
+
+  const payload = (await response.json()) as DarajaStkQueryResponse
+  const responseCode = Number(payload.ResponseCode)
+  const resultCode = Number(payload.ResultCode)
+
+  if (!response.ok || responseCode !== 0 || !Number.isInteger(resultCode)) {
+    throw new Error(payload.ResultDesc ?? payload.ResponseDescription ?? 'Unable to verify Daraja payment')
+  }
+
+  return resultCode
 }

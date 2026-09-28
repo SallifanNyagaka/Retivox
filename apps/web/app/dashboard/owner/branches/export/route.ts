@@ -19,6 +19,8 @@ type BranchExportRow = {
   Created: string
 }
 
+const MAX_EXPORT_ROWS = 1000
+
 /**
  * Handles branch spreadsheet downloads.
  */
@@ -39,10 +41,11 @@ export async function GET(request: Request) {
 
     let branchQuery = supabase
       .from('branches')
-      .select('name, location, branch_type, is_active, created_at')
+      .select('name, location, branch_type, is_active, created_at', { count: 'exact' })
       .eq('business_id', businessId)
       .is('deleted_at', null)
       .order('created_at', { ascending: true })
+      .limit(MAX_EXPORT_ROWS + 1)
 
     if (status === 'active') {
       branchQuery = branchQuery.eq('is_active', true)
@@ -56,10 +59,14 @@ export async function GET(request: Request) {
       branchQuery = branchQuery.eq('branch_type', type)
     }
 
-    const { data, error } = await branchQuery
+    const { data, error, count } = await branchQuery
 
     if (error) {
       throw error
+    }
+
+    if ((count ?? 0) > MAX_EXPORT_ROWS) {
+      return new Response(`Refine the filters to export no more than ${MAX_EXPORT_ROWS} records.`, { status: 413 })
     }
 
     const rows = ((data ?? []) as Array<{

@@ -32,6 +32,10 @@ export type SpreadsheetDropdown<Row extends Record<string, string | number | boo
  */
 export type ParsedSpreadsheetRow = Record<string, string>
 
+const MAX_SPREADSHEET_SIZE_BYTES = 5 * 1024 * 1024
+const MAX_SPREADSHEET_ROWS = 1000
+const MAX_SPREADSHEET_COLUMNS = 64
+
 /**
  * Normalizes spreadsheet headers so imports are forgiving about case/spaces.
  */
@@ -177,10 +181,41 @@ export async function buildWorkbookBuffer<Row extends Record<string, string | nu
  */
 export async function parseSpreadsheetFile(file: File) {
   const fileName = file.name.toLowerCase()
+
+  if (file.size > MAX_SPREADSHEET_SIZE_BYTES) {
+    throw new Error('Spreadsheet files must be 5 MB or smaller')
+  }
+
+  if (!fileName.endsWith('.csv') && !fileName.endsWith('.xlsx')) {
+    throw new Error('Upload a CSV or XLSX spreadsheet')
+  }
+
   const buffer = await file.arrayBuffer()
 
   if (fileName.endsWith('.csv')) {
-    return parseCsv(new TextDecoder().decode(new Uint8Array(buffer)))
+    const content = new TextDecoder().decode(new Uint8Array(buffer))
+    const firstLine = content.split(/\r?\n/, 1)[0] ?? ''
+
+    if (firstLine.length > 16384) {
+      throw new Error('Spreadsheet header is too long')
+    }
+
+    if (splitCsvLine(firstLine).length > MAX_SPREADSHEET_COLUMNS) {
+      throw new Error(`Spreadsheets may contain up to ${MAX_SPREADSHEET_COLUMNS} columns`)
+    }
+
+    let lineCount = 1
+    for (const character of content) {
+      if (character === '\n' && ++lineCount > MAX_SPREADSHEET_ROWS + 1) {
+        throw new Error(`Spreadsheets may contain up to ${MAX_SPREADSHEET_ROWS} data rows`)
+      }
+    }
+
+    const rows = parseCsv(content)
+    if (rows.length > MAX_SPREADSHEET_ROWS) {
+      throw new Error(`Spreadsheets may contain up to ${MAX_SPREADSHEET_ROWS} data rows`)
+    }
+    return rows
   }
 
   const workbook = new ExcelJS.Workbook()
@@ -189,6 +224,10 @@ export async function parseSpreadsheetFile(file: File) {
 
   if (!worksheet) {
     return []
+  }
+
+  if (worksheet.rowCount > MAX_SPREADSHEET_ROWS + 1 || worksheet.columnCount > MAX_SPREADSHEET_COLUMNS) {
+    throw new Error(`Spreadsheets may contain up to ${MAX_SPREADSHEET_ROWS} data rows and ${MAX_SPREADSHEET_COLUMNS} columns`)
   }
 
   const headers: string[] = []

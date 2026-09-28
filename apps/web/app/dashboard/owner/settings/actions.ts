@@ -392,8 +392,12 @@ export async function initiateSubscriptionStkPush(_prevState: FormState, formDat
       return { success: false, error: subscriptionError?.message ?? 'Unable to prepare subscription payment' }
     }
 
+    const amount = Number(subscriptionData.monthly_amount)
+    if (!Number.isInteger(amount) || amount <= 0 || validation.data.amount !== amount) {
+      return { success: false, error: 'The payment amount must match your current subscription price.' }
+    }
+
     const promptConfig = await getDarajaPromptConfiguration()
-    const amount = validation.data.amount
     const currency = String(subscriptionData.currency ?? 'KES')
     const referenceCode = `STK-${Date.now()}`
 
