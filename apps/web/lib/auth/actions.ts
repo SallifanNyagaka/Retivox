@@ -143,7 +143,16 @@ export async function registerBusinessAndOwner(
   // Insert business record
   const { data: businessData, error: businessInsertError } = await adminClient
     .from('businesses')
-    .insert({ name: businessName, slug, country, currency, timezone })
+    .insert({
+      name: businessName,
+      slug,
+      country,
+      currency,
+      timezone,
+      subscription_plan: 'trial',
+      subscription_status: 'active',
+      trial_ends_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+    })
     .select('id')
     .single()
 
@@ -175,15 +184,15 @@ export async function registerBusinessAndOwner(
     }
   }
 
-  // Insert starter subscription. Payment collection starts manually in owner settings.
+  // Start every new business on the free 30-day trial.
   const { error: subscriptionError } = await adminClient.from('subscriptions').insert({
     business_id: businessId,
-    plan: 'starter',
+    plan: 'trial',
     status: 'active',
     branch_count: 1,
-    monthly_amount: 200,
+    monthly_amount: 0,
     currency: 'KES',
-    payment_provider: 'manual',
+    payment_provider: null,
     current_period_start: new Date().toISOString(),
     current_period_end: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
   })

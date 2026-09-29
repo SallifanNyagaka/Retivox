@@ -39,6 +39,22 @@ export type SubscriptionRow = {
   monthly_amount: number
   currency: string
   current_period_end: string | null
+  billing_interval: 'monthly' | 'yearly'
+  next_plan_key: string | null
+  next_billing_interval: 'monthly' | 'yearly' | null
+  next_period_start: string | null
+}
+
+export type SubscriptionPlanOption = {
+  id: string
+  plan_key: 'trial' | 'starter' | 'growth' | 'enterprise'
+  name: string
+  description: string
+  monthly_amount: number
+  annual_discount_percent: number
+  currency: string
+  branch_limit: number | null
+  sort_order: number
 }
 
 /**
@@ -48,6 +64,8 @@ export type SubscriptionPaymentRequestRow = {
   id: string
   amount: number
   currency: string
+  plan_key: string | null
+  billing_interval: 'monthly' | 'yearly'
   payment_method: 'mpesa_stk' | 'mpesa_manual' | 'bank_transfer' | 'cash_deposit' | 'other'
   reference_code: string
   payer_phone: string | null

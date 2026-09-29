@@ -43,6 +43,8 @@ const loginReviewSchema = z.object({
 })
 
 const subscriptionPaymentSchema = z.object({
+  planKey: z.enum(['starter', 'growth', 'enterprise']),
+  billingInterval: z.enum(['monthly', 'yearly']),
   paymentMethod: z.enum(['mpesa_manual', 'bank_transfer', 'cash_deposit', 'other']),
   referenceCode: z.string().min(3, 'Payment reference must be at least 3 characters').max(80, 'Payment reference is too long'),
   payerPhone: z.string().max(32, 'Phone number is too long').optional(),
@@ -50,7 +52,8 @@ const subscriptionPaymentSchema = z.object({
 
 const darajaPaymentSchema = z.object({
   phone: z.string().min(9, 'Enter the M-Pesa phone number').max(20, 'Phone number is too long'),
-  amount: z.coerce.number().int('Payment amount must be a whole number').positive('Payment amount must be greater than zero'),
+  planKey: z.enum(['starter', 'growth', 'enterprise']),
+  billingInterval: z.enum(['monthly', 'yearly']),
 })
 
 /**
@@ -285,6 +288,8 @@ export async function submitOwnerLoginReview(_prevState: FormState, formData: Fo
  */
 export async function submitSubscriptionPayment(_prevState: FormState, formData: FormData): Promise<FormState> {
   const validation = subscriptionPaymentSchema.safeParse({
+    planKey: getString(formData, 'planKey'),
+    billingInterval: getString(formData, 'billingInterval'),
     paymentMethod: getString(formData, 'paymentMethod') || 'mpesa_manual',
     referenceCode: getString(formData, 'referenceCode'),
     payerPhone: getString(formData, 'payerPhone') || undefined,
@@ -304,7 +309,9 @@ export async function submitSubscriptionPayment(_prevState: FormState, formData:
 
   try {
     const supabase = await createClient()
-    const { error } = await supabase.rpc('owner_submit_subscription_payment', {
+    const { error } = await supabase.rpc('owner_submit_subscription_payment_v2', {
+      p_plan_key: validation.data.planKey,
+      p_billing_interval: validation.data.billingInterval,
       p_reference_code: validation.data.referenceCode,
       p_payment_method: validation.data.paymentMethod,
       p_payer_phone: validation.data.payerPhone ?? null,
@@ -330,7 +337,8 @@ export async function submitSubscriptionPayment(_prevState: FormState, formData:
 export async function initiateSubscriptionStkPush(_prevState: FormState, formData: FormData): Promise<FormState> {
   const validation = darajaPaymentSchema.safeParse({
     phone: getString(formData, 'phone'),
-    amount: getString(formData, 'amount'),
+    planKey: getString(formData, 'planKey'),
+    billingInterval: getString(formData, 'billingInterval'),
   })
 
   if (!validation.success) {
@@ -357,32 +365,38 @@ export async function initiateSubscriptionStkPush(_prevState: FormState, formDat
   let paymentRequestId: string | null = null
 
   try {
-    const existingSubscriptionResponse = await serviceClient
+    const [existingSubscriptionResponse, planResponse] = await Promise.all([
+      serviceClient
       .from('subscriptions')
-      .select('id, monthly_amount, currency')
+      .select('id')
       .eq('business_id', businessId)
-      .maybeSingle()
+      .maybeSingle(),
+      serviceClient
+        .from('platform_subscription_plans')
+        .select('plan_key, monthly_amount, annual_discount_percent, currency, is_active')
+        .eq('plan_key', validation.data.planKey)
+        .eq('is_active', true)
+        .maybeSingle(),
+    ])
 
-    if (existingSubscriptionResponse.error) {
-      logger.error('initiateSubscriptionStkPush: subscription lookup failed', { businessId, error: existingSubscriptionResponse.error })
-      return { success: false, error: existingSubscriptionResponse.error.message ?? 'Unable to load subscription payment' }
+    if (existingSubscriptionResponse.error || planResponse.error || !planResponse.data) {
+      const error = existingSubscriptionResponse.error ?? planResponse.error
+      logger.error('initiateSubscriptionStkPush: billing lookup failed', { businessId, error })
+      return { success: false, error: error?.message ?? 'The selected plan is no longer available' }
     }
 
     const subscriptionResponse = existingSubscriptionResponse.data
       ? existingSubscriptionResponse
-      : await serviceClient
-          .from('subscriptions')
-          .insert({
-            business_id: businessId,
-            plan: 'starter',
-            status: 'active',
-            branch_count: 1,
-            monthly_amount: 200,
-            currency: 'KES',
-            payment_provider: 'daraja',
-          })
-          .select('id, monthly_amount, currency')
-          .single()
+      : await serviceClient.from('subscriptions').insert({
+          business_id: businessId,
+          plan: 'trial',
+          status: 'active',
+          branch_count: 1,
+          monthly_amount: 0,
+          currency: planResponse.data.currency,
+          current_period_start: new Date().toISOString(),
+          current_period_end: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+        }).select('id').single()
 
     const subscriptionData = subscriptionResponse.data
     const subscriptionError = subscriptionResponse.error
@@ -392,13 +406,16 @@ export async function initiateSubscriptionStkPush(_prevState: FormState, formDat
       return { success: false, error: subscriptionError?.message ?? 'Unable to prepare subscription payment' }
     }
 
-    const amount = Number(subscriptionData.monthly_amount)
-    if (!Number.isInteger(amount) || amount <= 0 || validation.data.amount !== amount) {
-      return { success: false, error: 'The payment amount must match your current subscription price.' }
+    const plan = planResponse.data
+    const amount = validation.data.billingInterval === 'yearly'
+      ? Math.round(Number(plan.monthly_amount) * 12 * (1 - Number(plan.annual_discount_percent) / 100) * 100) / 100
+      : Number(plan.monthly_amount)
+    if (!Number.isInteger(amount) || amount <= 0) {
+      return { success: false, error: 'M-Pesa STK Push requires a whole-number amount. Use manual payment for this plan price.' }
     }
 
     const promptConfig = await getDarajaPromptConfiguration()
-    const currency = String(subscriptionData.currency ?? 'KES')
+    const currency = String(plan.currency ?? 'KES')
     const referenceCode = `STK-${Date.now()}`
 
     const { data: paymentData, error: paymentError } = await serviceClient
@@ -410,11 +427,14 @@ export async function initiateSubscriptionStkPush(_prevState: FormState, formDat
         amount,
         currency,
         payment_method: 'mpesa_stk',
+        plan_key: validation.data.planKey,
+        billing_interval: validation.data.billingInterval,
         reference_code: referenceCode,
         payer_phone: normalizedPhone,
         status: 'pending',
         provider: 'daraja',
-        provider_result_description: `STK Push queued for PayBill ${promptConfig.shortcode}, account ${promptConfig.accountReference}`,
+          plan_monthly_amount: Number(plan.monthly_amount),
+        provider_result_description: `STK Push queued for ${validation.data.planKey} ${validation.data.billingInterval} plan; PayBill ${promptConfig.shortcode}, account ${promptConfig.accountReference}`,
       })
       .select('id')
       .single()

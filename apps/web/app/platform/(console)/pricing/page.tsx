@@ -11,6 +11,7 @@ type PlanRow = {
   name: string
   description: string
   monthly_amount: number
+  annual_discount_percent: number
   currency: string
   branch_limit: number | null
   is_active: boolean
@@ -26,7 +27,7 @@ export default async function PlatformPricingPage() {
   const serviceClient = createServiceRoleClient()
   const { data, error } = await serviceClient
     .from('platform_subscription_plans')
-    .select('id, plan_key, name, description, monthly_amount, currency, branch_limit, is_active, sort_order, updated_at')
+    .select('id, plan_key, name, description, monthly_amount, annual_discount_percent, currency, branch_limit, is_active, sort_order, updated_at')
     .order('sort_order', { ascending: true })
 
   if (error) {
@@ -60,7 +61,7 @@ export default async function PlatformPricingPage() {
           Subscription package pricing
         </h1>
         <p style={{ margin: '10px 0 0', maxWidth: 680, color: 'rgba(255,248,236,0.72)', fontSize: 14, lineHeight: 1.7 }}>
-          Change package pricing from here. Existing subscriptions on the same package are synced to the new amount and currency.
+          Set monthly pricing and each plan&apos;s annual discount. New prices apply when a subscription renews; existing paid periods keep their recorded price.
         </p>
       </section>
 
@@ -72,7 +73,7 @@ export default async function PlatformPricingPage() {
               action={<Badge variant={plan.is_active ? 'success' : 'muted'}>{plan.is_active ? 'Active' : 'Hidden'}</Badge>}
             />
             <p style={{ margin: '0 0 14px', color: 'var(--color-text-muted)', fontSize: 13, lineHeight: 1.6 }}>
-              Currently {formatMoney(Number(plan.monthly_amount), plan.currency)} monthly, {plan.branch_limit ? `${plan.branch_limit} branches` : 'unlimited branches'}.
+              {formatMoney(Number(plan.monthly_amount), plan.currency)} monthly; {formatMoney(Number(plan.monthly_amount) * 12 * (1 - Number(plan.annual_discount_percent) / 100), plan.currency)} annually after {plan.annual_discount_percent}% discount; {plan.branch_limit ? `${plan.branch_limit} branches` : 'unlimited branches'}.
             </p>
 
             <form action={updateSubscriptionPlan} className="grid grid-cols-1 gap-3">
@@ -80,7 +81,7 @@ export default async function PlatformPricingPage() {
 
               <label style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-text-primary)' }}>
                 Package name
-                <input name="name" defaultValue={plan.name} required style={inputStyle} />
+                  <input name="name" defaultValue={plan.name} required readOnly={plan.plan_key === 'trial'} style={inputStyle} />
               </label>
 
               <label style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-text-primary)' }}>
@@ -88,14 +89,18 @@ export default async function PlatformPricingPage() {
                 <textarea name="description" defaultValue={plan.description} rows={3} style={{ ...inputStyle, height: 'auto', paddingTop: 10, resize: 'vertical' }} />
               </label>
 
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
                 <label style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-text-primary)' }}>
                   Monthly amount
-                  <input name="monthlyAmount" type="number" min="0" step="0.01" defaultValue={plan.monthly_amount} required style={inputStyle} />
+                  <input name="monthlyAmount" type="number" min="0" step="0.01" defaultValue={plan.monthly_amount} required readOnly={plan.plan_key === 'trial'} style={inputStyle} />
                 </label>
                 <label style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-text-primary)' }}>
                   Currency
                   <input name="currency" maxLength={3} defaultValue={plan.currency} required style={inputStyle} />
+                </label>
+                <label style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-text-primary)' }}>
+                  Annual discount (%)
+                  <input name="annualDiscountPercent" type="number" min="0" max="100" step="0.01" defaultValue={plan.annual_discount_percent} required readOnly={plan.plan_key === 'trial'} style={inputStyle} />
                 </label>
                 <label style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-text-primary)' }}>
                   Branch limit
@@ -104,6 +109,7 @@ export default async function PlatformPricingPage() {
               </div>
 
               <label className="flex items-center gap-2" style={{ color: 'var(--color-text-primary)', fontSize: 13, fontWeight: 750 }}>
+                {plan.plan_key === 'trial' && <input type="hidden" name="isActive" value="on" />}
                 <input name="isActive" type="checkbox" defaultChecked={plan.is_active} />
                 Available for billing
               </label>

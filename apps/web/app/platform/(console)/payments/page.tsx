@@ -2,7 +2,7 @@ import { Badge } from '../../../../components/ui/Badge'
 import { Card, CardHeader } from '../../../../components/ui/Card'
 import { getDarajaConfigurationStatus } from '../../../../lib/payments/daraja'
 import { createServiceRoleClient } from '../../../../lib/supabase/admin'
-import { updatePlatformPaymentSettings } from '../actions'
+import { reviewSubscriptionPayment, updatePlatformPaymentSettings } from '../actions'
 
 export const dynamic = 'force-dynamic'
 
@@ -18,6 +18,20 @@ type PaymentSettingsRow = {
   passkey: string | null
   is_active: boolean
   updated_at: string
+}
+
+type PendingSubscriptionPaymentRow = {
+  id: string
+  business_id: string
+  amount: number
+  currency: string
+  payment_method: string
+  reference_code: string
+  payer_phone: string | null
+  plan_key: string | null
+  billing_interval: string
+  submitted_at: string
+  businesses: { name: string } | { name: string }[] | null
 }
 
 function maskSecret(value: string | null) {
@@ -37,6 +51,14 @@ export default async function PlatformPaymentsPage() {
     .order('updated_at', { ascending: false })
     .limit(1)
     .maybeSingle()
+
+  const { data: pendingPayments, error: pendingPaymentsError } = await serviceClient
+    .from('subscription_payment_requests')
+    .select('id, business_id, amount, currency, payment_method, reference_code, payer_phone, plan_key, billing_interval, submitted_at, businesses(name)')
+    .eq('status', 'pending')
+    .in('payment_method', ['mpesa_manual', 'bank_transfer', 'cash_deposit', 'other'])
+    .order('submitted_at', { ascending: true })
+    .limit(100)
 
   if (error) {
     return (
@@ -72,6 +94,51 @@ export default async function PlatformPaymentsPage() {
           This is the Daraja receiving account used by Retivox subscription STK Push requests. Environment variables remain a fallback.
         </p>
       </section>
+
+      <Card padding="md">
+        <CardHeader title="Manual subscription payment review" />
+        {pendingPaymentsError ? (
+          <p style={{ color: 'var(--color-danger)', fontSize: 13 }}>Unable to load pending manual payments.</p>
+        ) : (pendingPayments ?? []).length === 0 ? (
+          <p style={{ color: 'var(--color-text-muted)', fontSize: 13, margin: 0 }}>No manual payments need review.</p>
+        ) : (
+          <div className="flex flex-col gap-3">
+            {(pendingPayments ?? []).map((rawPayment) => {
+              const payment = rawPayment as PendingSubscriptionPaymentRow
+              const joinedBusiness = Array.isArray(payment.businesses) ? payment.businesses[0] : payment.businesses
+
+              return (
+                <div key={payment.id} className="grid grid-cols-1 gap-3 border-b pb-4 md:grid-cols-[1fr_1fr_auto] md:items-center" style={{ borderColor: 'var(--color-border)' }}>
+                  <div>
+                    <p style={{ color: 'var(--color-text-primary)', fontSize: 14, fontWeight: 750, margin: 0 }}>{joinedBusiness?.name ?? payment.business_id}</p>
+                    <p style={{ color: 'var(--color-text-muted)', fontSize: 12, margin: '4px 0 0' }}>
+                      {(payment.plan_key ?? 'Plan pending')} · {payment.billing_interval} · {payment.payment_method.replace(/_/g, ' ')}
+                    </p>
+                    <p style={{ color: 'var(--color-text-muted)', fontSize: 12, margin: '3px 0 0' }}>
+                      Ref {payment.reference_code}{payment.payer_phone ? ` · ${payment.payer_phone}` : ''} · {new Date(payment.submitted_at).toLocaleString()}
+                    </p>
+                  </div>
+                  <strong style={{ color: 'var(--color-text-primary)', fontSize: 14 }}>
+                    {new Intl.NumberFormat(undefined, { style: 'currency', currency: payment.currency }).format(Number(payment.amount))}
+                  </strong>
+                  <div className="flex gap-2">
+                    <form action={reviewSubscriptionPayment}>
+                      <input type="hidden" name="paymentRequestId" value={payment.id} />
+                      <input type="hidden" name="decision" value="approve" />
+                      <button type="submit" className="btn-success" style={{ borderRadius: 8, padding: '8px 12px' }}>Approve</button>
+                    </form>
+                    <form action={reviewSubscriptionPayment}>
+                      <input type="hidden" name="paymentRequestId" value={payment.id} />
+                      <input type="hidden" name="decision" value="reject" />
+                      <button type="submit" className="btn-outline" style={{ borderRadius: 8, padding: '8px 12px' }}>Reject</button>
+                    </form>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </Card>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1.25fr_0.75fr]">
         <Card padding="md">

@@ -116,15 +116,30 @@ async function getBusinessInactiveDays(businessId: string, createdAt: string) {
 export async function updateSubscriptionPlan(formData: FormData): Promise<void> {
   const user = await requireDeveloper()
   const planKey = getString(formData, 'planKey')
-  const name = getString(formData, 'name')
+  const submittedName = getString(formData, 'name')
   const description = getString(formData, 'description')
   const currency = getString(formData, 'currency').toUpperCase() || 'KES'
   const monthlyAmount = getNumber(formData, 'monthlyAmount')
+  const annualDiscountPercent = getNumber(formData, 'annualDiscountPercent')
   const branchLimitValue = getString(formData, 'branchLimit')
-  const branchLimit = branchLimitValue ? Math.max(1, Number(branchLimitValue)) : null
-  const isActive = getString(formData, 'isActive') === 'on'
+  const parsedBranchLimit = branchLimitValue ? Number(branchLimitValue) : null
+  const branchLimit = parsedBranchLimit !== null && Number.isInteger(parsedBranchLimit) && parsedBranchLimit > 0
+    ? parsedBranchLimit
+    : null
+  const isActive = planKey === 'trial' || getString(formData, 'isActive') === 'on'
+  const name = planKey === 'trial' ? 'Free' : submittedName
 
-  if (!planKey || !name || monthlyAmount < 0) {
+  if (
+    !['trial', 'starter', 'growth', 'enterprise'].includes(planKey) ||
+    !name ||
+    (planKey === 'trial' && name !== 'Free') ||
+    monthlyAmount < 0 ||
+    annualDiscountPercent < 0 ||
+    annualDiscountPercent > 100 ||
+    (planKey === 'trial' && (monthlyAmount !== 0 || annualDiscountPercent !== 0 || !isActive)) ||
+    !/^[A-Z]{3}$/.test(currency) ||
+    (branchLimitValue && branchLimit === null)
+  ) {
     throw new Error('Enter a valid package name and monthly amount')
   }
 
@@ -136,6 +151,7 @@ export async function updateSubscriptionPlan(formData: FormData): Promise<void> 
       description,
       monthly_amount: monthlyAmount,
       currency,
+      annual_discount_percent: annualDiscountPercent,
       branch_limit: branchLimit,
       is_active: isActive,
     })
@@ -145,26 +161,51 @@ export async function updateSubscriptionPlan(formData: FormData): Promise<void> 
     throw new Error(error.message)
   }
 
-  const { error: subscriptionError } = await serviceClient
-    .from('subscriptions')
-    .update({
-      monthly_amount: monthlyAmount,
-      currency,
-    })
-    .eq('plan', planKey)
-
-  if (subscriptionError) {
-    throw new Error(subscriptionError.message)
-  }
-
   await serviceClient.from('platform_audit_logs').insert({
     platform_user_id: user.id,
     entity_type: 'platform_subscription_plan',
     action: 'updated',
-    new_value: { plan_key: planKey, monthly_amount: monthlyAmount, currency, branch_limit: branchLimit, is_active: isActive },
+    new_value: {
+      plan_key: planKey,
+      monthly_amount: monthlyAmount,
+      annual_discount_percent: annualDiscountPercent,
+      currency,
+      branch_limit: branchLimit,
+      is_active: isActive,
+    },
   })
 
   revalidatePath('/platform/pricing')
+  revalidatePath('/platform')
+  revalidatePath('/dashboard/owner/settings')
+}
+
+export async function reviewSubscriptionPayment(formData: FormData): Promise<void> {
+  const user = await requireDeveloper()
+  const paymentRequestId = getString(formData, 'paymentRequestId')
+  const decision = getString(formData, 'decision')
+  const reviewNote = getString(formData, 'reviewNote').slice(0, 240)
+
+  if (!/^[0-9a-f-]{36}$/i.test(paymentRequestId) || !['approve', 'reject'].includes(decision)) {
+    throw new Error('Invalid subscription payment review')
+  }
+
+  const serviceClient = createServiceRoleClient()
+  const { data, error } = await serviceClient.rpc('platform_review_subscription_payment', {
+    p_payment_request_id: paymentRequestId,
+    p_approved: decision === 'approve',
+    p_platform_user_id: user.id,
+    p_review_note: reviewNote || null,
+  })
+
+  if (error) {
+    throw new Error(error.message)
+  }
+  if (data !== true) {
+    throw new Error('This payment request is no longer pending review')
+  }
+
+  revalidatePath('/platform/payments')
   revalidatePath('/platform')
   revalidatePath('/dashboard/owner/settings')
 }

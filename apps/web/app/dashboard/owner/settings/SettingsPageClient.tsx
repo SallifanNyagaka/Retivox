@@ -18,38 +18,20 @@ import LoadingOverlay from '../../../../components/ui/LoadingOverlay'
 import { applyDashboardTheme, getDashboardThemeKey } from '../../../../components/dashboard/DashboardThemeProvider'
 import { useToast } from '../../../../lib/hooks/useToast'
 import { changePassword, initiateSubscriptionStkPush, logoutFromSettings, submitOwnerLoginReview, submitSubscriptionPayment, updateBusinessProfile } from './actions'
-import type { BusinessSettingsRow, FormState, LoginReviewRow, SubscriptionPaymentRequestRow, SubscriptionRow, UserProfileRow } from './types'
+import type { BusinessSettingsRow, FormState, LoginReviewRow, SubscriptionPaymentRequestRow, SubscriptionPlanOption, SubscriptionRow, UserProfileRow } from './types'
 
 /**
  * Props for the settings page client.
  */
 type Props = {
+  billingAsOf: string
   business: BusinessSettingsRow
   ownerProfile: UserProfileRow
   subscription: SubscriptionRow | null
+  subscriptionPlans: SubscriptionPlanOption[]
   subscriptionPaymentRequests: SubscriptionPaymentRequestRow[]
   loginReviews: LoginReviewRow[]
 }
-
-/**
- * Available plan display metadata.
- */
-type PlanOption = {
-  key: 'trial' | 'starter' | 'growth' | 'enterprise'
-  label: string
-  monthlyAmount: number
-  branchLimit: string
-}
-
-/**
- * Plan cards shown in the subscription section.
- */
-const PLAN_OPTIONS: PlanOption[] = [
-  { key: 'trial', label: 'Trial', monthlyAmount: 0, branchLimit: 'Free starter workspace' },
-  { key: 'starter', label: 'Starter', monthlyAmount: 200, branchLimit: 'MVP rental plan' },
-  { key: 'growth', label: 'Growth', monthlyAmount: 5000, branchLimit: 'Up to 10 branches' },
-  { key: 'enterprise', label: 'Enterprise', monthlyAmount: 12000, branchLimit: 'Unlimited branches' },
-]
 
 /**
  * Shared input styling for settings forms.
@@ -650,21 +632,27 @@ function LoginReviewsSection({ reviews }: { reviews: LoginReviewRow[] }) {
  * Subscription section showing the current plan and future plan options.
  */
 function SubscriptionSection({
+  billingAsOf,
   business,
   subscription,
+  plans,
   paymentRequests,
 }: {
+  billingAsOf: string
   business: BusinessSettingsRow
   subscription: SubscriptionRow | null
+  plans: SubscriptionPlanOption[]
   paymentRequests: SubscriptionPaymentRequestRow[]
 }) {
   const router = useRouter()
-  const defaultStkAmount = String(Math.max(1, Math.round(Number(subscription?.monthly_amount ?? 200))))
-  const [paymentMethod, setPaymentMethod] = useState<SubscriptionPaymentRequestRow['payment_method']>('mpesa_manual')
+  const [paymentMethod, setPaymentMethod] = useState<SubscriptionPaymentRequestRow['payment_method']>('mpesa_stk')
+  const [billingInterval, setBillingInterval] = useState<'monthly' | 'yearly'>(subscription?.next_billing_interval ?? subscription?.billing_interval ?? 'monthly')
+  const activePlan = subscription?.plan ?? business.subscription_plan
+  const [selectedPlanKey, setSelectedPlanKey] = useState(subscription?.next_plan_key ?? (activePlan === 'trial' ? '' : activePlan))
   const [referenceCode, setReferenceCode] = useState('')
   const [payerPhone, setPayerPhone] = useState('')
   const [stkPhone, setStkPhone] = useState('')
-  const [stkAmount, setStkAmount] = useState(defaultStkAmount)
+  const [billingClock, setBillingClock] = useState(() => new Date(billingAsOf).getTime())
   const { toast, toastState, dismiss } = useToast()
   const [state, action, isPending] = useActionState<FormState, FormData>(submitSubscriptionPayment, {
     error: null,
@@ -676,9 +664,32 @@ function SubscriptionSection({
   })
   const previousPending = useRef(isPending)
   const previousStkPending = useRef(isStkPending)
-  const activePlan = subscription?.plan ?? business.subscription_plan
   const activeStatus = subscription?.status ?? business.subscription_status
-  const activeCurrency = subscription?.currency ?? business.currency
+  const now = billingClock
+  const scheduledPeriodStartTime = subscription?.next_period_start ? new Date(subscription.next_period_start).getTime() : null
+  const verifiedPlanIsDue = Boolean(subscription?.next_plan_key && scheduledPeriodStartTime !== null && scheduledPeriodStartTime <= now)
+  const displayPlanKey = verifiedPlanIsDue ? subscription?.next_plan_key ?? activePlan : activePlan
+  const displayBillingInterval = verifiedPlanIsDue ? subscription?.next_billing_interval ?? 'monthly' : subscription?.billing_interval ?? 'monthly'
+  const selectedPlan = plans.find((plan) => plan.plan_key === selectedPlanKey) ?? null
+  const selectedAmount = selectedPlan
+    ? billingInterval === 'yearly'
+      ? Math.round(Number(selectedPlan.monthly_amount) * 12 * (1 - Number(selectedPlan.annual_discount_percent) / 100) * 100) / 100
+      : Number(selectedPlan.monthly_amount)
+    : 0
+  const periodEndTime = subscription?.current_period_end ? new Date(subscription.current_period_end).getTime() : null
+  const displayPeriodEndTime = verifiedPlanIsDue
+    ? now + (displayBillingInterval === 'yearly' ? 365 : 30) * 86400000
+    : periodEndTime
+  const daysUntilRenewal = displayPeriodEndTime === null ? null : Math.max(0, Math.ceil((displayPeriodEndTime - now) / 86400000))
+  const isPeriodOver = periodEndTime !== null && periodEndTime <= now && !verifiedPlanIsDue
+  const graceEndsAt = periodEndTime === null ? null : periodEndTime + 3 * 86400000
+  const graceDaysRemaining = graceEndsAt === null ? 0 : Math.max(0, Math.ceil((graceEndsAt - now) / 86400000))
+  const pendingPlan = subscription?.next_plan_key ? plans.find((plan) => plan.plan_key === subscription.next_plan_key) : null
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setBillingClock(Date.now()), 60_000)
+    return () => window.clearInterval(interval)
+  }, [])
 
   useEffect(() => {
     let refreshTimer: ReturnType<typeof setTimeout> | null = null
@@ -712,7 +723,6 @@ function SubscriptionSection({
         toast.success(stkState.message ?? 'M-Pesa prompt sent. Complete it on your phone.')
         refreshTimer = setTimeout(() => {
           setStkPhone('')
-          setStkAmount(defaultStkAmount)
           router.refresh()
         }, 0)
       } else if (stkState.error) {
@@ -726,12 +736,14 @@ function SubscriptionSection({
         clearTimeout(refreshTimer)
       }
     }
-  }, [defaultStkAmount, isStkPending, router, stkState.error, stkState.message, stkState.success, toast])
+  }, [isStkPending, router, stkState.error, stkState.message, stkState.success, toast])
 
   const onSubmitPayment = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
 
     const formData = new FormData()
+    formData.set('planKey', selectedPlanKey)
+    formData.set('billingInterval', billingInterval)
     formData.set('paymentMethod', paymentMethod)
     formData.set('referenceCode', referenceCode)
     formData.set('payerPhone', payerPhone)
@@ -746,7 +758,8 @@ function SubscriptionSection({
 
     const formData = new FormData()
     formData.set('phone', stkPhone)
-    formData.set('amount', stkAmount)
+    formData.set('planKey', selectedPlanKey)
+    formData.set('billingInterval', billingInterval)
 
     startTransition(() => {
       stkAction(formData)
@@ -766,226 +779,178 @@ function SubscriptionSection({
     )}
     <Card padding="md">
       <CardHeader title="Subscription" />
-      <div
-        className="rounded-xl"
-        style={{
-          border: '1px solid var(--color-border)',
-          backgroundColor: 'var(--color-background)',
-          padding: 16,
-          marginBottom: 16,
-        }}
-      >
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          {/* Current plan summary */}
-          <div>
-            <p style={{ fontSize: 15, fontWeight: 600, color: 'var(--color-text-primary)', margin: 0 }}>
-              Current plan: {formatStatusLabel(activePlan)}
-            </p>
-            <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 6 }}>
-              {subscription?.branch_count ?? 0} branches, {formatMoney(Number(subscription?.monthly_amount ?? 0), activeCurrency)} monthly
-            </p>
-            <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 4 }}>
-              Renewal date: {formatDateLabel(subscription?.current_period_end ?? null)}
-            </p>
-          </div>
-          <Badge variant={activeStatus === 'active' ? 'success' : 'warning'}>{formatStatusLabel(activeStatus)}</Badge>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-        {PLAN_OPTIONS.map((plan) => {
-          const isCurrent = plan.key === activePlan
-
-          return (
-            <div
-              key={plan.key}
-              className="rounded-xl"
-              style={{
-                border: `1px solid ${isCurrent ? 'var(--color-success)' : 'var(--color-border)'}`,
-                backgroundColor: isCurrent ? 'var(--color-success-light)' : 'var(--color-background)',
-                padding: 16,
-              }}
-            >
-              {/* Plan card header */}
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <p style={{ fontSize: 15, fontWeight: 600, color: 'var(--color-text-primary)', margin: 0 }}>
-                    {plan.label}
-                  </p>
-                  <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 6 }}>
-                    {formatMoney(plan.monthlyAmount, activeCurrency)}/mo
-                  </p>
-                </div>
-                {isCurrent ? <Badge variant="success">Current</Badge> : <Badge variant="muted">Coming soon</Badge>}
-              </div>
-
-              <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 12 }}>{plan.branchLimit}</p>
-              <button
-                type="button"
-                disabled
-                className={isCurrent ? 'btn-success' : 'btn-outline'}
-                style={{ padding: '8px 16px', borderRadius: 8, marginTop: 14, width: '100%', opacity: isCurrent ? 1 : 0.65 }}
-              >
-                {isCurrent ? 'Active plan' : 'Upgrade coming soon'}
-              </button>
-            </div>
-          )
-        })}
-      </div>
-
-      <div
-        className="rounded-xl"
-        style={{
-          border: '1px solid var(--color-border)',
-          backgroundColor: 'var(--color-background)',
-          padding: 16,
-          marginTop: 18,
-        }}
-      >
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <p style={{ fontSize: 15, fontWeight: 700, color: 'var(--color-text-primary)', margin: 0 }}>
-              Submit rental payment
-            </p>
-            <p style={{ fontSize: 13, color: 'var(--color-text-muted)', marginTop: 6 }}>
-              Pay {formatMoney(Number(subscription?.monthly_amount ?? 200), activeCurrency)} for this month with an M-Pesa PayBill prompt or submit a manual reference.
-              This is only for your Retivox rental/subscription payment; customer sales payments in transactions remain separate.
-            </p>
-          </div>
-          <Badge variant="info">Manual verification</Badge>
-        </div>
-
-        <form
-          onSubmit={onSubmitStk}
-          className="rounded-xl"
-          style={{
-            border: '1px solid var(--color-success)',
-            backgroundColor: 'var(--color-success-light)',
-            padding: 14,
-            marginTop: 16,
-          }}
-        >
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_180px_auto] md:items-end">
-            <label style={{ fontSize: 13 }}>
-              <span style={{ display: 'block', marginBottom: 6, fontWeight: 700, color: 'var(--color-text-primary)' }}>
-                Pay with M-Pesa PayBill prompt
-              </span>
-              <input
-                value={stkPhone}
-                onChange={(event) => setStkPhone(event.target.value)}
-                placeholder="07XXXXXXXX"
-                required
-                style={inputStyle}
-              />
-            </label>
-            <label style={{ fontSize: 13 }}>
-              <span style={{ display: 'block', marginBottom: 6, fontWeight: 700, color: 'var(--color-text-primary)' }}>
-                Amount
-              </span>
-              <input
-                value={stkAmount}
-                onChange={(event) => setStkAmount(event.target.value)}
-                type="number"
-                min="1"
-                step="1"
-                required
-                style={inputStyle}
-              />
-            </label>
-            <button
-              type="submit"
-              className="btn-success"
-              disabled={isStkPending}
-              style={{ padding: '11px 18px', borderRadius: 8, opacity: isStkPending ? 0.8 : 1 }}
-            >
-              {isStkPending ? 'Sending...' : `Pay ${formatMoney(Number(stkAmount || subscription?.monthly_amount || 200), activeCurrency)}`}
-            </button>
-          </div>
-          {stkState.error && (
-            <p style={{ margin: '10px 0 0', fontSize: 13, color: 'var(--color-danger)' }}>
-              {stkState.error}
-            </p>
-          )}
-          <p style={{ margin: '10px 0 0', fontSize: 12, color: 'var(--color-text-muted)' }}>
-            You will receive a Lipa na M-Pesa PayBill prompt on this phone. Enter your PIN on your phone only; Retivox never asks for or stores your M-Pesa PIN.
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between" style={{ borderBottom: '1px solid var(--color-border)', paddingBottom: 16 }}>
+        <div>
+          <p style={{ fontSize: 16, fontWeight: 750, color: 'var(--color-text-primary)', margin: 0 }}>
+            {displayPlanKey === 'trial' ? 'Free' : plans.find((plan) => plan.plan_key === displayPlanKey)?.name ?? formatStatusLabel(displayPlanKey)} plan
           </p>
-        </form>
+          <p style={{ fontSize: 13, color: 'var(--color-text-muted)', margin: '6px 0 0' }}>
+              {displayPlanKey === 'trial'
+              ? 'Free access for 30 days from registration.'
+                : `${subscription?.branch_count ?? 0} branches · ${displayBillingInterval} billing`}
+          </p>
+          <p style={{ fontSize: 13, color: 'var(--color-text-muted)', margin: '4px 0 0' }}>
+            {verifiedPlanIsDue
+              ? 'A verified payment is ready; access resumes with this paid plan.'
+              : daysUntilRenewal === null
+              ? 'Renewal date not available'
+              : isPeriodOver
+                ? graceDaysRemaining > 0 ? `Read-only grace period · ${graceDaysRemaining} days remaining` : 'Payment required to resume business activity'
+                : `${daysUntilRenewal} days until renewal · ${formatDateLabel(subscription?.current_period_end ?? null)}`}
+          </p>
+          {pendingPlan && subscription?.next_period_start && (
+            <p style={{ fontSize: 13, color: 'var(--color-primary)', margin: '5px 0 0' }}>
+              {pendingPlan.name} {subscription.next_billing_interval} plan {verifiedPlanIsDue ? 'is ready to activate' : `is scheduled for ${formatDateLabel(subscription.next_period_start)} after payment verification`}.
+            </p>
+          )}
+        </div>
+        <Badge variant={isPeriodOver ? 'danger' : activeStatus === 'active' ? 'success' : 'warning'}>
+          {isPeriodOver ? 'Read only' : formatStatusLabel(activeStatus)}
+        </Badge>
+      </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 16 }}>
-          <div style={{ height: 1, backgroundColor: 'var(--color-border)', flex: 1 }} />
-          <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>Manual fallback</span>
-          <div style={{ height: 1, backgroundColor: 'var(--color-border)', flex: 1 }} />
+      {isPeriodOver && (
+        <div role="status" style={{ border: '1px solid var(--color-warning)', backgroundColor: 'var(--color-warning-light)', borderRadius: 8, padding: 12, marginTop: 14, color: 'var(--color-text-primary)', fontSize: 13 }}>
+          Transactions and business changes are paused until a subscription payment is verified. Settings and business data remain available.
+        </div>
+      )}
+
+      <div className="flex flex-col gap-4" style={{ paddingTop: 18 }}>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p style={{ fontSize: 14, fontWeight: 750, color: 'var(--color-text-primary)', margin: 0 }}>Choose a plan</p>
+          <div className="flex gap-2" role="group" aria-label="Billing period">
+            {(['monthly', 'yearly'] as const).map((interval) => (
+              <button
+                key={interval}
+                type="button"
+                aria-pressed={billingInterval === interval}
+                className={billingInterval === interval ? 'btn-primary' : 'btn-outline'}
+                onClick={() => setBillingInterval(interval)}
+                style={{ borderRadius: 8, padding: '8px 12px' }}
+              >
+                {interval === 'monthly' ? 'Monthly' : 'Yearly'}
+              </button>
+            ))}
+          </div>
         </div>
 
-        <form onSubmit={onSubmitPayment} style={{ marginTop: 16 }}>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <label style={{ fontSize: 13 }}>
-              <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>
-                Payment method
-              </span>
-              <select
-                value={paymentMethod}
-                onChange={(event) => setPaymentMethod(event.target.value as SubscriptionPaymentRequestRow['payment_method'])}
-                style={inputStyle}
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {plans.map((plan) => {
+            const isCurrent = plan.plan_key === activePlan
+            const isSelected = plan.plan_key === selectedPlanKey
+            const annualAmount = Math.round(Number(plan.monthly_amount) * 12 * (1 - Number(plan.annual_discount_percent) / 100) * 100) / 100
+            const price = billingInterval === 'yearly' ? annualAmount : Number(plan.monthly_amount)
+            const unit = billingInterval === 'yearly' ? '/year' : '/month'
+
+            return (
+              <button
+                key={plan.id}
+                type="button"
+                disabled={plan.plan_key === 'trial' && !isCurrent}
+                aria-pressed={isSelected}
+                onClick={() => {
+                  if (plan.plan_key !== 'trial') setSelectedPlanKey(plan.plan_key)
+                }}
+                className="text-left"
+                style={{
+                  border: `1px solid ${isSelected || isCurrent ? 'var(--color-success)' : 'var(--color-border)'}`,
+                  borderRadius: 8,
+                  backgroundColor: isSelected || isCurrent ? 'var(--color-success-light)' : 'var(--color-background)',
+                  padding: 14,
+                  color: 'var(--color-text-primary)',
+                }}
               >
-                <option value="mpesa_manual">M-Pesa</option>
-                <option value="bank_transfer">Bank transfer</option>
-                <option value="cash_deposit">Cash deposit</option>
-                <option value="other">Other</option>
-              </select>
-            </label>
+                <span className="flex items-center justify-between gap-2">
+                  <strong style={{ fontSize: 14 }}>{plan.plan_key === 'trial' ? 'Free' : plan.name}</strong>
+                  {isCurrent && <Badge variant="success">Current</Badge>}
+                </span>
+                <span style={{ display: 'block', fontSize: 18, fontWeight: 800, marginTop: 10 }}>
+                  {formatMoney(price, plan.currency)}<small style={{ fontSize: 12, fontWeight: 500, color: 'var(--color-text-muted)' }}>{unit}</small>
+                </span>
+                {billingInterval === 'yearly' && plan.plan_key !== 'trial' && (
+                  <span style={{ display: 'block', color: 'var(--color-success)', fontSize: 12, marginTop: 4 }}>
+                    {plan.annual_discount_percent}% off monthly pricing
+                  </span>
+                )}
+                <span style={{ display: 'block', color: 'var(--color-text-muted)', fontSize: 12, lineHeight: 1.5, marginTop: 8 }}>
+                  {plan.description || (plan.branch_limit ? `Up to ${plan.branch_limit} branches` : 'Unlimited branches')}
+                </span>
+                <span style={{ display: 'block', color: 'var(--color-text-muted)', fontSize: 11, marginTop: 8 }}>
+                  {plan.branch_limit ? `${plan.branch_limit} branch limit` : 'Unlimited branches'}
+                </span>
+              </button>
+            )
+          })}
+        </div>
 
-            <label style={{ fontSize: 13 }}>
-              <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>
-                Reference code
+        {selectedPlan && selectedPlan.plan_key !== 'trial' && (
+          <div style={{ borderTop: '1px solid var(--color-border)', paddingTop: 16 }}>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p style={{ fontSize: 14, fontWeight: 750, color: 'var(--color-text-primary)', margin: 0 }}>
+                {selectedPlan.name} · {billingInterval} · {formatMoney(selectedAmount, selectedPlan.currency)}
+              </p>
+              <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
+                {activePlan === 'trial' && !isPeriodOver ? 'Starts after your free month' : isPeriodOver ? 'Starts immediately after payment is verified' : 'Starts at your next renewal after payment is verified'}
               </span>
-              <input
-                value={referenceCode}
-                onChange={(event) => setReferenceCode(event.target.value.toUpperCase())}
-                placeholder="e.g. QG12ABC345"
-                required
-                style={inputStyle}
-              />
-            </label>
-
-            <label style={{ fontSize: 13 }}>
-              <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>
-                Phone / payer note
-              </span>
-              <input
-                value={payerPhone}
-                onChange={(event) => setPayerPhone(event.target.value)}
-                placeholder="Optional"
-                style={inputStyle}
-              />
-            </label>
-          </div>
-
-          {state.error && (
-            <div
-              style={{
-                backgroundColor: 'var(--color-danger-light)',
-                border: '1px solid var(--color-danger)',
-                color: 'var(--color-danger)',
-                borderRadius: 8,
-                padding: '12px 14px',
-                fontSize: 13,
-                marginTop: 14,
-              }}
-            >
-              {state.error}
             </div>
-          )}
 
-          <button
-            type="submit"
-            className="btn-primary"
-            disabled={isPending}
-            style={{ padding: '10px 20px', borderRadius: 8, marginTop: 16, opacity: isPending ? 0.8 : 1 }}
-          >
-            {isPending ? 'Submitting...' : 'Submit payment reference'}
-          </button>
-        </form>
+            <div className="flex flex-wrap gap-2" style={{ marginTop: 14 }} role="group" aria-label="Subscription payment method">
+              {([
+                ['mpesa_stk', 'M-Pesa prompt'],
+                ['mpesa_manual', 'M-Pesa reference'],
+                ['bank_transfer', 'Bank transfer'],
+                ['cash_deposit', 'Cash deposit'],
+                ['other', 'Other'],
+              ] as const).map(([method, label]) => (
+                <button
+                  key={method}
+                  type="button"
+                  aria-pressed={paymentMethod === method}
+                  className={paymentMethod === method ? 'btn-primary' : 'btn-outline'}
+                  onClick={() => setPaymentMethod(method)}
+                  style={{ borderRadius: 8, padding: '8px 11px', fontSize: 12 }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {paymentMethod === 'mpesa_stk' ? (
+              <form onSubmit={onSubmitStk} className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto] sm:items-end" style={{ marginTop: 14 }}>
+                <label style={{ fontSize: 13 }}>
+                  M-Pesa phone number
+                  <input value={stkPhone} onChange={(event) => setStkPhone(event.target.value)} placeholder="07XXXXXXXX" required style={inputStyle} />
+                </label>
+                <button type="submit" className="btn-success" disabled={isStkPending || !Number.isInteger(selectedAmount)} style={{ borderRadius: 8, padding: '11px 18px' }}>
+                  {isStkPending ? 'Sending prompt...' : `Pay ${formatMoney(selectedAmount, selectedPlan.currency)}`}
+                </button>
+                {stkState.error && <p style={{ margin: 0, fontSize: 13, color: 'var(--color-danger)' }}>{stkState.error}</p>}
+                {!Number.isInteger(selectedAmount) && <p style={{ margin: 0, fontSize: 12, color: 'var(--color-text-muted)' }}>This amount is not a whole number; select a manual payment method.</p>}
+                <p style={{ gridColumn: '1 / -1', margin: 0, fontSize: 12, color: 'var(--color-text-muted)' }}>
+                  Complete the prompt on your phone. Retivox never asks for or stores your M-Pesa PIN.
+                </p>
+              </form>
+            ) : (
+              <form onSubmit={onSubmitPayment} className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end" style={{ marginTop: 14 }}>
+                <label style={{ fontSize: 13 }}>
+                  Payment reference
+                  <input value={referenceCode} onChange={(event) => setReferenceCode(event.target.value.toUpperCase())} placeholder="Transaction or deposit reference" required style={inputStyle} />
+                </label>
+                <label style={{ fontSize: 13 }}>
+                  Payer phone or note
+                  <input value={payerPhone} onChange={(event) => setPayerPhone(event.target.value)} placeholder="Optional" style={inputStyle} />
+                </label>
+                <button type="submit" className="btn-primary" disabled={isPending} style={{ borderRadius: 8, padding: '11px 16px' }}>
+                  {isPending ? 'Submitting...' : 'Submit for review'}
+                </button>
+                {state.error && <p style={{ gridColumn: '1 / -1', margin: 0, fontSize: 13, color: 'var(--color-danger)' }}>{state.error}</p>}
+                <p style={{ gridColumn: '1 / -1', margin: 0, fontSize: 12, color: 'var(--color-text-muted)' }}>
+                  Access resumes after a platform developer verifies the payment.
+                </p>
+              </form>
+            )}
+          </div>
+        )}
       </div>
 
       <div style={{ borderTop: '1px solid var(--color-border)', marginTop: 20, paddingTop: 18 }}>
@@ -1019,6 +984,11 @@ function SubscriptionSection({
                     </td>
                     <td style={{ padding: 12, fontSize: 13, color: 'var(--color-text-primary)' }}>
                       {getPaymentMethodLabel(request.payment_method)}
+                      {request.plan_key && (
+                        <span style={{ display: 'block', color: 'var(--color-text-muted)', fontSize: 11, marginTop: 3 }}>
+                          {formatStatusLabel(request.plan_key)} · {request.billing_interval}
+                        </span>
+                      )}
                     </td>
                     <td style={{ padding: 12, fontSize: 13, color: 'var(--color-text-primary)' }}>
                       <span style={{ display: 'block', fontWeight: 700 }}>
@@ -1181,7 +1151,7 @@ function DangerZoneSection() {
 /**
  * Owner settings dashboard client component.
  */
-export default function SettingsPageClient({ business, ownerProfile, subscription, subscriptionPaymentRequests, loginReviews }: Props) {
+export default function SettingsPageClient({ billingAsOf, business, ownerProfile, subscription, subscriptionPlans, subscriptionPaymentRequests, loginReviews }: Props) {
   return (
     <div className="flex flex-col gap-6" data-currency={business.currency}>
       {/* Page header */}
@@ -1204,7 +1174,7 @@ export default function SettingsPageClient({ business, ownerProfile, subscriptio
       <BusinessProfileSection business={business} />
       <AccountSecuritySection ownerProfile={ownerProfile} />
       <LoginReviewsSection reviews={loginReviews} />
-      <SubscriptionSection business={business} subscription={subscription} paymentRequests={subscriptionPaymentRequests} />
+      <SubscriptionSection billingAsOf={billingAsOf} business={business} subscription={subscription} plans={subscriptionPlans} paymentRequests={subscriptionPaymentRequests} />
       <AppearanceSection userId={ownerProfile.id} />
       <DangerZoneSection />
     </div>
