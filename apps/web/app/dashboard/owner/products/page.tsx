@@ -56,6 +56,8 @@ type ProductRow = {
   product_kind: 'fixed_package' | 'measured_counted'
   unit: string
   description: string | null
+  tracks_expiry: boolean
+  barcodes?: string[]
   is_active: boolean
   created_at: string
   product_pricing?: ProductPricingRow[] | null
@@ -70,6 +72,7 @@ type LegacyProductRow = {
   category: string
   unit: string
   description: string | null
+  tracks_expiry?: boolean
   is_active: boolean
   created_at: string
   product_pricing?: ProductPricingRow[] | null
@@ -90,7 +93,7 @@ type QueryErrorLike = {
 }
 
 const PRODUCT_SELECT_WITH_CLASSIFICATION =
-  'id, name, sku, category, subcategory, brand_family, product_kind, unit, description, is_active, created_at, product_pricing(base_price, min_price, max_price), product_uom_links(id, uom_id, is_purchase_uom, is_sale_uom, is_base_uom, is_default_purchase_uom, is_default_sale_uom), product_pricing_models(id, branch_id, pricing_method, rounding_rule, status, product_price_points(quantity_in_uom, base_quantity, uom_id, price, max_discount_amount))'
+  'id, name, sku, category, subcategory, brand_family, product_kind, unit, description, tracks_expiry, is_active, created_at, product_pricing(base_price, min_price, max_price), product_uom_links(id, uom_id, is_purchase_uom, is_sale_uom, is_base_uom, is_default_purchase_uom, is_default_sale_uom), product_pricing_models(id, branch_id, pricing_method, rounding_rule, status, product_price_points(quantity_in_uom, base_quantity, uom_id, price, max_discount_amount))'
 
 const PRODUCT_SELECT_LEGACY =
   'id, name, sku, category, unit, description, is_active, created_at, product_pricing(base_price, min_price, max_price)'
@@ -125,6 +128,7 @@ function normalizeLegacyProduct(row: LegacyProductRow): ProductRow {
     subcategory: null,
     brand_family: null,
     product_kind: 'fixed_package',
+    tracks_expiry: row.tracks_expiry ?? false,
   }
 }
 
@@ -164,7 +168,27 @@ export default async function ProductsPage() {
     )
 
     if (!productsResponse.error) {
-      return (productsResponse.data ?? []) as ProductRow[]
+      const rows = (productsResponse.data ?? []) as ProductRow[]
+      if (rows.length === 0) return rows
+      try {
+        const barcodeResponse = await supabase
+          .from('product_barcodes')
+          .select('product_id, code')
+          .eq('business_id', businessId)
+          .eq('is_active', true)
+          .in('product_id', rows.map((product) => product.id))
+        if (barcodeResponse.error) throw barcodeResponse.error
+        const barcodesByProduct = new Map<string, string[]>()
+        for (const barcode of barcodeResponse.data ?? []) {
+          const codes = barcodesByProduct.get(barcode.product_id) ?? []
+          codes.push(barcode.code)
+          barcodesByProduct.set(barcode.product_id, codes)
+        }
+        return rows.map((product) => ({ ...product, barcodes: barcodesByProduct.get(product.id) ?? [] }))
+      } catch (error) {
+        logger.warn('Product barcodes could not be loaded', { businessId, error })
+        return rows.map((product) => ({ ...product, barcodes: [] }))
+      }
     }
 
     if (!isSchemaRolloutError(productsResponse.error)) {
@@ -200,7 +224,7 @@ export default async function ProductsPage() {
       throw legacyResponse.error
     }
 
-    return ((legacyResponse.data ?? []) as LegacyProductRow[]).map(normalizeLegacyProduct)
+    return ((legacyResponse.data ?? []) as LegacyProductRow[]).map((row) => ({ ...normalizeLegacyProduct(row), barcodes: [] }))
   }
 
   /**

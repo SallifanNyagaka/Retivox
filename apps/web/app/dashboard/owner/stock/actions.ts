@@ -35,6 +35,8 @@ type DeliveryDraftItem = {
   productId: string
   uomId: string
   quantity: number
+  expiresOn: string
+  supplierLotCode: string
   unitCost: string
   costs: DeliveryCostDraft[]
   notes: string
@@ -69,6 +71,8 @@ const recordDeliverySchema = z.object({
         productId: z.string().uuid('Select a product'),
         uomId: z.string().uuid('Select a unit'),
         quantity: z.number().positive('Quantity must be greater than zero'),
+        expiresOn: z.string().trim().optional().default(''),
+        supplierLotCode: z.string().trim().max(100).optional().default(''),
         unitCost: z.string().trim().max(32),
         costs: z.array(
           z.object({
@@ -196,6 +200,8 @@ function parseDeliveryItems(formData: FormData): DeliveryDraftItem[] {
       productId,
       uomId: getString(formData, `uomId_${index}`),
       quantity: Number(quantityValue),
+      expiresOn: getString(formData, `expiresOn_${index}`),
+      supplierLotCode: getString(formData, `supplierLotCode_${index}`),
       unitCost: totalUnitCost > 0 ? String(totalUnitCost) : getString(formData, `unitCost_${index}`),
       costs,
       notes: getString(formData, `notes_${index}`),
@@ -249,6 +255,8 @@ function parseDeliveryEditItems(formData: FormData): DeliveryEditDraftItem[] {
       productId,
       uomId: getString(formData, `uomId_${index}`),
       quantity: Number(quantityValue),
+      expiresOn: '',
+      supplierLotCode: '',
       unitCost: totalUnitCost > 0 ? String(totalUnitCost) : getString(formData, `unitCost_${index}`),
       costs,
       notes: getString(formData, `notes_${index}`),

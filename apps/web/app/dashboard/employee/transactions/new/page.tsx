@@ -64,7 +64,27 @@ export default async function EmployeeNewTransactionPage() {
 
     const business = businessResponse.data as BusinessCurrencyRow | null
     currency = business?.currency ?? currency
-    products = ((productsResponse.data ?? []) as EmployeeAvailableProductRow[]).map(mapEmployeeProductOption)
+    const rawProducts = (productsResponse.data ?? []) as EmployeeAvailableProductRow[]
+    const productIds = rawProducts.map((row) => row.product_id)
+    const barcodeResponse = productIds.length > 0
+      ? await supabase
+          .from('product_barcodes')
+          .select('product_id, code')
+          .eq('business_id', employeeProfile.businessId)
+          .eq('is_active', true)
+          .in('product_id', productIds)
+      : { data: [], error: null }
+    if (barcodeResponse.error) throw barcodeResponse.error
+    const barcodesByProduct = new Map<string, string[]>()
+    for (const row of barcodeResponse.data ?? []) {
+      const codes = barcodesByProduct.get(row.product_id) ?? []
+      codes.push(row.code)
+      barcodesByProduct.set(row.product_id, codes)
+    }
+    products = rawProducts.map((row) => mapEmployeeProductOption({
+      ...row,
+      barcodes: barcodesByProduct.get(row.product_id) ?? [],
+    }))
   } catch (error: unknown) {
     logger.error('EmployeeNewTransactionPage data fetch failed', {
       userId: employeeProfile.id,

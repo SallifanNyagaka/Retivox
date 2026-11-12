@@ -7,6 +7,7 @@ export type EmployeeAvailableProductRow = {
   product_id: string
   name: string
   sku: string
+  barcodes?: string[]
   category: string
   unit: string
   selling_price: number
@@ -52,6 +53,7 @@ export function mapEmployeeProductOption(row: EmployeeAvailableProductRow): Empl
     productId: row.product_id,
     name: row.name,
     sku: row.sku,
+    barcodes: row.barcodes ?? [],
     category: row.category,
     unit: row.unit,
     sellingPrice: Number(row.selling_price),

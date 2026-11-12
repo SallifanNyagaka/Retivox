@@ -83,6 +83,8 @@ type Product = {
   product_kind?: ProductKind
   unit: string
   description: string | null
+  tracks_expiry?: boolean
+  barcodes?: string[]
   is_active: boolean
   created_at: string
   product_pricing?: ProductPricing[] | null
@@ -250,11 +252,13 @@ export default function EditProductModal({ product, currency, uoms, branches, is
   const [productKind, setProductKind] = useState<ProductKind>('fixed_package')
   const [name, setName] = useState('')
   const [sku, setSku] = useState('')
+  const [barcodes, setBarcodes] = useState('')
   const [category, setCategory] = useState('')
   const [subcategory, setSubcategory] = useState('')
   const [brandFamily, setBrandFamily] = useState('')
   const [unit, setUnit] = useState('')
   const [description, setDescription] = useState('')
+  const [tracksExpiry, setTracksExpiry] = useState(false)
   const [selectedBaseUomId, setSelectedBaseUomId] = useState('')
   const [purchaseUomIds, setPurchaseUomIds] = useState<string[]>([])
   const [saleUomIds, setSaleUomIds] = useState<string[]>([])
@@ -467,11 +471,13 @@ export default function EditProductModal({ product, currency, uoms, branches, is
       setProductKind(product.product_kind ?? 'fixed_package')
       setName(product.name)
       setSku(product.sku)
+      setBarcodes(product.barcodes?.join('\n') ?? '')
       setCategory(product.category)
       setSubcategory(product.subcategory ?? '')
       setBrandFamily(product.brand_family ?? '')
       setUnit(product.unit)
       setDescription(product.description ?? '')
+      setTracksExpiry(product.tracks_expiry === true)
       setSelectedBaseUomId(fallbackBaseUomId)
       setPurchaseUomIds(purchaseIds.length > 0 ? Array.from(new Set(purchaseIds)) : fallbackBaseUomId ? [fallbackBaseUomId] : [])
       setSaleUomIds(saleIds.length > 0 ? Array.from(new Set(saleIds)) : fallbackBaseUomId ? [fallbackBaseUomId] : [])
@@ -616,11 +622,13 @@ export default function EditProductModal({ product, currency, uoms, branches, is
     formData.set('productKind', productKind)
     formData.set('name', name)
     formData.set('sku', sku)
+    formData.set('barcodes', barcodes)
     formData.set('category', category)
     formData.set('subcategory', subcategory)
     formData.set('brandFamily', brandFamily)
     formData.set('unit', selectedUom?.name ?? unit)
     formData.set('description', description)
+    formData.set('tracksExpiry', String(tracksExpiry))
     formData.set('basePrice', basePrice)
     formData.set('minPrice', minPrice)
     formData.set('maxPrice', maxPrice)
@@ -988,6 +996,16 @@ export default function EditProductModal({ product, currency, uoms, branches, is
             )}
 
             <label style={{ fontSize: 13 }}>
+              <span style={{ display: 'block', marginBottom: 6, fontWeight: 500 }}>Add barcode values</span>
+              <textarea
+                value={barcodes}
+                onChange={(event) => setBarcodes(event.target.value)}
+                rows={2}
+                placeholder="One new barcode per line. Existing codes stay linked."
+                style={{ width: '100%', border: '1px solid var(--color-border)', borderRadius: 8, padding: '10px 12px', boxSizing: 'border-box', resize: 'vertical', fontSize: 13 }}
+              />
+            </label>
+            <label style={{ fontSize: 13 }}>
               <span style={{ display: 'block', marginBottom: 6, fontWeight: 500 }}>Description</span>
               <textarea
                 value={description}
@@ -995,6 +1013,13 @@ export default function EditProductModal({ product, currency, uoms, branches, is
                 rows={3}
                 style={{ width: '100%', border: '1px solid var(--color-border)', borderRadius: 8, padding: '10px 12px', boxSizing: 'border-box', resize: 'vertical', fontSize: 13 }}
               />
+            </label>
+            <label className="flex items-start gap-3" style={{ border: '1px solid var(--color-border)', borderRadius: 8, padding: 12 }}>
+              <input type="checkbox" checked={tracksExpiry} onChange={(event) => setTracksExpiry(event.target.checked)} style={{ marginTop: 3 }} />
+              <span style={{ fontSize: 13 }}>
+                <strong style={{ display: 'block' }}>Track expiry by batch</strong>
+                <span style={{ display: 'block', marginTop: 3, color: 'var(--color-text-muted)', fontSize: 12 }}>Require an expiry date each time this product is received.</span>
+              </span>
             </label>
 
             <div>

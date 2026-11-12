@@ -37,6 +37,7 @@ import type {
   StockProductOption,
   SupplierDirectoryRow,
   StockUOMOption,
+  StockExpiryAlert,
 } from '../../app/dashboard/owner/stock/types'
 
 /**
@@ -51,6 +52,7 @@ export type StockDashboardData = {
   deliveries: StockDeliveryRow[]
   deliveryEditRequests: StockDeliveryEditRequestRow[]
   suppliers: SupplierDirectoryRow[]
+  expiryAlerts: StockExpiryAlert[]
 }
 
 /**
@@ -113,6 +115,8 @@ type SupplierDeliveryItemSummary = {
   quantity_expected: number | null
   quantity_received: number | null
   quantity_in_uom: string | number | null
+  expires_on: string | null
+  supplier_lot_code: string | null
   base_quantity_expected: string | number | null
   base_quantity_received: string | number | null
   unit_cost: string | number | null
@@ -380,6 +384,8 @@ function normalizeDeliveryRows(rows: RawSupplierDeliveryRow[]): StockDeliveryRow
         uom_id: item.uom_id,
         uom_name: uom?.name ?? null,
         quantity_in_uom: item.quantity_in_uom === null ? null : Number(item.quantity_in_uom),
+        expires_on: item.expires_on,
+        supplier_lot_code: item.supplier_lot_code,
         base_quantity_expected: Number(item.base_quantity_expected ?? item.quantity_expected ?? 0),
         base_quantity_received: Number(item.base_quantity_received ?? item.quantity_received ?? 0),
         unit_cost: item.unit_cost === null ? null : Number(item.unit_cost),
@@ -545,6 +551,7 @@ export async function getStockDashboardData(userId: string, businessId: string):
         deliveries: [],
         deliveryEditRequests: [],
         suppliers: [],
+        expiryAlerts: [],
       }
     }
 
@@ -607,7 +614,7 @@ export async function getStockDashboardData(userId: string, businessId: string):
         () =>
           supabase
             .from('products')
-            .select('id, name, sku')
+            .select('id, name, sku, tracks_expiry')
             .eq('business_id', businessId)
             .eq('is_active', true)
             .is('deleted_at', null)
@@ -616,7 +623,7 @@ export async function getStockDashboardData(userId: string, businessId: string):
         () =>
           supabase
             .from('products')
-            .select('id, name, sku')
+            .select('id, name, sku, tracks_expiry')
             .eq('business_id', businessId)
             .eq('is_active', true)
             .order('name', { ascending: true })
@@ -654,6 +661,8 @@ export async function getStockDashboardData(userId: string, businessId: string):
             quantity_in_uom,
             base_quantity_expected,
             base_quantity_received,
+            expires_on,
+            supplier_lot_code,
             unit_cost,
             total_cost,
             notes,
@@ -811,6 +820,26 @@ export async function getStockDashboardData(userId: string, businessId: string):
     }
 
     const normalizedRows = normalizeStockRows(stockRows, uomsByProduct)
+    let expiryAlerts: StockExpiryAlert[] = []
+    try {
+      const expiryResponse = await supabase
+        .from('product_expiry_alerts')
+        .select('business_id, branch_id, product_id, product_name, sku, lot_id, supplier_lot_code, expires_on, days_remaining, base_quantity_on_hand, alert_status')
+        .eq('business_id', businessId)
+        .in('branch_id', branchIds)
+        .order('expires_on', { ascending: true })
+        .limit(200)
+      if (expiryResponse.error) throw expiryResponse.error
+      const branchNameById = new Map((branchesResponse.data ?? []).map((branch) => [branch.id, branch.name]))
+      expiryAlerts = (expiryResponse.data ?? []).map((row) => ({
+        ...row,
+        branch_name: branchNameById.get(row.branch_id) ?? 'Branch',
+        days_remaining: Number(row.days_remaining),
+        base_quantity_on_hand: Number(row.base_quantity_on_hand),
+      })) as StockExpiryAlert[]
+    } catch (error) {
+      logger.warn('Stock expiry alerts are unavailable; apply the expiry and lot migrations to enable them', { businessId, error })
+    }
 
     return {
       rows: normalizedRows,
@@ -824,6 +853,7 @@ export async function getStockDashboardData(userId: string, businessId: string):
         (suppliersResponse.data ?? []) as RawSupplierDirectoryRow[],
         (supplierStatsResponse.data ?? []) as RawSupplierStatsDeliveryRow[]
       ),
+      expiryAlerts,
     }
   } catch (error: unknown) {
     logger.error('getStockDashboardData failed', { userId, businessId, error })

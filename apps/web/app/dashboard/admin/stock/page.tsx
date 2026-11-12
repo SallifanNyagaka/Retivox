@@ -21,7 +21,7 @@ export default async function AdminStockPage() {
     throw new Error('Admin profile missing business ID')
   }
 
-  const { rows, metrics, branches, products, movements, deliveries, deliveryEditRequests, suppliers } = await getStockDashboardData(profile.id, businessId)
+  const { rows, metrics, branches, products, movements, deliveries, deliveryEditRequests, suppliers, expiryAlerts } = await getStockDashboardData(profile.id, businessId)
 
   return (
     <div className="flex flex-col gap-6">
@@ -34,7 +34,7 @@ export default async function AdminStockPage() {
         </p>
       </div>
 
-      <StockPageClient role="admin" rows={rows} metrics={metrics} branches={branches} products={products} movements={movements} deliveries={deliveries} deliveryEditRequests={deliveryEditRequests} suppliers={suppliers} />
+      <StockPageClient role="admin" rows={rows} metrics={metrics} branches={branches} products={products} movements={movements} deliveries={deliveries} deliveryEditRequests={deliveryEditRequests} suppliers={suppliers} expiryAlerts={expiryAlerts} />
     </div>
   )
 }

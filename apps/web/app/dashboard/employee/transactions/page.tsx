@@ -13,6 +13,7 @@ import { requireAuth } from '../../../../lib/auth/helpers'
 import { getEmployeeProfile } from '../../../../lib/employee/auth'
 import logger from '../../../../lib/logger'
 import { createClient } from '../../../../lib/supabase/server'
+import PrintReceiptButton from './PrintReceiptButton'
 
 /**
  * Number of employee transactions shown per page.
@@ -74,6 +75,7 @@ type EmployeeTransactionRow = {
   subtotal: number
   discount_amount: number
   total_amount: number
+  receipt_number: string
   origin: string
   recorded_at: string
   branches: { name: string } | { name: string }[] | null
@@ -97,6 +99,8 @@ type EmployeeTransactionItemRow = {
   quantity: number
   quantity_in_uom: string | number | null
   base_quantity: string | number | null
+  net_line_total: string | number | null
+  line_total: string | number | null
   products: { name: string; sku: string | null } | { name: string; sku: string | null }[] | null
   units_of_measure: { name: string; conversion_factor: string | number } | { name: string; conversion_factor: string | number }[] | null
 }
@@ -110,6 +114,7 @@ type EmployeeTransactionItemSummary = {
   uomName: string | null
   uomConversionFactor: number | null
   baseUomName: string | null
+  lineTotal: number
 }
 
 type ProductBaseUomRow = {
@@ -310,7 +315,7 @@ export default async function EmployeeTransactionsPage({
 
     let transactionQuery = supabase
       .from('transactions')
-      .select('id, branch_id, status, subtotal, discount_amount, total_amount, origin, recorded_at, branches(name)', { count: 'exact' })
+      .select('id, receipt_number, branch_id, status, subtotal, discount_amount, total_amount, origin, recorded_at, branches(name)', { count: 'exact' })
       .eq('business_id', employeeProfile.businessId)
       .eq('employee_id', employeeProfile.id)
       .order('recorded_at', { ascending: false })
@@ -350,7 +355,7 @@ export default async function EmployeeTransactionsPage({
       transactionIds.length > 0
         ? supabase
             .from('transaction_items')
-            .select('transaction_id, product_id, recovery_item_id, quantity, quantity_in_uom, base_quantity, products!inner(name, sku), units_of_measure(name, conversion_factor)')
+            .select('transaction_id, product_id, recovery_item_id, quantity, quantity_in_uom, base_quantity, net_line_total, line_total, products!inner(name, sku), units_of_measure(name, conversion_factor)')
             .eq('business_id', employeeProfile.businessId)
             .in('transaction_id', transactionIds)
             .order('id', { ascending: true })
@@ -412,6 +417,7 @@ export default async function EmployeeTransactionsPage({
         uomName: uom?.name ?? null,
         uomConversionFactor: uom?.conversion_factor === undefined ? null : Number(uom.conversion_factor),
         baseUomName: baseUomByProduct.get(item.product_id) ?? null,
+        lineTotal: Number(item.net_line_total ?? item.line_total ?? 0),
       })
 
       itemsByTransaction.set(item.transaction_id, currentItems)
@@ -566,7 +572,7 @@ export default async function EmployeeTransactionsPage({
               <table style={{ width: '100%', borderSpacing: 0 }}>
                 <thead>
                   <tr style={{ textAlign: 'center' }}>
-                    {['Date', 'Store', 'Items', 'Amount', 'Payment', 'Status'].map((heading) => (
+                    {['Date', 'Store', 'Items', 'Amount', 'Payment', 'Status', 'Receipt'].map((heading) => (
                       <th key={heading} style={{ padding: 12, fontSize: 12, color: 'var(--color-text-muted)' }}>
                         {heading}
                       </th>
@@ -614,6 +620,23 @@ export default async function EmployeeTransactionsPage({
                         <Badge variant={getStatusVariant(transaction.status)}>
                           {formatStatusLabel(transaction.status)}
                         </Badge>
+                      </td>
+                      <td style={{ padding: 12, textAlign: 'center' }}>
+                        <PrintReceiptButton
+                          receiptNumber={transaction.receipt_number}
+                          store={transaction.branchName}
+                          currency={currency}
+                          recordedAt={transaction.recorded_at}
+                          items={transaction.itemSummary.map((item) => ({
+                            name: item.productName,
+                            quantity: item.quantityInUom ?? item.quantity,
+                            unit: item.uomName,
+                            amount: item.lineTotal,
+                          }))}
+                          subtotal={Number(transaction.subtotal)}
+                          discount={Number(transaction.discount_amount)}
+                          total={Number(transaction.total_amount)}
+                        />
                       </td>
                     </tr>
                   ))}

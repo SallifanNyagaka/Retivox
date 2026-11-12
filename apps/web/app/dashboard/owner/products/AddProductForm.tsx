@@ -171,10 +171,12 @@ export default function AddProductForm({ currency, uoms, branches }: Props) {
   const [productKind, setProductKind] = useState<ProductKind>('fixed_package')
   const [name, setName] = useState('')
   const [sku, setSku] = useState('')
+  const [barcodes, setBarcodes] = useState('')
   const [category, setCategory] = useState('')
   const [subcategory, setSubcategory] = useState('')
   const [brandFamily, setBrandFamily] = useState('')
   const [description, setDescription] = useState('')
+  const [tracksExpiry, setTracksExpiry] = useState(false)
   const [selectedBaseUomId, setSelectedBaseUomId] = useState(initialUomId)
   const [purchaseUomIds, setPurchaseUomIds] = useState<string[]>(initialUomId ? [initialUomId] : [])
   const [saleUomIds, setSaleUomIds] = useState<string[]>(initialUomId ? [initialUomId] : [])
@@ -479,11 +481,13 @@ export default function AddProductForm({ currency, uoms, branches }: Props) {
     formData.set('productKind', productKind)
     formData.set('name', name)
     formData.set('sku', sku)
+    formData.set('barcodes', barcodes)
     formData.set('category', category)
     formData.set('subcategory', subcategory)
     formData.set('brandFamily', brandFamily)
     formData.set('unit', selectedBaseUom.name)
     formData.set('description', description)
+    formData.set('tracksExpiry', String(tracksExpiry))
     formData.set('basePrice', basePrice)
     formData.set('minPrice', minPrice)
     formData.set('maxPrice', maxPrice)
@@ -607,6 +611,17 @@ export default function AddProductForm({ currency, uoms, branches }: Props) {
                   </label>
                 </div>
 
+                <label style={{ fontSize: 13 }}>
+                  <span style={{ display: 'block', marginBottom: 6, fontWeight: 500 }}>Barcode values (optional)</span>
+                  <textarea
+                    value={barcodes}
+                    onChange={(event) => setBarcodes(event.target.value)}
+                    rows={2}
+                    placeholder="One barcode per line. A scanner can enter the printed code at checkout."
+                    style={{ width: '100%', border: '1px solid var(--color-border)', borderRadius: 8, padding: '10px 12px', boxSizing: 'border-box', resize: 'vertical', fontSize: 13 }}
+                  />
+                </label>
+
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <label style={{ fontSize: 13 }}>
                     <span style={{ display: 'block', marginBottom: 6, fontWeight: 500 }}>Subcategory</span>
@@ -626,6 +641,13 @@ export default function AddProductForm({ currency, uoms, branches }: Props) {
                     rows={3}
                     style={{ width: '100%', border: '1px solid var(--color-border)', borderRadius: 8, padding: '10px 12px', boxSizing: 'border-box', resize: 'vertical', fontSize: 13 }}
                   />
+                </label>
+                <label className="flex items-start gap-3" style={{ border: '1px solid var(--color-border)', borderRadius: 8, padding: 12 }}>
+                  <input type="checkbox" checked={tracksExpiry} onChange={(event) => setTracksExpiry(event.target.checked)} style={{ marginTop: 3 }} />
+                  <span style={{ fontSize: 13 }}>
+                    <strong style={{ display: 'block' }}>Track expiry by batch</strong>
+                    <span style={{ display: 'block', marginTop: 3, color: 'var(--color-text-muted)', fontSize: 12 }}>Require an expiry date each time this product is received.</span>
+                  </span>
                 </label>
               </>
             )}

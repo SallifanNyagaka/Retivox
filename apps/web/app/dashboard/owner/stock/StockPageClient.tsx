@@ -29,6 +29,7 @@ import type {
   StockProductOption,
   SupplierDirectoryRow,
   StockUOMOption,
+  StockExpiryAlert,
 } from './types'
 
 /**
@@ -48,6 +49,8 @@ type DeliveryItemDraft = {
   productId: string
   uomId: string
   quantity: string
+  expiresOn: string
+  supplierLotCode: string
   costs: DeliveryCostDraft[]
   notes: string
 }
@@ -308,6 +311,7 @@ export default function StockPageClient({
   deliveries,
   deliveryEditRequests,
   suppliers,
+  expiryAlerts,
   role,
 }: {
   role: 'owner' | 'admin'
@@ -319,6 +323,7 @@ export default function StockPageClient({
   deliveries: StockDeliveryRow[]
   deliveryEditRequests: StockDeliveryEditRequestRow[]
   suppliers: SupplierDirectoryRow[]
+  expiryAlerts: StockExpiryAlert[]
 }) {
   const router = useRouter()
   const [selectedBranch, setSelectedBranch] = useState<string | null>(null)
@@ -345,6 +350,8 @@ export default function StockPageClient({
     productId: products[0]?.id ?? '',
     uomId: getDefaultProductUOM(products[0] ?? null)?.id ?? '',
     quantity: '',
+    expiresOn: '',
+    supplierLotCode: '',
     costs: [],
     notes: '',
   })
@@ -579,6 +586,8 @@ export default function StockPageClient({
         productId: item.product_id,
         uomId: item.uom_id ?? '',
         quantity: String(item.quantity_in_uom ?? item.base_quantity_received ?? item.base_quantity_expected),
+        expiresOn: item.expires_on ?? '',
+        supplierLotCode: item.supplier_lot_code ?? '',
         costs: item.costs.length > 0
           ? item.costs.map((cost) => ({
               id: cost.id,
@@ -681,6 +690,8 @@ export default function StockPageClient({
       formData.set(`productId_${index}`, item.productId)
       formData.set(`uomId_${index}`, item.uomId)
       formData.set(`quantity_${index}`, item.quantity)
+      formData.set(`expiresOn_${index}`, item.expiresOn)
+      formData.set(`supplierLotCode_${index}`, item.supplierLotCode)
       formData.set(`unitCost_${index}`, totalCost > 0 ? String(totalCost) : '')
       formData.set(`costCount_${index}`, String(item.costs.length))
       item.costs.forEach((cost, costIndex) => {
@@ -839,7 +850,31 @@ export default function StockPageClient({
       </div>
 
       {activeTab === 'levels' && (
-        <div style={{ overflowX: 'auto' }}>
+        <div className="flex flex-col gap-4">
+          {expiryAlerts.length > 0 && (
+            <section style={{ border: '1px solid var(--color-border)', borderRadius: 12, overflow: 'hidden', background: 'var(--color-surface)' }}>
+              <div style={{ padding: '14px 16px', borderBottom: '1px solid var(--color-border)' }}>
+                <h2 style={{ margin: 0, fontSize: 15, color: 'var(--color-text-primary)' }}>Expiry alerts</h2>
+                <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--color-text-muted)' }}>Tracked batches enter this list after 75% of their recorded shelf life has elapsed.</p>
+              </div>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                  <thead><tr>{['Product / batch', 'Branch', 'Expires', 'Remaining', 'Quantity', 'Status'].map((label) => <th key={label} style={{ padding: 10, textAlign: 'left', color: 'var(--color-text-muted)', fontSize: 12 }}>{label}</th>)}</tr></thead>
+                  <tbody>{expiryAlerts.map((alert) => (
+                    <tr key={alert.lot_id} style={{ borderTop: '1px solid var(--color-border)' }}>
+                      <td style={{ padding: 10, color: 'var(--color-text-primary)' }}>{alert.product_name}{alert.sku ? <span style={{ display: 'block', color: 'var(--color-text-muted)', fontSize: 11 }}>{alert.sku}{alert.supplier_lot_code ? ` · lot ${alert.supplier_lot_code}` : ''}</span> : alert.supplier_lot_code ? <span style={{ display: 'block', color: 'var(--color-text-muted)', fontSize: 11 }}>Lot {alert.supplier_lot_code}</span> : null}</td>
+                      <td style={{ padding: 10 }}>{alert.branch_name}</td>
+                      <td style={{ padding: 10 }}>{new Date(`${alert.expires_on}T00:00:00`).toLocaleDateString()}</td>
+                      <td style={{ padding: 10 }}>{alert.days_remaining < 0 ? `${Math.abs(alert.days_remaining)} days overdue` : `${alert.days_remaining} days`}</td>
+                      <td style={{ padding: 10 }}>{alert.base_quantity_on_hand}</td>
+                      <td style={{ padding: 10, color: alert.alert_status === 'expired' ? 'var(--color-danger)' : '#b45309', fontWeight: 700 }}>{alert.alert_status === 'expired' ? 'Expired' : 'Expiring soon'}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            </section>
+          )}
+          <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             <thead>
               <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
@@ -928,6 +963,7 @@ export default function StockPageClient({
               )}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
@@ -1064,6 +1100,29 @@ export default function StockPageClient({
                         </option>
                       ))}
                     </select>
+                  </label>
+                  <label className="md:col-span-1 xl:col-span-5" style={{ fontSize: 13 }}>
+                    <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>
+                      Expiry date{selectedProduct?.tracks_expiry ? ' (required)' : ' (optional)'}
+                    </span>
+                    <input
+                    type="date"
+                      value={item.expiresOn}
+                      min={new Date().toISOString().slice(0, 10)}
+                      onChange={(event) => updateDeliveryItem(item.id, { expiresOn: event.target.value })}
+                      required={Boolean(selectedProduct?.tracks_expiry)}
+                      style={inputStyle}
+                    />
+                  </label>
+                  <label className="md:col-span-1 xl:col-span-5" style={{ fontSize: 13 }}>
+                    <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>Supplier lot / batch code</span>
+                    <input
+                      value={item.supplierLotCode}
+                      maxLength={100}
+                      onChange={(event) => updateDeliveryItem(item.id, { supplierLotCode: event.target.value })}
+                      placeholder="Optional supplier batch code"
+                      style={inputStyle}
+                    />
                   </label>
                   <label className="xl:col-span-4" style={{ fontSize: 13 }}>
                     <span style={{ display: 'block', marginBottom: 6, fontWeight: 500, color: 'var(--color-text-primary)' }}>Receive as</span>

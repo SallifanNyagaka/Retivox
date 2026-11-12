@@ -65,6 +65,8 @@ type Product = {
   product_kind?: 'fixed_package' | 'measured_counted'
   unit: string
   description: string | null
+  tracks_expiry?: boolean
+  barcodes?: string[]
   is_active: boolean
   created_at: string
   product_pricing?: ProductPricing[] | null

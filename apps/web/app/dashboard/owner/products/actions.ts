@@ -41,6 +41,43 @@ const getStrings = (formData: FormData, key: string): string[] => {
   return formData.getAll(key).filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
 }
 
+function parseBarcodeCodes(value: string): { codes?: string[]; error?: string } {
+  const codes = [...new Set(value.split(/[\r\n,]+/).map((code) => code.trim()).filter(Boolean))]
+  if (codes.length > 25) return { error: 'Add no more than 25 barcode values at once' }
+  if (codes.some((code) => code.length > 128)) return { error: 'Each barcode must be 128 characters or fewer' }
+  return { codes }
+}
+
+async function saveProductBarcodeCodes(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  businessId: string,
+  productId: string,
+  codes: string[]
+): Promise<string | null> {
+  if (codes.length === 0) return null
+  const existingResponse = await supabase
+    .from('product_barcodes')
+    .select('code, product_id')
+    .eq('business_id', businessId)
+  if (existingResponse.error) return existingResponse.error.message
+
+  const existingByCode = new Map(
+    (existingResponse.data ?? []).map((row) => [row.code.trim().toUpperCase(), row.product_id])
+  )
+  const conflict = codes.find((code) => {
+    const existingProductId = existingByCode.get(code.toUpperCase())
+    return existingProductId && existingProductId !== productId
+  })
+  if (conflict) return `Barcode ${conflict} is already assigned to another product`
+
+  const newCodes = codes.filter((code) => !existingByCode.has(code.toUpperCase()))
+  if (newCodes.length === 0) return null
+  const insertResponse = await supabase.from('product_barcodes').insert(
+    newCodes.map((code) => ({ business_id: businessId, product_id: productId, code, source: 'manufacturer' }))
+  )
+  return insertResponse.error?.message ?? null
+}
+
 /**
  * Revalidates every dashboard surface affected by product pricing or UOM edits.
  */
@@ -272,6 +309,9 @@ export async function addProduct(prevState: FormState, formData: FormData): Prom
     }
   }
 
+  const barcodeValidation = parseBarcodeCodes(getString(formData, 'barcodes'))
+  if (barcodeValidation.error) return { error: barcodeValidation.error, success: false }
+
   if (!classificationValidation.success) {
     return {
       error: classificationValidation.error.errors[0]?.message ?? 'Invalid product classification',
@@ -359,6 +399,7 @@ export async function addProduct(prevState: FormState, formData: FormData): Prom
         product_kind: classificationValidation.data.productKind,
         subcategory: classificationValidation.data.subcategory ?? null,
         brand_family: classificationValidation.data.brandFamily ?? null,
+        tracks_expiry: getString(formData, 'tracksExpiry') === 'true',
       })
       .eq('business_id', businessId)
       .eq('id', String(productId))
@@ -367,6 +408,11 @@ export async function addProduct(prevState: FormState, formData: FormData): Prom
       logger.error('addProduct: classification update failed', { businessId, productId, error: classificationError })
       return { error: classificationError.message ?? 'Product created, but classification failed', success: false }
     }
+
+    const barcodeError = await saveProductBarcodeCodes(
+      supabase, businessId, String(productId), barcodeValidation.codes ?? []
+    )
+    if (barcodeError) return { error: `Product created, but its barcodes were not saved: ${barcodeError}`, success: false }
 
     const selectedUomIds = Array.from(
       new Set([
@@ -579,6 +625,9 @@ export async function updateProduct(prevState: FormState, formData: FormData): P
     }
   }
 
+  const barcodeValidation = parseBarcodeCodes(getString(formData, 'barcodes'))
+  if (barcodeValidation.error) return { error: barcodeValidation.error, success: false }
+
   if (!classificationValidation.success) {
     return {
       error: classificationValidation.error.errors[0]?.message ?? 'Invalid product classification',
@@ -667,6 +716,7 @@ export async function updateProduct(prevState: FormState, formData: FormData): P
         product_kind: classificationValidation.data.productKind,
         subcategory: classificationValidation.data.subcategory ?? null,
         brand_family: classificationValidation.data.brandFamily ?? null,
+        tracks_expiry: getString(formData, 'tracksExpiry') === 'true',
       })
       .eq('business_id', businessId)
       .eq('id', productId)
@@ -683,6 +733,11 @@ export async function updateProduct(prevState: FormState, formData: FormData): P
         return { error: classificationResponse.error.message ?? 'Product updated, but classification failed', success: false }
       }
     }
+
+    const barcodeError = await saveProductBarcodeCodes(
+      supabase, businessId, productId, barcodeValidation.codes ?? []
+    )
+    if (barcodeError) return { error: `Product updated, but its barcodes were not saved: ${barcodeError}`, success: false }
 
     const selectedUomIds = Array.from(
       new Set([

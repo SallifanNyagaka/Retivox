@@ -66,6 +66,20 @@ export type StockMetrics = {
   branchesWithAlerts: number
 }
 
+export type StockExpiryAlert = {
+  branch_id: string
+  branch_name: string
+  product_id: string
+  product_name: string
+  sku: string | null
+  lot_id: string
+  supplier_lot_code: string | null
+  expires_on: string
+  days_remaining: number
+  base_quantity_on_hand: number
+  alert_status: 'expiring_soon' | 'expired'
+}
+
 /**
  * Branch selector option.
  */
@@ -81,6 +95,7 @@ export type StockProductOption = {
   id: string
   name: string
   sku?: string
+  tracks_expiry?: boolean
   uom_options: StockUOMOption[]
 }
 
@@ -141,6 +156,8 @@ export type StockDeliveryItemRow = {
   uom_id: string | null
   uom_name: string | null
   quantity_in_uom: number | null
+  expires_on: string | null
+  supplier_lot_code: string | null
   base_quantity_expected: number
   base_quantity_received: number
   unit_cost: number | null

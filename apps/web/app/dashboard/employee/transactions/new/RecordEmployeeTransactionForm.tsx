@@ -29,6 +29,7 @@ export type EmployeeProductOption = {
   productId: string
   name: string
   sku: string
+  barcodes: string[]
   category: string
   unit: string
   sellingPrice: number
@@ -321,13 +322,13 @@ const inputStyle = {
   backgroundColor: 'var(--color-background)',
 } as const
 
-function getInitialLineItems(products: EmployeeProductOption[], idSuffix = ''): LineItemDraft[] {
+function getInitialLineItems(idSuffix = ''): LineItemDraft[] {
   return [
     {
       id: `row-1${idSuffix}`,
-      optionId: products[0]?.optionId ?? '',
-      uomId: getDefaultSaleUOM(products[0] ?? null)?.id ?? '',
-      quantity: '1',
+      optionId: '',
+      uomId: '',
+      quantity: '',
     },
   ]
 }
@@ -348,7 +349,13 @@ export default function RecordEmployeeTransactionForm({
 }: Props) {
   const router = useRouter()
   const previousPending = useRef(false)
-  const [rows, setRows] = useState<LineItemDraft[]>(() => getInitialLineItems(products))
+  const barcodeInputRef = useRef<HTMLInputElement>(null)
+  const barcodeRowSequence = useRef(0)
+  const [rows, setRows] = useState<LineItemDraft[]>(() => getInitialLineItems())
+  const [scannerEnabled, setScannerEnabled] = useState(false)
+  const [scannerSetupOpen, setScannerSetupOpen] = useState(false)
+  const [barcodeInput, setBarcodeInput] = useState('')
+  const [barcodeMessage, setBarcodeMessage] = useState('')
   const [paymentMethod, setPaymentMethod] = useState<'mpesa_manual' | 'cash'>('mpesa_manual')
   const [discountAmount, setDiscountAmount] = useState('0')
   const [customerName, setCustomerName] = useState('')
@@ -437,7 +444,7 @@ export default function RecordEmployeeTransactionForm({
         toast.success(state.message ?? 'Transaction recorded successfully')
         redirectTimer = setTimeout(() => {
           if (stayOnSuccess) {
-            setRows(getInitialLineItems(products, `-${Date.now()}`))
+            setRows(getInitialLineItems(`-${Date.now()}`))
             setDiscountAmount('0')
             setCustomerName('')
             setCustomerPhone('')
@@ -475,6 +482,45 @@ export default function RecordEmployeeTransactionForm({
     )
   }
 
+  const handleBarcodeScan = (code: string) => {
+    const normalized = code.trim().toUpperCase()
+    if (!normalized) return
+    const match = products.find((product) => product.barcodes.some((barcode) => barcode.trim().toUpperCase() === normalized))
+    setBarcodeInput('')
+    window.requestAnimationFrame(() => barcodeInputRef.current?.focus())
+    if (!match) {
+      setBarcodeMessage(`No product is linked to barcode ${code.trim()}.`)
+      return
+    }
+    const defaultUomId = getDefaultSaleUOM(match)?.id ?? ''
+    const newRowId = `barcode-${Date.now()}-${barcodeRowSequence.current++}`
+    setRows((currentRows) => {
+      const existingRow = currentRows.find(
+        (row) => row.optionId === match.optionId && row.uomId === defaultUomId,
+      )
+      if (existingRow) {
+        return currentRows.map((row) => row.id === existingRow.id
+          ? { ...row, quantity: String((Number(row.quantity) || 0) + 1) }
+          : row)
+      }
+
+      const emptyRow = currentRows.find((row) => !row.optionId || !row.uomId)
+      if (emptyRow) {
+        return currentRows.map((row) => row.id === emptyRow.id
+          ? { ...row, optionId: match.optionId, uomId: defaultUomId, quantity: '1' }
+          : row)
+      }
+
+      return [...currentRows, {
+        id: newRowId,
+        optionId: match.optionId,
+        uomId: defaultUomId,
+        quantity: '1',
+      }]
+    })
+    setBarcodeMessage(`${match.name} added to the sale.`)
+  }
+
   /**
    * Adds another product row.
    */
@@ -483,9 +529,9 @@ export default function RecordEmployeeTransactionForm({
       ...currentRows,
       {
         id: `row-${currentRows.length + 1}-${Date.now()}`,
-        optionId: products[0]?.optionId ?? '',
-        uomId: getDefaultSaleUOM(products[0] ?? null)?.id ?? '',
-        quantity: '1',
+        optionId: '',
+        uomId: '',
+        quantity: '',
       },
     ])
   }
@@ -573,7 +619,7 @@ export default function RecordEmployeeTransactionForm({
             })
             return next
           })
-          setRows(getInitialLineItems(products, `-offline-${Date.now()}`))
+          setRows(getInitialLineItems(`-offline-${Date.now()}`))
           setDiscountAmount('0')
           setCustomerName('')
           setCustomerPhone('')
@@ -637,6 +683,93 @@ export default function RecordEmployeeTransactionForm({
           </div>
         )}
 
+        <section
+          className="rounded-xl border text-left"
+          aria-label="Barcode scanner"
+          style={{ borderColor: scannerEnabled ? 'var(--color-primary)' : 'var(--color-border)', backgroundColor: 'var(--color-surface)', padding: 14 }}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p style={{ margin: 0, fontSize: 14, fontWeight: 800, color: 'var(--color-text-primary)' }}>Barcode scanner</p>
+              <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--color-text-muted)' }}>
+                Scan a product to add it to this sale. Scan it again to increase the quantity.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className={scannerEnabled ? 'btn-outline' : 'btn-primary'}
+                aria-pressed={scannerEnabled}
+                onClick={() => {
+                  if (scannerEnabled) {
+                    setScannerEnabled(false)
+                    setBarcodeInput('')
+                  } else {
+                    setScannerEnabled(true)
+                    window.requestAnimationFrame(() => barcodeInputRef.current?.focus())
+                  }
+                }}
+                style={{ padding: '8px 14px', borderRadius: 8, fontSize: 13 }}
+              >
+                {scannerEnabled ? 'Stop scanner' : 'Use scanner'}
+              </button>
+              <button
+                type="button"
+                className="btn-outline"
+                aria-expanded={scannerSetupOpen}
+                onClick={() => setScannerSetupOpen((open) => !open)}
+                style={{ padding: '8px 14px', borderRadius: 8, fontSize: 13 }}
+              >
+                {scannerSetupOpen ? 'Close setup' : 'Scanner setup'}
+              </button>
+            </div>
+          </div>
+
+          {scannerSetupOpen && (
+            <div
+              className="mt-3 rounded-lg border"
+              style={{ borderColor: 'var(--color-border)', backgroundColor: 'var(--color-background)', padding: 12, color: 'var(--color-text-primary)', fontSize: 12, lineHeight: 1.6 }}
+            >
+              <p style={{ margin: '0 0 6px', fontWeight: 800 }}>Set up a USB or Bluetooth scanner</p>
+              <ol style={{ margin: 0, paddingLeft: 20 }}>
+                <li>Connect the scanner to this computer. Keyboard-style scanners work without a browser permission prompt.</li>
+                <li>Configure the scanner to send <strong>Enter</strong> after each barcode.</li>
+                <li>Select <strong>Use scanner</strong>, then scan a barcode saved on the product.</li>
+              </ol>
+              <p style={{ margin: '6px 0 0', color: 'var(--color-text-muted)' }}>
+                A successful scan adds one sale unit using the product&apos;s default sale unit. The sale is only recorded when you submit this form.
+              </p>
+            </div>
+          )}
+
+          {scannerEnabled && (
+            <label className="mt-3 flex flex-col gap-2" style={{ fontSize: 13, color: 'var(--color-text-primary)' }}>
+              Ready to scan
+              <input
+                ref={barcodeInputRef}
+                value={barcodeInput}
+                onChange={(event) => { setBarcodeInput(event.target.value); setBarcodeMessage('') }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    handleBarcodeScan(barcodeInput)
+                  }
+                }}
+                autoComplete="off"
+                autoFocus
+                aria-label="Scan product barcode"
+                placeholder="Scan a product barcode"
+                style={inputStyle}
+              />
+              {barcodeMessage && (
+                <span aria-live="polite" style={{ color: barcodeMessage.startsWith('No product') ? 'var(--color-danger)' : 'var(--color-text-muted)', fontSize: 12 }}>
+                  {barcodeMessage}
+                </span>
+              )}
+            </label>
+          )}
+        </section>
+
         {/* Product line items */}
         <div className="flex flex-col gap-3">
           {rows.map((row, index) => {
@@ -684,6 +817,7 @@ export default function RecordEmployeeTransactionForm({
                       required
                       style={inputStyle}
                     >
+                      <option value="">Select product</option>
                       {products.map((product) => (
                         <option key={product.optionId} value={product.optionId}>
                           {getProductOptionLabel(product)}

@@ -26,7 +26,8 @@ export const createBranchSchema = z.object({
 // Schema for creating a new product in the catalog.
 export const createProductSchema = z.object({
   name: z.string().min(2).max(100),
-  sku: z.string().regex(/^[a-zA-Z0-9]+$/, "SKU must be alphanumeric").max(20),
+  // Keep SKUs readable and interoperable while allowing common separators.
+  sku: z.string().trim().min(1).max(64).regex(/^[a-zA-Z0-9._-]+$/, "SKU may contain letters, numbers, hyphens, underscores, and periods"),
   category: z.string().min(2),
   unit: z.string().min(1),
   description: z.string().max(500).optional(),
