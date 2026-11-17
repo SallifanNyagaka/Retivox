@@ -5,6 +5,7 @@ import { createServiceRoleClient } from '../../../lib/supabase/admin'
 import { requirePlatformUser } from '../../../lib/platform/auth'
 import logger from '../../../lib/logger'
 import { registerPlatformPesapalIpn, processPlatformPesapalNotification, getPlatformPesapalSetup, requestPesapalRefund } from '../../../lib/payments/pesapal'
+import type { PlatformLicenseAdjustmentState } from './businesses/license-adjustment-types'
 
 function getString(formData: FormData, key: string): string {
   const value = formData.get(key)
@@ -498,40 +499,97 @@ export async function recordPlatformSubscriptionRefund(formData: FormData): Prom
   revalidatePath('/platform/payments')
 }
 
-export async function applyPlatformLicenseAdjustment(formData: FormData): Promise<void> {
-  const user = await requireDeveloper()
-  const businessId = getString(formData, 'businessId')
-  const action = getString(formData, 'action')
-  const reason = getString(formData, 'reason')
-  const days = Number(getString(formData, 'days')) || null
-  const planKey = getString(formData, 'planKey') || null
-  const billingInterval = getString(formData, 'billingInterval') || null
-  if (!/^[0-9a-f-]{36}$/i.test(businessId) || reason.length < 10) {
-    throw new Error('Select a business and provide a reason of at least 10 characters')
-  }
-  const allowedActions = ['suspend', 'reactivate', 'extend_period', 'complimentary', 'assign_lifetime', 'change_plan']
-  if (!allowedActions.includes(action)) throw new Error('Invalid license adjustment')
+export async function applyPlatformLicenseAdjustment(
+  _previousState: PlatformLicenseAdjustmentState,
+  formData: FormData,
+): Promise<PlatformLicenseAdjustmentState> {
+  void _previousState
+  try {
+    const user = await requireDeveloper()
+    const businessId = getString(formData, 'businessId')
+    const action = getString(formData, 'action')
+    const reason = getString(formData, 'reason')
+    const rawDays = getString(formData, 'days')
+    const days = rawDays ? Number(rawDays) : null
+    const planKey = getString(formData, 'planKey') || null
+    const billingInterval = getString(formData, 'billingInterval') || null
+    const allowedActions = ['suspend', 'reactivate', 'extend_period', 'complimentary', 'assign_lifetime', 'change_plan']
 
-  const serviceClient = createServiceRoleClient()
-  const { data, error } = await serviceClient.rpc('platform_apply_license_adjustment', {
-    p_business_id: businessId,
-    p_platform_user_id: user.id,
-    p_action: action,
-    p_reason: reason,
-    p_days: days,
-    p_plan_key: planKey,
-    p_billing_interval: billingInterval,
-  })
-  if (error || data !== true) throw new Error(error?.message ?? 'Unable to apply the license adjustment')
-  await serviceClient.from('platform_audit_logs').insert({
-    platform_user_id: user.id,
-    entity_type: 'platform_license_adjustment',
-    entity_id: businessId,
-    action,
-    new_value: { business_id: businessId, reason, days, plan_key: planKey, billing_interval: billingInterval },
-  })
-  revalidatePath('/platform/businesses')
-  revalidatePath('/platform')
+    if (!/^[0-9a-f-]{36}$/i.test(businessId)) {
+      return { success: false, error: 'Select a valid business.', message: null }
+    }
+    if (!allowedActions.includes(action)) {
+      return { success: false, error: 'Select a valid license action.', message: null }
+    }
+    if (reason.length < 10 || reason.length > 1000) {
+      return { success: false, error: 'Enter a reason between 10 and 1,000 characters.', message: null }
+    }
+    if (['extend_period', 'complimentary'].includes(action) &&
+        (!Number.isInteger(days) || days === null || days < 1 || days > 365)) {
+      return { success: false, error: 'Enter a duration between 1 and 365 days.', message: null }
+    }
+    if (['assign_lifetime', 'change_plan'].includes(action) && !planKey) {
+      return { success: false, error: 'Choose an active paid package.', message: null }
+    }
+    if (action === 'change_plan' && !['monthly', 'yearly'].includes(billingInterval ?? '')) {
+      return { success: false, error: 'Choose a monthly or yearly billing interval.', message: null }
+    }
+
+    const serviceClient = createServiceRoleClient()
+    if (action === 'suspend' || action === 'reactivate') {
+      const { data: subscription, error: subscriptionError } = await serviceClient
+        .from('subscriptions')
+        .select('license_suspended_at')
+        .eq('business_id', businessId)
+        .maybeSingle()
+      if (subscriptionError || !subscription) {
+        return { success: false, error: 'Could not load the current business license state.', message: null }
+      }
+      if (action === 'reactivate' && !subscription.license_suspended_at) {
+        return { success: false, error: 'This license is not suspended, so there is nothing to reactivate.', message: null }
+      }
+      if (action === 'suspend' && subscription.license_suspended_at) {
+        return { success: false, error: 'This license is already suspended.', message: null }
+      }
+    }
+
+    const { data, error } = await serviceClient.rpc('platform_apply_license_adjustment', {
+      p_business_id: businessId,
+      p_platform_user_id: user.id,
+      p_action: action,
+      p_reason: reason,
+      p_days: days,
+      p_plan_key: planKey,
+      p_billing_interval: billingInterval,
+    })
+    if (error || data !== true) {
+      return { success: false, error: error?.message ?? 'Unable to apply the license adjustment.', message: null }
+    }
+
+    const { error: auditError } = await serviceClient.from('platform_audit_logs').insert({
+      platform_user_id: user.id,
+      entity_type: 'platform_license_adjustment',
+      entity_id: businessId,
+      action,
+      new_value: { business_id: businessId, reason, days, plan_key: planKey, billing_interval: billingInterval },
+    })
+    revalidatePath('/platform/businesses')
+    revalidatePath('/platform')
+
+    return {
+      success: true,
+      error: null,
+      message: auditError
+        ? 'License updated and saved to license history. The secondary platform audit entry could not be recorded.'
+        : 'License updated successfully.',
+    }
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unable to apply the license adjustment.',
+      message: null,
+    }
+  }
 }
 
 export async function createSubscriptionPromotion(formData: FormData): Promise<void> {

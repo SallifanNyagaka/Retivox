@@ -2,7 +2,7 @@ import { Badge } from '../../../../components/ui/Badge'
 import { Card, CardHeader } from '../../../../components/ui/Card'
 import { createServiceRoleClient } from '../../../../lib/supabase/admin'
 import { effectiveSubscriptionStatus } from '../../../../lib/subscriptions/status'
-import { applyPlatformLicenseAdjustment } from '../actions'
+import LicenseAdjustmentForm from './LicenseAdjustmentForm'
 
 export const dynamic = 'force-dynamic'
 
@@ -106,27 +106,13 @@ export default async function PlatformBusinessesPage() {
                     <td style={{ padding: 12, minWidth: 260 }}>
                       <details>
                         <summary style={{ cursor: 'pointer', color: 'var(--color-primary)', fontWeight: 750 }}>Manage license</summary>
-                        {subscription && <form action={applyPlatformLicenseAdjustment} className="mt-3 grid gap-2">
-                          <input type="hidden" name="businessId" value={business.id} />
-                          <select name="action" required style={controlStyle}>
-                            <option value="suspend">Suspend</option>
-                            <option value="reactivate">Reactivate</option>
-                            <option value="extend_period">Extend paid period</option>
-                            <option value="complimentary">Grant complimentary access</option>
-                            <option value="assign_lifetime">Grant lifetime license</option>
-                            <option value="change_plan">Change package</option>
-                          </select>
-                          <input name="days" type="number" min="1" max="365" placeholder="Days (extension/access)" style={controlStyle} />
-                          <select name="planKey" style={controlStyle}>
-                            <option value="">Choose package for plan or lifetime</option>
-                            {(planRows ?? []).map((plan) => <option key={plan.plan_key} value={plan.plan_key}>{plan.name}</option>)}
-                          </select>
-                          <select name="billingInterval" style={controlStyle} defaultValue="monthly">
-                            <option value="monthly">Monthly</option><option value="yearly">Yearly</option>
-                          </select>
-                          <textarea name="reason" minLength={10} required placeholder="Reason (at least 10 characters)" rows={2} style={{ ...controlStyle, height: 'auto', padding: 8 }} />
-                          <button type="submit" className="btn-primary" style={{ padding: '8px 12px', borderRadius: 8 }}>Apply change</button>
-                        </form>}
+                        {subscription && <LicenseAdjustmentForm
+                          key={`${business.id}-${subscription.license_suspended_at ? 'suspended' : 'active'}`}
+                          businessId={business.id}
+                          businessName={business.name}
+                          isSuspended={Boolean(subscription.license_suspended_at)}
+                          plans={(planRows ?? []).map((plan) => ({ key: plan.plan_key, name: plan.name }))}
+                        />}
                       </details>
                     </td>
                   </tr>
@@ -139,5 +125,3 @@ export default async function PlatformBusinessesPage() {
     </div>
   )
 }
-
-const controlStyle = { width: '100%', minHeight: 36, border: '1px solid var(--color-border)', borderRadius: 8, padding: '0 8px', background: 'var(--color-background)', color: 'var(--color-text-primary)', fontSize: 12 }
