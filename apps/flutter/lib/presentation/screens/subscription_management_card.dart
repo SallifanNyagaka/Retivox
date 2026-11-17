@@ -215,6 +215,22 @@ class _SubscriptionManagementCardState
         final amount = (unroundedAmount * 100).round() / 100;
         final currency =
             selected?['currency']?.toString() ?? widget.user.currency;
+        final currentPlan = plans.where(
+          (plan) => plan['plan_key'] == activePlan,
+        );
+        final credit = _unusedPaidPeriodCredit(
+          subscription: subscription,
+          currentPlan: currentPlan.isEmpty ? null : currentPlan.first,
+          selectedPlan: selected,
+          activePlan: activePlan,
+          selectedPlanKey: selectedPlanKey,
+          currentInterval: subscription?['billing_interval']?.toString(),
+          selectedInterval: billingInterval,
+          targetAmount: amount,
+          currency: currency,
+          now: DateTime.now(),
+        );
+        final amountDue = ((amount - credit).clamp(0, amount) * 100).round() / 100;
 
         return Card(
           child: Padding(
@@ -464,7 +480,9 @@ class _SubscriptionManagementCardState
                 Text(
                   selected == null
                       ? 'Choose a plan to view the payment amount.'
-                      : 'Amount due: ${_formatMoney(amount, currency)}',
+                      : credit > 0
+                      ? 'Plan price: ${_formatMoney(amount, currency)}  ·  Unused subscription credit: −${_formatMoney(credit, currency)}  ·  Amount due: ${_formatMoney(amountDue, currency)}'
+                      : 'Amount due: ${_formatMoney(amountDue, currency)}',
                   style: Theme.of(context).textTheme.titleSmall,
                 ),
                 const SizedBox(height: 12),
@@ -571,5 +589,61 @@ class _SubscriptionManagementCardState
     } on ArgumentError {
       return '$currency ${value.toStringAsFixed(2)}';
     }
+  }
+
+  static double _unusedPaidPeriodCredit({
+    required Map<String, dynamic>? subscription,
+    required Map<String, dynamic>? currentPlan,
+    required Map<String, dynamic>? selectedPlan,
+    required String activePlan,
+    required String? selectedPlanKey,
+    required String? currentInterval,
+    required String selectedInterval,
+    required double targetAmount,
+    required String currency,
+    required DateTime now,
+  }) {
+    if (subscription == null || selectedPlan == null) return 0;
+    final licenseType = subscription['license_type']?.toString();
+    if (licenseType == 'lifetime') {
+      if (selectedInterval != 'lifetime' ||
+          subscription['currency']?.toString() != currency) {
+        return 0;
+      }
+      final lifetimeCredit =
+          double.tryParse(subscription['lifetime_purchase_credit']?.toString() ?? '') ?? 0;
+      return lifetimeCredit.clamp(0, targetAmount).toDouble();
+    }
+    if (activePlan == 'trial' ||
+        !['active', 'past_due'].contains(subscription['status']?.toString()) ||
+        subscription['currency']?.toString() != currency) {
+      return 0;
+    }
+    final start = DateTime.tryParse(
+      subscription['current_period_start']?.toString() ?? '',
+    );
+    final end = DateTime.tryParse(
+      subscription['current_period_end']?.toString() ?? '',
+    );
+    if (start == null || end == null || !end.isAfter(now) || !end.isAfter(start)) {
+      return 0;
+    }
+    final paidAmount =
+        double.tryParse(subscription['paid_period_amount']?.toString() ?? '') ?? 0;
+    if (paidAmount <= 0) return 0;
+    final sameOption = activePlan == selectedPlanKey &&
+        currentInterval == selectedInterval;
+    if (selectedInterval != 'lifetime') {
+      final currentSort = int.tryParse(currentPlan?['sort_order']?.toString() ?? '') ?? 0;
+      final selectedSort = int.tryParse(selectedPlan['sort_order']?.toString() ?? '') ?? 0;
+      if (sameOption || selectedSort < currentSort || targetAmount < paidAmount) {
+        return 0;
+      }
+    }
+    final fraction = ((end.millisecondsSinceEpoch - now.millisecondsSinceEpoch) /
+            (end.millisecondsSinceEpoch - start.millisecondsSinceEpoch))
+        .clamp(0.0, 1.0);
+    final credit = (paidAmount * fraction * 100).round() / 100;
+    return credit.clamp(0, targetAmount).toDouble();
   }
 }

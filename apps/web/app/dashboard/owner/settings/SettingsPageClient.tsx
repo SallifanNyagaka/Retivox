@@ -683,6 +683,36 @@ function SubscriptionSection({
         ? Number(selectedPlan.yearly_amount)
         : Number(selectedPlan.monthly_amount)
     : 0
+  const currentPlan = plans.find((plan) => plan.plan_key === activePlan) ?? null
+  const selectedIsChange = Boolean(
+    subscription && activePlan !== 'trial' &&
+    (selectedPlanKey !== activePlan || billingInterval !== subscription.billing_interval),
+  )
+  const periodStartTime = subscription?.current_period_start ? new Date(subscription.current_period_start).getTime() : null
+  const quotePeriodEndTime = subscription?.current_period_end ? new Date(subscription.current_period_end).getTime() : null
+  let unusedPeriodCredit = 0
+  if (subscription && selectedPlan && selectedPlan.currency === subscription.currency) {
+    if (subscription.license_type === 'lifetime' && billingInterval === 'lifetime') {
+      unusedPeriodCredit = Number(subscription.lifetime_purchase_credit ?? 0)
+    } else if (
+      activePlan !== 'trial' &&
+      ['active', 'past_due'].includes(subscription.status) &&
+      periodStartTime !== null && quotePeriodEndTime !== null && quotePeriodEndTime > now && quotePeriodEndTime > periodStartTime &&
+      (billingInterval === 'lifetime' || selectedIsChange)
+    ) {
+      const targetSort = selectedPlan.sort_order
+      const currentSort = currentPlan?.sort_order ?? 0
+      const isAllowedUpgrade = billingInterval === 'lifetime' || (
+        targetSort >= currentSort && selectedAmount >= Number(subscription.paid_period_amount ?? 0)
+      )
+      if (isAllowedUpgrade) {
+        const fraction = Math.max(0, Math.min(1, (quotePeriodEndTime - now) / (quotePeriodEndTime - periodStartTime)))
+        unusedPeriodCredit = Math.round(Number(subscription.paid_period_amount ?? 0) * fraction * 100) / 100
+      }
+    }
+  }
+  unusedPeriodCredit = Math.max(0, Math.min(selectedAmount, unusedPeriodCredit))
+  const amountDue = Math.round(Math.max(0, selectedAmount - unusedPeriodCredit) * 100) / 100
   const periodEndTime = subscription?.current_period_end ? new Date(subscription.current_period_end).getTime() : null
   const displayPeriodEndTime = subscription?.license_type === 'lifetime'
     ? null
@@ -927,11 +957,19 @@ function SubscriptionSection({
           <div style={{ borderTop: '1px solid var(--color-border)', paddingTop: 16 }}>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <p style={{ fontSize: 14, fontWeight: 750, color: 'var(--color-text-primary)', margin: 0 }}>
-                {selectedPlan.name} · {billingInterval} · {formatMoney(selectedAmount, selectedPlan.currency)}
+                {selectedPlan.name} · {billingInterval}
               </p>
               <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
-                {billingInterval === 'lifetime' ? 'Permanent license after payment verification' : activePlan === 'trial' && !isPeriodOver ? 'Starts after your free trial' : isPeriodOver ? 'Starts immediately after payment is verified' : 'Starts at your next renewal after payment is verified'}
+                {billingInterval === 'lifetime' ? 'Permanent license after payment verification' : selectedIsChange || isPeriodOver ? 'New plan starts after payment verification' : activePlan === 'trial' ? 'Starts after your free trial' : 'Renewal starts at the next billing period'}
               </span>
+            </div>
+            <div style={{ marginTop: 10, color: 'var(--color-text-primary)', fontSize: 13 }}>
+              {unusedPeriodCredit > 0 ? (
+                <span>Plan price: {formatMoney(selectedAmount, selectedPlan.currency)} · Unused subscription credit: −{formatMoney(unusedPeriodCredit, selectedPlan.currency)} · <strong>Amount due: {formatMoney(amountDue, selectedPlan.currency)}</strong></span>
+              ) : (
+                <strong>Amount due: {formatMoney(amountDue, selectedPlan.currency)}</strong>
+              )}
+              {unusedPeriodCredit > 0 && <span style={{ display: 'block', color: 'var(--color-text-muted)', fontSize: 11, marginTop: 4 }}>Credit is prorated using the subscription value recorded for this paid period and its exact remaining time. The server confirms the final amount.</span>}
             </div>
 
             <div className="flex flex-wrap gap-2" style={{ marginTop: 14 }} role="group" aria-label="Subscription payment method">
@@ -966,11 +1004,11 @@ function SubscriptionSection({
                   Promotion code
                   <input value={promotionCode} onChange={(event) => setPromotionCode(event.target.value.toUpperCase())} placeholder="Optional" style={inputStyle} />
                 </label>
-                <button type="submit" className="btn-success" disabled={isStkPending || billingInterval === 'lifetime' || !Number.isInteger(selectedAmount)} style={{ borderRadius: 8, padding: '11px 18px' }}>
-                  {isStkPending ? 'Sending prompt...' : `Pay ${formatMoney(selectedAmount, selectedPlan.currency)}`}
+                <button type="submit" className="btn-success" disabled={isStkPending || billingInterval === 'lifetime' || !Number.isInteger(amountDue)} style={{ borderRadius: 8, padding: '11px 18px' }}>
+                  {isStkPending ? 'Sending prompt...' : `Pay ${formatMoney(amountDue, selectedPlan.currency)}`}
                 </button>
                 {stkState.error && <p style={{ margin: 0, fontSize: 13, color: 'var(--color-danger)' }}>{stkState.error}</p>}
-                {!Number.isInteger(selectedAmount) && <p style={{ margin: 0, fontSize: 12, color: 'var(--color-text-muted)' }}>This amount is not a whole number; select a manual payment method.</p>}
+                {!Number.isInteger(amountDue) && <p style={{ margin: 0, fontSize: 12, color: 'var(--color-text-muted)' }}>This amount is not a whole number; select a manual payment method.</p>}
                 <p style={{ gridColumn: '1 / -1', margin: 0, fontSize: 12, color: 'var(--color-text-muted)' }}>
                   Complete the prompt on your phone. Retivox never asks for or stores your M-Pesa PIN.
                 </p>
@@ -991,8 +1029,8 @@ function SubscriptionSection({
                     <span><strong>Request automatic renewal</strong><span style={{ display: 'block', marginTop: 3, color: 'var(--color-text-muted)', fontSize: 12, lineHeight: 1.5 }}>Optional. Only eligible Visa or Mastercard cards support this. You must approve the recurring authorization on Pesapal. Renewals are scheduled before the next period ends and require full price without a promotion or subscription credit.</span></span>
                   </label>
                 )}
-                <button type="submit" className="btn-success" disabled={isPesapalPending || selectedAmount <= 0} style={{ borderRadius: 8, padding: '11px 18px' }}>
-                  {isPesapalPending ? 'Preparing checkout...' : `Pay ${formatMoney(selectedAmount, selectedPlan.currency)}`}
+                <button type="submit" className="btn-success" disabled={isPesapalPending || amountDue <= 0} style={{ borderRadius: 8, padding: '11px 18px' }}>
+                  {isPesapalPending ? 'Preparing checkout...' : `Pay ${formatMoney(amountDue, selectedPlan.currency)}`}
                 </button>
                 {pesapalState.error && <p role="alert" style={{ gridColumn: '1 / -1', margin: 0, fontSize: 13, color: 'var(--color-danger)' }}>{pesapalState.error}</p>}
                 <p style={{ gridColumn: '1 / -1', margin: 0, fontSize: 12, color: 'var(--color-text-muted)' }}>

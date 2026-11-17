@@ -39,7 +39,10 @@ export type SubscriptionRow = {
   branch_count: number
   monthly_amount: number
   currency: string
+  current_period_start: string | null
   current_period_end: string | null
+  paid_period_amount: number
+  lifetime_purchase_credit: number
   billing_interval: 'monthly' | 'yearly' | 'lifetime'
   license_type: 'subscription' | 'lifetime'
   next_plan_key: string | null

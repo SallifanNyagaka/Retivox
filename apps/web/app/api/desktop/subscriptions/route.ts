@@ -44,7 +44,7 @@ export async function GET(request: Request) {
       .eq('id', businessId)
       .maybeSingle(),
     supabase.from('subscriptions')
-      .select('id, plan, status, cancelled_at, branch_count, monthly_amount, currency, current_period_end, billing_interval, license_type, next_plan_key, next_billing_interval, next_period_start')
+      .select('id, plan, status, cancelled_at, branch_count, monthly_amount, currency, current_period_start, current_period_end, paid_period_amount, lifetime_purchase_credit, billing_interval, license_type, next_plan_key, next_billing_interval, next_period_start')
       .eq('business_id', businessId)
       .maybeSingle(),
     supabase.from('platform_subscription_plans')

@@ -53,7 +53,7 @@ export default async function SettingsPage() {
         .single(),
       supabase
         .from('subscriptions')
-        .select('id, plan, status, cancelled_at, branch_count, monthly_amount, currency, current_period_end, billing_interval, license_type, next_plan_key, next_billing_interval, next_period_start, auto_renew_enabled, auto_renew_status')
+        .select('id, plan, status, cancelled_at, branch_count, monthly_amount, currency, current_period_start, current_period_end, paid_period_amount, lifetime_purchase_credit, billing_interval, license_type, next_plan_key, next_billing_interval, next_period_start, auto_renew_enabled, auto_renew_status')
         .eq('business_id', businessId)
         .maybeSingle(),
       supabase.rpc('owner_my_subscription_payment_requests', {
