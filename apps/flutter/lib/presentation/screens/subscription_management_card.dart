@@ -25,7 +25,7 @@ class _SubscriptionManagementCardState
   final _reference = TextEditingController();
   final _phone = TextEditingController();
   String? _selectedPlanKey;
-  String _billingInterval = 'monthly';
+  String? _billingInterval;
   String _paymentMethod = 'mpesa_stk';
   bool _saving = false;
 
@@ -56,39 +56,65 @@ class _SubscriptionManagementCardState
         subscription?['plan']?.toString() ??
         _map(snapshot['business'])?['subscription_plan']?.toString() ??
         'trial';
+    final billingInterval =
+        _billingInterval ??
+        subscription?['next_billing_interval']?.toString() ??
+        subscription?['billing_interval']?.toString() ??
+        'monthly';
     final planKey =
         _selectedPlanKey ??
         subscription?['next_plan_key']?.toString() ??
         (activePlan == 'trial' ? '' : activePlan);
-    if (planKey.isEmpty || !plans.any((plan) => plan['plan_key'] == planKey)) {
+    final plan = plans.where((item) => item['plan_key'] == planKey);
+    if (planKey.isEmpty || plan.isEmpty) {
       _notify('Choose a subscription plan.');
       return;
     }
-    if (_paymentMethod == 'mpesa_stk' && _phone.text.trim().isEmpty) {
+    final selectedPlan = plan.first;
+    if (billingInterval == 'monthly' &&
+            selectedPlan['monthly_enabled'] != true ||
+        billingInterval == 'yearly' && selectedPlan['yearly_enabled'] != true ||
+        billingInterval == 'lifetime' &&
+            selectedPlan['lifetime_enabled'] != true) {
+      _notify('That billing option is not available for the selected plan.');
+      return;
+    }
+    final licenseType = subscription?['license_type']?.toString();
+    if (licenseType == 'lifetime' && billingInterval != 'lifetime') {
+      _notify(
+        'A lifetime license can only be changed to another lifetime plan.',
+      );
+      return;
+    }
+    final paymentMethod =
+        billingInterval == 'lifetime' && _paymentMethod == 'mpesa_stk'
+        ? 'mpesa_manual'
+        : _paymentMethod;
+    if (paymentMethod == 'mpesa_stk' && _phone.text.trim().isEmpty) {
       _notify('Enter the Safaricom phone number for the M-Pesa prompt.');
       return;
     }
-    if (_paymentMethod != 'mpesa_stk' && _reference.text.trim().length < 3) {
+    if (paymentMethod != 'mpesa_stk' && _reference.text.trim().length < 3) {
       _notify('Enter a payment reference of at least 3 characters.');
       return;
     }
 
     setState(() => _saving = true);
     try {
-      if (_paymentMethod == 'mpesa_stk') {
+      if (paymentMethod == 'mpesa_stk') {
         await widget.repository.initiateSubscriptionStkPush(
           user: widget.user,
           phone: _phone.text,
           planKey: planKey,
-          billingInterval: _billingInterval,
+          billingInterval: billingInterval,
         );
         _notify('M-Pesa prompt sent. Complete it on your phone.');
       } else {
         await widget.repository.submitSubscriptionPayment(
           user: widget.user,
           planKey: planKey,
-          billingInterval: _billingInterval,
-          paymentMethod: _paymentMethod,
+          billingInterval: billingInterval,
+          paymentMethod: paymentMethod,
           referenceCode: _reference.text,
           payerPhone: _phone.text,
         );
@@ -158,6 +184,17 @@ class _SubscriptionManagementCardState
             subscription?['plan']?.toString() ??
             business?['subscription_plan']?.toString() ??
             'trial';
+        final billingInterval =
+            _billingInterval ??
+            subscription?['next_billing_interval']?.toString() ??
+            subscription?['billing_interval']?.toString() ??
+            'monthly';
+        final lifetimeLicense =
+            subscription?['license_type']?.toString() == 'lifetime';
+        final effectivePaymentMethod =
+            billingInterval == 'lifetime' && _paymentMethod == 'mpesa_stk'
+            ? 'mpesa_manual'
+            : _paymentMethod;
         final selectedPlanKey =
             _selectedPlanKey ??
             subscription?['next_plan_key']?.toString() ??
@@ -168,18 +205,11 @@ class _SubscriptionManagementCardState
         final selected = selectedPlan.isEmpty ? null : selectedPlan.first;
         final unroundedAmount = selected == null
             ? 0.0
-            : _billingInterval == 'yearly'
-            ? (double.tryParse(selected['monthly_amount']?.toString() ?? '') ??
-                      0) *
-                  12 *
-                  (1 -
-                      (double.tryParse(
-                                selected['annual_discount_percent']
-                                        ?.toString() ??
-                                    '',
-                              ) ??
-                              0) /
-                          100)
+            : billingInterval == 'yearly'
+            ? double.tryParse(selected['yearly_amount']?.toString() ?? '') ?? 0
+            : billingInterval == 'lifetime'
+            ? double.tryParse(selected['lifetime_amount']?.toString() ?? '') ??
+                  0
             : double.tryParse(selected['monthly_amount']?.toString() ?? '') ??
                   0;
         final amount = (unroundedAmount * 100).round() / 100;
@@ -225,56 +255,169 @@ class _SubscriptionManagementCardState
                   ),
                 ],
                 const Divider(height: 28),
-                DropdownButtonFormField<String>(
-                  initialValue:
-                      plans.any((plan) => plan['plan_key'] == selectedPlanKey)
-                      ? selectedPlanKey
-                      : null,
-                  decoration: const InputDecoration(labelText: 'Plan'),
-                  items: plans
-                      .where((plan) => plan['plan_key'] != 'trial')
-                      .map(
-                        (plan) => DropdownMenuItem(
-                          value: plan['plan_key']?.toString(),
-                          child: Text(
-                            '${plan['name']} · ${_formatMoney(double.tryParse(plan['monthly_amount']?.toString() ?? '') ?? 0, plan['currency']?.toString() ?? currency)}/month',
-                          ),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: _saving
-                      ? null
-                      : (value) => setState(() => _selectedPlanKey = value),
+                Text(
+                  lifetimeLicense
+                      ? 'Choose a lifetime plan'
+                      : 'Choose or upgrade your plan',
+                  style: Theme.of(context).textTheme.titleMedium,
                 ),
                 const SizedBox(height: 12),
-                DropdownButtonFormField<String>(
-                  initialValue: _billingInterval,
-                  decoration: const InputDecoration(
-                    labelText: 'Billing interval',
-                  ),
-                  items: const [
-                    DropdownMenuItem(value: 'monthly', child: Text('Monthly')),
-                    DropdownMenuItem(value: 'yearly', child: Text('Yearly')),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    _intervalChip(
+                      'monthly',
+                      'Monthly',
+                      billingInterval,
+                      disabled: lifetimeLicense,
+                    ),
+                    _intervalChip(
+                      'yearly',
+                      'Yearly',
+                      billingInterval,
+                      disabled: lifetimeLicense,
+                    ),
+                    _intervalChip('lifetime', 'Lifetime', billingInterval),
                   ],
-                  onChanged: _saving
-                      ? null
-                      : (value) {
-                          if (value != null) {
-                            setState(() => _billingInterval = value);
-                          }
-                        },
+                ),
+                if (lifetimeLicense) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    'Lifetime licenses can be upgraded to another lifetime tier; recurring billing is not available.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 12,
+                  children: plans
+                      .where((plan) => plan['plan_key'] != 'trial')
+                      .map((plan) {
+                        final key = plan['plan_key']?.toString() ?? '';
+                        final current = key == activePlan;
+                        final isSelected = key == selectedPlanKey;
+                        final available = billingInterval == 'monthly'
+                            ? plan['monthly_enabled'] == true
+                            : billingInterval == 'yearly'
+                            ? plan['yearly_enabled'] == true
+                            : plan['lifetime_enabled'] == true;
+                        final planPrice = billingInterval == 'lifetime'
+                            ? double.tryParse(
+                                    plan['lifetime_amount']?.toString() ?? '',
+                                  ) ??
+                                  0
+                            : billingInterval == 'yearly'
+                            ? double.tryParse(
+                                    plan['yearly_amount']?.toString() ?? '',
+                                  ) ??
+                                  0
+                            : double.tryParse(
+                                    plan['monthly_amount']?.toString() ?? '',
+                                  ) ??
+                                  0;
+                        final planCurrency =
+                            plan['currency']?.toString() ?? currency;
+                        return SizedBox(
+                          width: 230,
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(12),
+                            onTap:
+                                _saving ||
+                                    !available ||
+                                    (lifetimeLicense &&
+                                        billingInterval != 'lifetime')
+                                ? null
+                                : () => setState(() => _selectedPlanKey = key),
+                            child: Container(
+                              constraints: const BoxConstraints(minHeight: 144),
+                              padding: const EdgeInsets.all(14),
+                              decoration: BoxDecoration(
+                                color: isSelected
+                                    ? Theme.of(context)
+                                          .colorScheme
+                                          .primaryContainer
+                                    : Theme.of(context).colorScheme.surface,
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: isSelected || current
+                                      ? Theme.of(context).colorScheme.primary
+                                      : Theme.of(context).dividerColor,
+                                  width: isSelected ? 2 : 1,
+                                ),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    children: [
+                                      Expanded(
+                                        child: Text(
+                                          plan['name']?.toString() ?? key,
+                                          style: Theme.of(context)
+                                              .textTheme
+                                              .titleSmall
+                                              ?.copyWith(
+                                                fontWeight: FontWeight.w700,
+                                              ),
+                                        ),
+                                      ),
+                                      if (current)
+                                        const Chip(label: Text('Current')),
+                                      if (!current && isSelected)
+                                        const Chip(label: Text('Selected')),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    available
+                                        ? _formatMoney(planPrice, planCurrency)
+                                        : 'Not available',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .titleLarge
+                                        ?.copyWith(fontWeight: FontWeight.w800),
+                                  ),
+                                  Text(
+                                    billingInterval == 'monthly'
+                                        ? 'per month'
+                                        : billingInterval == 'yearly'
+                                        ? 'per year'
+                                        : 'one-time payment',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .bodySmall,
+                                  ),
+                                  if ((plan['description']?.toString() ?? '')
+                                      .isNotEmpty) ...[
+                                    const SizedBox(height: 8),
+                                    Text(
+                                      plan['description'].toString(),
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ],
+                                ],
+                              ),
+                            ),
+                          ),
+                        );
+                      })
+                      .toList(),
                 ),
                 const SizedBox(height: 12),
                 DropdownButtonFormField<String>(
-                  initialValue: _paymentMethod,
+                  initialValue: effectivePaymentMethod,
                   decoration: const InputDecoration(
                     labelText: 'Payment method',
                   ),
-                  items: const [
-                    DropdownMenuItem(
-                      value: 'mpesa_stk',
-                      child: Text('M-Pesa prompt'),
-                    ),
+                  items: [
+                    if (billingInterval != 'lifetime')
+                      const DropdownMenuItem(
+                        value: 'mpesa_stk',
+                        child: Text('M-Pesa prompt'),
+                      ),
                     DropdownMenuItem(
                       value: 'mpesa_manual',
                       child: Text('M-Pesa reference'),
@@ -297,8 +440,8 @@ class _SubscriptionManagementCardState
                           }
                         },
                 ),
-                if (_paymentMethod == 'mpesa_stk' ||
-                    _paymentMethod == 'mpesa_manual') ...[
+                if (effectivePaymentMethod == 'mpesa_stk' ||
+                    effectivePaymentMethod == 'mpesa_manual') ...[
                   const SizedBox(height: 12),
                   TextField(
                     controller: _phone,
@@ -308,7 +451,7 @@ class _SubscriptionManagementCardState
                     ),
                   ),
                 ],
-                if (_paymentMethod != 'mpesa_stk') ...[
+                if (effectivePaymentMethod != 'mpesa_stk') ...[
                   const SizedBox(height: 12),
                   TextField(
                     controller: _reference,
@@ -337,9 +480,9 @@ class _SubscriptionManagementCardState
                           )
                         : const Icon(Icons.payment_outlined),
                     label: Text(
-                      _paymentMethod == 'mpesa_stk'
+                      effectivePaymentMethod == 'mpesa_stk'
                           ? 'Send M-Pesa prompt'
-                          : 'Submit payment reference',
+                          : 'Upgrade / continue with selected plan',
                     ),
                   ),
                 ),
@@ -359,6 +502,27 @@ class _SubscriptionManagementCardState
       },
     );
   }
+
+  Widget _intervalChip(
+    String value,
+    String label,
+    String selected, {
+    bool disabled = false,
+  }) => FilterChip(
+    label: Text(label),
+    selected: selected == value,
+    onSelected: _saving || disabled
+        ? null
+        : (enabled) {
+            if (!enabled) return;
+            setState(() {
+              _billingInterval = value;
+              if (value == 'lifetime' && _paymentMethod == 'mpesa_stk') {
+                _paymentMethod = 'mpesa_manual';
+              }
+            });
+          },
+  );
 
   Widget _paymentTile(Map<String, dynamic> payment) {
     final amount = double.tryParse(payment['amount']?.toString() ?? '') ?? 0;

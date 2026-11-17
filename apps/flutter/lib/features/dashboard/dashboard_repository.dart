@@ -451,8 +451,8 @@ class DashboardRepository {
     String? payerPhone,
   }) async {
     final supabase = await _requireOnlineRole(user, [RetivoxRole.owner]);
-    if (!['starter', 'growth', 'enterprise'].contains(planKey) ||
-        !['monthly', 'yearly'].contains(billingInterval) ||
+    if (!RegExp(r'^[a-z][a-z0-9_]{1,39}$').hasMatch(planKey) ||
+        !['monthly', 'yearly', 'lifetime'].contains(billingInterval) ||
         ![
           'mpesa_manual',
           'bank_transfer',
