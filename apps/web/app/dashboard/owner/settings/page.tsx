@@ -153,13 +153,13 @@ export default async function SettingsPage() {
       <Card padding="md">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 style={{ margin: 0, color: 'var(--color-text-primary)', fontSize: 15, fontWeight: 800 }}>Customer payment providers</h2>
+            <h2 style={{ margin: 0, color: 'var(--color-text-primary)', fontSize: 15, fontWeight: 800 }}>Payment methods & provider setup</h2>
             <p style={{ margin: '4px 0 0', color: 'var(--color-text-muted)', fontSize: 13 }}>
-              Set up secure online checkout credentials for your business.
+              Configure M-Pesa prompts, card and bank checkout, and PayBill/Till reconciliation. Cash and Mobile manual remain available offline.
             </p>
           </div>
           <Link href="/dashboard/owner/settings/payments" className="btn-primary" style={{ textDecoration: 'none', borderRadius: 9, padding: '9px 13px' }}>
-            Manage providers
+            Configure payments
           </Link>
         </div>
       </Card>

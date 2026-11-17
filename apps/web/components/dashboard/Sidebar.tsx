@@ -182,6 +182,7 @@ const ownerNav: { section: string; items: NavItem[] }[] = [
     items: [
       { label: 'Audit log', href: '/dashboard/owner/audit', icon: <ShieldIcon /> },
       { label: 'Settings', href: '/dashboard/owner/settings', icon: <SettingsIcon /> },
+      { label: 'Payment setup', href: '/dashboard/owner/settings/payments', icon: <ReceiptIcon /> },
     ],
   },
 ]
