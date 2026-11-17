@@ -115,7 +115,13 @@ class OfflineAccountVault {
     }
     final dataKey = await _readDataKey(accountId);
     return RetivoxUser.fromJson(
-      jsonDecode(await _open(profile, dataKey)) as Map<String, dynamic>,
+      jsonDecode(
+        await _open(
+          profile,
+          dataKey,
+          dataDescription: 'offline account profile',
+        ),
+      ) as Map<String, dynamic>,
     );
   }
 
@@ -125,7 +131,9 @@ class OfflineAccountVault {
     final profile = await database.readAccount(accountId);
     if (profile == null) return null;
     final dataKey = await _readDataKey(accountId);
-    final decoded = jsonDecode(await _open(profile, dataKey));
+    final decoded = jsonDecode(
+      await _open(profile, dataKey, dataDescription: 'offline account profile'),
+    );
     if (decoded is! Map<String, dynamic>) {
       throw const OfflineAccountException(
         'The saved account profile is invalid.',
@@ -150,8 +158,13 @@ class OfflineAccountVault {
   Future<T?> readCachedValue<T>(RetivoxUser user, String key) async {
     final ciphertext = await database.readCachedValue(user.id, key);
     if (ciphertext == null) return null;
-    return jsonDecode(await _open(ciphertext, await _readDataKey(user.id)))
-        as T;
+    return jsonDecode(
+      await _open(
+        ciphertext,
+        await _readDataKey(user.id),
+        dataDescription: 'account cache "$key"',
+      ),
+    ) as T;
   }
 
   Future<DateTime?> cachedValueUpdatedAt(RetivoxUser user, String key) async {
@@ -167,8 +180,13 @@ class OfflineAccountVault {
     String accountId,
     String ciphertext,
   ) async {
-    return jsonDecode(await _open(ciphertext, await _readDataKey(accountId)))
-        as Map<String, dynamic>;
+    return jsonDecode(
+      await _open(
+        ciphertext,
+        await _readDataKey(accountId),
+        dataDescription: 'saved offline record',
+      ),
+    ) as Map<String, dynamic>;
   }
 
   Future<void> signOutOfflineAccess(String accountId) async {
@@ -248,7 +266,11 @@ class OfflineAccountVault {
     ].join('.');
   }
 
-  Future<String> _open(String value, SecretKey key) async {
+  Future<String> _open(
+    String value,
+    SecretKey key, {
+    required String dataDescription,
+  }) async {
     final parts = value.split('.');
     if (parts.length != 4 || parts.first != 'v1') {
       throw const OfflineAccountException(
@@ -263,8 +285,10 @@ class OfflineAccountVault {
     try {
       return utf8.decode(await _cipher.decrypt(box, secretKey: key));
     } on SecretBoxAuthenticationError {
-      throw const OfflineAccountException(
-        'The saved offline profile is damaged or out of sync. Sign in online with your password to refresh this computer’s profile. Pending offline sales remain stored.',
+      throw OfflineAccountException(
+        'The $dataDescription for this account could not be authenticated. '
+        'Sign in online as this account to refresh server-backed data. '
+        'Local records have not been deleted.',
       );
     }
   }

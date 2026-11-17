@@ -45,6 +45,35 @@ void main() {
     expect(await database.readPreference('dark_mode'), 'false');
   });
 
+  test(
+    'cached records are isolated by account even with the same cache key',
+    () async {
+      await database.cacheValue(
+        'account-1',
+        'dashboard:branches',
+        'ciphertext-a',
+      );
+      await database.cacheValue(
+        'account-2',
+        'dashboard:branches',
+        'ciphertext-b',
+      );
+
+      expect(
+        await database.readCachedValue('account-1', 'dashboard:branches'),
+        'ciphertext-a',
+      );
+      expect(
+        await database.readCachedValue('account-2', 'dashboard:branches'),
+        'ciphertext-b',
+      );
+      expect(
+        await database.readCachedValue('account-3', 'dashboard:branches'),
+        isNull,
+      );
+    },
+  );
+
   test('only one process can own an account sale sync lease', () async {
     final expiry = DateTime.now().toUtc().add(const Duration(minutes: 1));
 

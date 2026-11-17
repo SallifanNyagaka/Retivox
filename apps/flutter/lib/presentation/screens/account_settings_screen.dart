@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 
 import '../../core/auth/retivox_user.dart';
 import '../../features/dashboard/dashboard_repository.dart';
+import 'business_payment_settings_panel.dart';
 import 'subscription_management_card.dart';
 
 class AccountSettingsScreen extends StatefulWidget {
@@ -32,6 +33,15 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
   void initState() {
     super.initState();
     _snapshot = widget.repository.loadSection(widget.user, 'settings');
+  }
+
+  @override
+  void didUpdateWidget(covariant AccountSettingsScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.user.id != widget.user.id ||
+        oldWidget.repository != widget.repository) {
+      _snapshot = widget.repository.loadSection(widget.user, 'settings');
+    }
   }
 
   void _refresh() {
@@ -97,6 +107,11 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
             const SizedBox(height: 16),
             _branchCard(context),
             if (widget.user.role == RetivoxRole.owner) ...[
+              const SizedBox(height: 16),
+              BusinessPaymentSettingsPanel(
+                user: widget.user,
+                repository: widget.repository,
+              ),
               const SizedBox(height: 16),
               SubscriptionManagementCard(
                 user: widget.user,

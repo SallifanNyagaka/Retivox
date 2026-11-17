@@ -26,6 +26,51 @@ class DashboardSnapshot {
   final bool isCached;
 }
 
+class BusinessPaymentSettingsSnapshot {
+  const BusinessPaymentSettingsSnapshot({
+    required this.providers,
+    required this.methods,
+    required this.updatedAt,
+    required this.isCached,
+  });
+
+  final List<Map<String, dynamic>> providers;
+  final Map<String, dynamic> methods;
+  final DateTime? updatedAt;
+  final bool isCached;
+
+  Map<String, Object?> toJson() => {
+    'providers': providers,
+    'methods': methods,
+    'updatedAt': updatedAt?.toIso8601String(),
+  };
+
+  factory BusinessPaymentSettingsSnapshot.fromJson(
+    Map<String, dynamic> json, {
+    required bool isCached,
+  }) {
+    final providers = (json['providers'] as List? ?? const [])
+        .whereType<Map>()
+        .map((row) => Map<String, dynamic>.from(row))
+        .toList();
+    final methods = json['methods'] is Map
+        ? Map<String, dynamic>.from(json['methods'] as Map)
+        : <String, dynamic>{
+            'cash': true,
+            'mobile_manual': true,
+            'daraja_prompt': false,
+            'pesapal_checkout': false,
+          };
+    return BusinessPaymentSettingsSnapshot(
+      providers: providers,
+      methods: methods,
+      updatedAt: DateTime.tryParse(json['updatedAt']?.toString() ?? '')
+          ?.toLocal(),
+      isCached: isCached,
+    );
+  }
+}
+
 class TransferOptionsSnapshot {
   const TransferOptionsSnapshot({
     required this.branches,
@@ -96,6 +141,123 @@ class DashboardRepository {
     return client != null && backendHealthCheck.isConfigured
         ? backendHealthCheck.isReachable()
         : false;
+  }
+
+  static const _businessPaymentSettingsCacheKey =
+      'dashboard:payment-provider-settings';
+
+  Future<BusinessPaymentSettingsSnapshot> loadBusinessPaymentSettings(
+    RetivoxUser user,
+  ) async {
+    if (user.role != RetivoxRole.owner) {
+      throw const DashboardRepositoryException(
+        'Only the business owner can configure payment providers.',
+      );
+    }
+
+    final api = webApiClient;
+    if (api != null && await isBackendReachable()) {
+      try {
+        final response = await api.get('/api/desktop/payment-settings');
+        final raw = response['data'];
+        if (raw is! Map) {
+          throw const DashboardRepositoryException(
+            'The server returned invalid payment settings.',
+          );
+        }
+        final data = Map<String, dynamic>.from(raw);
+        data['updatedAt'] = DateTime.now().toUtc().toIso8601String();
+        await vault.cacheValue(user, _businessPaymentSettingsCacheKey, data);
+        return BusinessPaymentSettingsSnapshot.fromJson(data, isCached: false);
+      } catch (error) {
+        final cached = await vault.readCachedValue<Map<String, dynamic>>(
+          user,
+          _businessPaymentSettingsCacheKey,
+        );
+        if (cached != null &&
+            (error is WebApiException || _isNetworkError(error))) {
+          return BusinessPaymentSettingsSnapshot.fromJson(
+            cached,
+            isCached: true,
+          );
+        }
+        rethrow;
+      }
+    }
+
+    final cached = await vault.readCachedValue<Map<String, dynamic>>(
+      user,
+      _businessPaymentSettingsCacheKey,
+    );
+    if (cached != null) {
+      return BusinessPaymentSettingsSnapshot.fromJson(cached, isCached: true);
+    }
+    return BusinessPaymentSettingsSnapshot(
+      providers: const [],
+      methods: const {
+        'cash': true,
+        'mobile_manual': true,
+        'daraja_prompt': false,
+        'pesapal_checkout': false,
+      },
+      updatedAt: null,
+      isCached: true,
+    );
+  }
+
+  Future<void> saveBusinessPaymentProvider(
+    RetivoxUser user,
+    Map<String, Object?> settings,
+  ) async {
+    if (user.role != RetivoxRole.owner) {
+      throw const DashboardRepositoryException(
+        'Only the business owner can configure payment providers.',
+      );
+    }
+    if (!await isBackendReachable()) {
+      throw const DashboardRepositoryException(
+        'Payment provider credentials can only be saved while online. Cash and Mobile manual remain available offline.',
+      );
+    }
+    final api = webApiClient;
+    if (api == null) {
+      throw const DashboardRepositoryException(
+        'Configure RETIVOX_WEB_API_URL before saving provider settings.',
+      );
+    }
+    await api.post('/api/desktop/payment-settings', {
+      'action': 'save',
+      ...settings,
+    });
+  }
+
+  Future<String> runBusinessPaymentProviderAction(
+    RetivoxUser user, {
+    required String action,
+    String? provider,
+  }) async {
+    if (user.role != RetivoxRole.owner) {
+      throw const DashboardRepositoryException(
+        'Only the business owner can configure payment providers.',
+      );
+    }
+    if (!await isBackendReachable()) {
+      throw const DashboardRepositoryException(
+        'Provider testing and callback registration require an online connection.',
+      );
+    }
+    final api = webApiClient;
+    if (api == null) {
+      throw const DashboardRepositoryException(
+        'Configure RETIVOX_WEB_API_URL before managing provider callbacks.',
+      );
+    }
+    final response = await api.post('/api/desktop/payment-settings', {
+      'action': action,
+      if (provider != null) 'provider': provider,
+    });
+    return response['message']?.toString() ??
+        'Payment provider action completed.';
   }
 
   Future<OverviewSnapshot> loadOverview(RetivoxUser user) async {
