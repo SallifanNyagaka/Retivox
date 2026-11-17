@@ -3,6 +3,7 @@
  */
 
 import Link from 'next/link'
+import { randomUUID } from 'node:crypto'
 import { GlobalRole } from '@smartretail/shared'
 import { requireRole } from '../../../../../lib/auth/helpers'
 import { getDashboardSalePageData } from '../../../../../lib/dashboard/recordTransactionPage'
@@ -99,6 +100,7 @@ export default async function AdminNewTransactionPage({ searchParams }: { search
               <RecordEmployeeTransactionForm
                 products={data.products}
                 currency={data.currency}
+                initialRequestId={randomUUID()}
                 action={recordAdminTransaction}
                 branchId={data.selectedBranchId}
                 redirectPath="/dashboard/admin/transactions"

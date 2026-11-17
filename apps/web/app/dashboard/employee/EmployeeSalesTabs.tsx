@@ -11,10 +11,12 @@ type Props = {
   normalProducts: EmployeeProductOption[]
   damagedProducts: EmployeeProductOption[]
   currency: string
+  initialRequestId: string
 }
 
-export default function EmployeeSalesTabs({ normalProducts, damagedProducts, currency }: Props) {
+export default function EmployeeSalesTabs({ normalProducts, damagedProducts, currency, initialRequestId }: Props) {
   const [activeTab, setActiveTab] = useState<'normal' | 'damaged'>('normal')
+  const [requestId, setRequestId] = useState(initialRequestId)
   const showDamagedTab = damagedProducts.length > 0
   const selectedProducts = activeTab === 'damaged' ? damagedProducts : normalProducts
 
@@ -27,7 +29,7 @@ export default function EmployeeSalesTabs({ normalProducts, damagedProducts, cur
           type="button"
           className={activeTab === 'normal' ? 'btn-primary' : 'btn-outline'}
           style={{ padding: '8px 16px', borderRadius: 8 }}
-          onClick={() => setActiveTab('normal')}
+          onClick={() => { setActiveTab('normal'); setRequestId(crypto.randomUUID()) }}
         >
           Normal stock
         </button>
@@ -36,7 +38,7 @@ export default function EmployeeSalesTabs({ normalProducts, damagedProducts, cur
             type="button"
             className={activeTab === 'damaged' ? 'btn-primary' : 'btn-outline'}
             style={{ padding: '8px 16px', borderRadius: 8 }}
-            onClick={() => setActiveTab('damaged')}
+            onClick={() => { setActiveTab('damaged'); setRequestId(crypto.randomUUID()) }}
           >
             Damaged stock
           </button>
@@ -50,7 +52,7 @@ export default function EmployeeSalesTabs({ normalProducts, damagedProducts, cur
       )}
 
       {selectedProducts.length > 0 ? (
-        <RecordEmployeeTransactionForm key={activeTab} products={selectedProducts} currency={currency} offlineQueueEnabled />
+        <RecordEmployeeTransactionForm key={activeTab} products={selectedProducts} currency={currency} initialRequestId={requestId} offlineQueueEnabled />
       ) : (
         <div style={{ padding: '28px 16px', textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 13 }}>
           No {activeTab === 'damaged' ? 'damaged' : 'normal'} stock is currently available to sell.

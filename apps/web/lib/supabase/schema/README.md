@@ -115,4 +115,5 @@ login-review content. Live checks confirm the 27 tables without policies grant n
 - 117_subscription_price_notice_indexes.sql — adds partial indexes for eligible subscriptions and active business owners used by the price-notice trigger.
 - 118_index_new_payment_fk_columns.sql — indexes foreign-key columns on assisted-setup pricing, promotions, and price-notice ledgers.
 - 119_retain_daraja_callback_mismatches.sql — stores sanitized Daraja callback payloads in the service-only event ledger and records settlement mismatches without rolling back their audit trail.
+- 120_sale_idempotency_and_retry_safety.sql — binds online sale retries to stable request IDs and immutable payloads, makes offline/PWA retry finalization idempotent, and retains database stock locks as the final availability check.
 

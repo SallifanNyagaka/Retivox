@@ -6,6 +6,7 @@
  */
 
 import Link from 'next/link'
+import { randomUUID } from 'node:crypto'
 import { redirect } from 'next/navigation'
 import { Card, CardHeader } from '../../../../../components/ui/Card'
 import { requireAuth } from '../../../../../lib/auth/helpers'
@@ -141,7 +142,7 @@ export default async function EmployeeNewTransactionPage() {
               </p>
             </div>
           ) : (
-            <RecordEmployeeTransactionForm products={products} currency={currency} offlineQueueEnabled />
+            <RecordEmployeeTransactionForm products={products} currency={currency} initialRequestId={randomUUID()} offlineQueueEnabled />
           )}
         </Card>
       </div>

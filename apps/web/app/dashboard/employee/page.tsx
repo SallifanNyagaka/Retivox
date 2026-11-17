@@ -7,6 +7,7 @@
  */
 
 import Link from 'next/link'
+import { randomUUID } from 'node:crypto'
 import { redirect } from 'next/navigation'
 import { Badge } from '../../../components/ui/Badge'
 import { Card, CardHeader } from '../../../components/ui/Card'
@@ -234,7 +235,7 @@ export default async function EmployeeDashboardPage() {
       </div>
 
       <div className="w-full text-left">
-        <EmployeeSalesTabs normalProducts={normalSaleProducts} damagedProducts={damagedSaleProducts} currency={currency} />
+        <EmployeeSalesTabs normalProducts={normalSaleProducts} damagedProducts={damagedSaleProducts} currency={currency} initialRequestId={randomUUID()} />
       </div>
 
       {/* Recent transactions are scoped by employee_id and branch_id. */}

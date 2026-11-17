@@ -78,6 +78,7 @@ type SplitPaymentMethod = 'cash' | 'mpesa_manual' | 'mpesa_stk' | 'pesapal'
 type Props = {
   products: EmployeeProductOption[]
   currency: string
+  initialRequestId: string
   action?: RecordTransactionAction
   branchId?: string
   redirectPath?: string
@@ -356,6 +357,7 @@ function getInitialLineItems(idSuffix = ''): LineItemDraft[] {
 export default function RecordEmployeeTransactionForm({
   products,
   currency,
+  initialRequestId,
   action: recordTransactionAction = recordEmployeeTransaction,
   branchId,
   redirectPath = '/dashboard/employee/transactions',
@@ -366,6 +368,7 @@ export default function RecordEmployeeTransactionForm({
 }: Props) {
   const router = useRouter()
   const previousPending = useRef(false)
+  const requestIdRef = useRef(initialRequestId)
   const barcodeInputRef = useRef<HTMLInputElement>(null)
   const barcodeRowSequence = useRef(0)
   const [rows, setRows] = useState<LineItemDraft[]>(() => getInitialLineItems())
@@ -500,6 +503,7 @@ export default function RecordEmployeeTransactionForm({
         }
         toast.success(state.message ?? 'Transaction recorded successfully')
         redirectTimer = setTimeout(() => {
+          requestIdRef.current = crypto.randomUUID()
           if (stayOnSuccess) {
             setRows(getInitialLineItems(`-${Date.now()}`))
             setDiscountAmount('0')
@@ -516,6 +520,7 @@ export default function RecordEmployeeTransactionForm({
         }, 0)
       } else if (state.error) {
         toast.error(state.error)
+        if (state.error.toLowerCase().includes('stock')) router.refresh()
       }
     }
 
@@ -740,6 +745,7 @@ export default function RecordEmployeeTransactionForm({
     formData.set('dueDate', dueDate)
     formData.set('mpesaRefCode', mpesaRefCode)
     formData.set('paymentPhone', paymentPhone)
+    formData.set('idempotencyKey', requestIdRef.current)
     formData.set('splitPaymentsJson', splitPaymentMode ? JSON.stringify(splitPayments.map((payment) => ({
       paymentMethod: payment.paymentMethod,
       amount: payment.amount,

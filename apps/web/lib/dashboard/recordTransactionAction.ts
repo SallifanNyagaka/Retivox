@@ -11,7 +11,6 @@ import { assertBranchAccess } from '../auth/branchAccess'
 import logger from '../logger'
 import { normalizeKenyanPhoneNumber } from '../payments/daraja'
 import { createClient } from '../supabase/server'
-import { randomUUID } from 'node:crypto'
 import { getBusinessDarajaSetup, startBusinessDarajaCheckout } from '../payments/businessDaraja'
 import { getBusinessPesapalSetup, startBusinessPesapalCheckout } from '../payments/pesapal'
 import { requestOrigin } from '../requestOrigin'
@@ -37,6 +36,7 @@ type DashboardRecordTransactionRow = {
   status: string
   recorded_at: string
   total_amount: number
+  replayed?: boolean
 }
 
 const lineItemSchema = z.object({
@@ -189,10 +189,12 @@ async function recordDashboardTransactionForRole(
 ): Promise<DashboardTransactionFormState> {
   const profile = await requireRole([role])
   const businessId = profile.business_id
+  const requestId = z.string().uuid().safeParse(getString(formData, 'idempotencyKey'))
 
   if (!businessId) {
     return { success: false, error: 'Business context missing' }
   }
+  if (!requestId.success) return { success: false, error: 'This sale form has expired. Refresh it and try again.' }
 
   let items: SubmittedLineItem[]
   let splitPayments: ReturnType<typeof parseSplitPaymentsJson>
@@ -239,7 +241,7 @@ async function recordDashboardTransactionForRole(
     const supabase = await createClient()
     const splitProviderPayment = validation.data.splitPayments?.find((payment) => payment.paymentMethod === 'mpesa_stk' || payment.paymentMethod === 'pesapal')
     const splitProviderReference = splitProviderPayment
-      ? `${splitProviderPayment.paymentMethod === 'mpesa_stk' ? 'STK-PENDING' : 'PESAPAL-PENDING'}:${randomUUID()}`
+      ? `${splitProviderPayment.paymentMethod === 'mpesa_stk' ? 'STK-PENDING' : 'PESAPAL-PENDING'}:${requestId.data}`
       : null
     const onlineMethods = new Set([
       ...(validation.data.splitPayments ?? []).map((payment) => payment.paymentMethod),
@@ -264,19 +266,8 @@ async function recordDashboardTransactionForRole(
       return { success: false, error: 'The owner needs to configure Pesapal and register its IPN before checkout can be used.' }
     }
 
-    const response = validation.data.splitPayments
-      ? await supabase.rpc('dashboard_record_transaction_split_v1', {
-      p_branch_id: validation.data.branchId,
-      p_items: validation.data.items.map((item) => ({ productId: item.productId, uomId: item.uomId, quantity: item.quantity, recoveryItemId: item.recoveryItemId ?? null })),
-      p_payments: validation.data.splitPayments.map((payment) => ({ paymentMethod: payment.paymentMethod === 'mpesa_stk' || payment.paymentMethod === 'pesapal' ? 'mpesa_manual' : payment.paymentMethod, amount: payment.amount, amountTendered: payment.paymentMethod === 'cash' ? payment.amountTendered ?? payment.amount : payment.amount, referenceCode: payment === splitProviderPayment ? splitProviderReference : payment.referenceCode ?? null })),
-      p_discount_amount: validation.data.discountAmount,
-      p_customer_name: validation.data.customerName ?? null,
-      p_customer_phone: validation.data.customerPhone ?? null,
-      p_customer_email: validation.data.customerEmail || null,
-      p_due_date: validation.data.dueDate || null,
-      p_is_credit: validation.data.isCredit,
-    })
-      : await supabase.rpc('dashboard_record_transaction_v2', {
+    const response = await supabase.rpc('dashboard_record_transaction_idempotent_v1', {
+      p_request_id: requestId.data,
       p_branch_id: validation.data.branchId,
       p_items: validation.data.items.map((item) => ({
         productId: item.productId,
@@ -291,12 +282,22 @@ async function recordDashboardTransactionForRole(
       p_customer_name: validation.data.customerName ?? null,
       p_customer_phone: validation.data.customerPhone ?? null,
       p_customer_email: validation.data.customerEmail || null,
-      p_reference_code: validation.data.paymentMethod === 'mpesa_stk' ? `STK-PENDING:${randomUUID()}` : validation.data.paymentMethod === 'pesapal' ? `PESAPAL-PENDING:${randomUUID()}` : validation.data.mpesaRefCode ?? null,
+      p_reference_code: validation.data.paymentMethod === 'mpesa_stk' ? `STK-PENDING:${requestId.data}` : validation.data.paymentMethod === 'pesapal' ? `PESAPAL-PENDING:${requestId.data}` : validation.data.mpesaRefCode ?? null,
       p_due_date: validation.data.dueDate || null,
       p_is_credit: validation.data.isCredit,
+      p_split_payments: validation.data.splitPayments?.map((payment) => ({
+        paymentMethod: payment.paymentMethod === 'mpesa_stk' || payment.paymentMethod === 'pesapal' ? 'mpesa_manual' : payment.paymentMethod,
+        amount: payment.amount,
+        amountTendered: payment.paymentMethod === 'cash' ? payment.amountTendered ?? payment.amount : payment.amount,
+        referenceCode: payment === splitProviderPayment ? splitProviderReference : payment.referenceCode ?? null,
+      })) ?? null,
     })
 
     if (response.error) {
+      if (response.error.message.includes('Insufficient stock')) {
+        revalidatePath('/dashboard/owner/transactions/new')
+        revalidatePath('/dashboard/admin/transactions/new')
+      }
       logger.error('recordDashboardTransactionForRole: rpc failed', {
         userId: profile.id,
         businessId,
@@ -310,6 +311,14 @@ async function recordDashboardTransactionForRole(
     const result = Array.isArray(response.data)
       ? ((response.data[0] ?? null) as DashboardRecordTransactionRow | null)
       : ((response.data ?? null) as DashboardRecordTransactionRow | null)
+
+    if (result?.replayed) {
+      revalidatePath('/dashboard/owner/transactions')
+      revalidatePath('/dashboard/admin/transactions')
+      revalidatePath('/dashboard/owner')
+      revalidatePath('/dashboard/admin')
+      return { success: true, error: null, message: 'This sale was already recorded. No duplicate sale or payment was created.', transactionId: result.transaction_id }
+    }
 
     let checkoutMessage: string | null = null
     let pesapalCheckoutUrl: string | undefined
