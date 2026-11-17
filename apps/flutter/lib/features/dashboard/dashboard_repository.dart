@@ -1,11 +1,16 @@
 import 'dart:async';
+
+import '../../presentation/models/overview_snapshot.dart';
+
 import 'dart:io';
 
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:uuid/uuid.dart';
 
 import '../../core/auth/offline_account_vault.dart';
 import '../../core/auth/retivox_user.dart';
 import '../../core/network/web_api_client.dart';
+import '../../core/network/backend_health_check.dart';
 
 class DashboardSnapshot {
   const DashboardSnapshot({
@@ -27,10 +32,12 @@ class TransferOptionsSnapshot {
     required this.stockRows,
     required this.updatedAt,
     required this.isCached,
+    this.products = const [],
   });
 
   final List<Map<String, dynamic>> branches;
   final List<Map<String, dynamic>> stockRows;
+  final List<Map<String, dynamic>> products;
   final DateTime? updatedAt;
   final bool isCached;
 }
@@ -68,15 +75,121 @@ class DamageReportOptionsSnapshot {
 }
 
 class DashboardRepository {
-  const DashboardRepository({
+  DashboardRepository({
     required this.vault,
     required this.client,
+    required this.backendHealthCheck,
     this.webApiClient,
   });
 
   final OfflineAccountVault vault;
   final SupabaseClient? client;
+  final BackendHealthCheck backendHealthCheck;
   final WebApiClient? webApiClient;
+  bool _isSyncingDashboardAction = false;
+
+  // Existing methods …
+
+  /// Loads the overview data used on the dashboard.
+  /// Returns cached data when offline or when the network request fails.
+  Future<bool> isBackendReachable() async {
+    return client != null && backendHealthCheck.isConfigured
+        ? backendHealthCheck.isReachable()
+        : false;
+  }
+
+  Future<OverviewSnapshot> loadOverview(RetivoxUser user) async {
+    if (!await isBackendReachable()) {
+      final cached = await _cachedOverview(user);
+      if (cached != null) return cached.copyWith(isCached: true);
+      throw const DashboardRepositoryException(
+        'No saved overview is available on this computer yet.',
+      );
+    }
+    try {
+      final supabase = await _requireOnlineRole(user, RetivoxRole.values);
+      final raw = await supabase.rpc(
+        'desktop_overview_detailed',
+        params: {'business_id': user.businessId},
+      );
+      final overviewData = Map<String, dynamic>.from(
+        raw as Map<String, dynamic>,
+      );
+      if (user.role == RetivoxRole.owner) {
+        final receivables = await supabase
+            .from('receivable_account_balances')
+            .select('balance_due')
+            .eq('business_id', user.businessId)
+            .gt('balance_due', 0);
+        overviewData['totalLent'] = (receivables as List).fold<double>(
+          0,
+          (total, row) =>
+              total +
+              (double.tryParse((row as Map)['balance_due']?.toString() ?? '') ??
+                  0),
+        );
+        final now = DateTime.now();
+        final today = DateTime(now.year, now.month, now.day);
+        final dueThrough = today.add(const Duration(days: 2));
+        final creditDueAlerts = await supabase
+            .from('receivable_account_balances')
+            .select(
+              'id, customer_name, customer_phone, due_date, balance_due, account_status, branch_name',
+            )
+            .eq('business_id', user.businessId)
+            .gt('balance_due', 0)
+            .lte('due_date', dueThrough.toIso8601String().substring(0, 10))
+            .order('due_date')
+            .range(0, 99);
+        overviewData['creditDueAlerts'] = creditDueAlerts;
+        final localNow = DateTime.now();
+        final todayStart = DateTime(
+          localNow.year,
+          localNow.month,
+          localNow.day,
+        ).toUtc().toIso8601String();
+        final payments = await supabase
+            .from('payments')
+            .select(
+              'payment_method, amount, status, transactions!inner(branch_id, status)',
+            )
+            .eq('business_id', user.businessId)
+            .gte('payment_at', todayStart)
+            .neq('status', 'rejected');
+        final byMethod = <String, double>{};
+        for (final payment in payments as List) {
+          final transaction = payment['transactions'];
+          if (transaction is Map &&
+              ['voided', 'rejected'].contains(transaction['status']))
+            continue;
+          final method = payment['payment_method']?.toString() ?? 'other';
+          byMethod[method] =
+              (byMethod[method] ?? 0) +
+              (double.tryParse(payment['amount']?.toString() ?? '') ?? 0);
+        }
+        overviewData['paymentMethodsToday'] = byMethod;
+      }
+      final snapshot = OverviewSnapshot.fromJson(overviewData)
+          .copyWith(updatedAt: DateTime.now(), isCached: false);
+      await vault.cacheValue(user, 'dashboard:overview', snapshot.toJson());
+      return snapshot;
+    } catch (error) {
+      if (!_isNetworkError(error)) rethrow;
+      final cached = await _cachedOverview(user);
+      if (cached != null) return cached.copyWith(isCached: true);
+      rethrow;
+    }
+  }
+
+  Future<OverviewSnapshot?> _cachedOverview(RetivoxUser user) async {
+    final cached = await vault.readCachedValue<Map<String, dynamic>>(
+      user,
+      'dashboard:overview',
+    );
+    return cached == null
+        ? null
+        : OverviewSnapshot.fromJson(cached).copyWith(isCached: true);
+  }
 
   Future<List<Map<String, dynamic>>> loadAdminBranchOptions(
     RetivoxUser user, {
@@ -262,11 +375,14 @@ class DashboardRepository {
     final supabase = client;
     if (supabase != null) {
       try {
-        final authUser = await supabase.auth.getUser();
+        final authUser = await supabase.auth.getUser().timeout(
+          const Duration(seconds: 8),
+        );
         if (authUser.user?.id != user.id) {
-          throw const DashboardRepositoryException(
-            'Sign in online with this account to load transfer options.',
-          );
+          // Never use another account's online session for this user's options.
+          // Treat it as unavailable here so the account-scoped encrypted cache
+          // below can still support offline delivery entry.
+          throw const SocketException('No matching online account session.');
         }
         final branches = _normalizeRows(
           await supabase
@@ -289,6 +405,54 @@ class DashboardRepository {
                   )
                   .map((branch) => branch.id)
                   .toList();
+        final productRows = _normalizeRows(
+          await supabase
+              .from('products')
+              .select('id, name, sku, tracks_expiry')
+              .eq('business_id', user.businessId)
+              .eq('is_active', true)
+              .isFilter('deleted_at', null)
+              .order('name')
+              .range(0, 99),
+        );
+        final catalogIds = productRows
+            .map((row) => row['id']?.toString())
+            .whereType<String>()
+            .toList();
+        final catalogUoms = catalogIds.isEmpty
+            ? <Map<String, dynamic>>[]
+            : _normalizeRows(
+                await supabase
+                    .from('product_uom_links')
+                    .select(
+                      'product_id, is_purchase_uom, is_default_purchase_uom, units_of_measure!inner(id, name, abbreviation, conversion_factor, is_base_unit)',
+                    )
+                    .eq('business_id', user.businessId)
+                    .inFilter('product_id', catalogIds)
+                    .eq('is_purchase_uom', true)
+                    .order('is_default_purchase_uom', ascending: false),
+              );
+        final catalogUomsByProduct = _groupRows(catalogUoms, 'product_id');
+        final products = productRows.map((product) {
+          final id = product['id']?.toString() ?? '';
+          final units = (catalogUomsByProduct[id] ?? const [])
+              .map((link) {
+                final unit = _nested(link['units_of_measure']);
+                if (unit == null) return null;
+                return <String, dynamic>{
+                  'id': unit['id'],
+                  'name': unit['name'],
+                  'abbreviation': unit['abbreviation'],
+                  'conversion_factor': unit['conversion_factor'],
+                  'is_base_unit': unit['is_base_unit'],
+                  'is_purchase_uom': true,
+                  'is_default_purchase_uom': link['is_default_purchase_uom'],
+                };
+              })
+              .whereType<Map<String, dynamic>>()
+              .toList();
+          return {...product, 'uom_options': units};
+        }).toList();
         var stockRows = <Map<String, dynamic>>[];
         if (managedBranchIds.isNotEmpty) {
           final rawStockRows = _normalizeRows(
@@ -351,11 +515,16 @@ class DashboardRepository {
             };
           }).toList();
         }
-        final options = {'branches': branches, 'stock_rows': stockRows};
+        final options = {
+          'branches': branches,
+          'stock_rows': stockRows,
+          'products': products,
+        };
         await vault.cacheValue(user, cacheKey, [options]);
         return TransferOptionsSnapshot(
           branches: branches,
           stockRows: stockRows,
+          products: products,
           updatedAt: await vault.cachedValueUpdatedAt(user, cacheKey),
           isCached: false,
         );
@@ -374,6 +543,9 @@ class DashboardRepository {
     return TransferOptionsSnapshot(
       branches: _normalizeRows(options['branches']),
       stockRows: _normalizeRows(options['stock_rows']),
+      products: options['products'] == null
+          ? const []
+          : _normalizeRows(options['products']),
       updatedAt: await vault.cachedValueUpdatedAt(user, cacheKey),
       isCached: true,
     );
@@ -430,69 +602,85 @@ class DashboardRepository {
     );
   }
 
-  Future<void> recordSupplierDelivery(
+  Future<bool> recordSupplierDelivery(
     RetivoxUser user, {
     required String branchId,
     required String supplierId,
     required String supplierName,
     required String referenceCode,
     required List<Map<String, Object?>> items,
+    String? supplierPhone,
+    String? supplierEmail,
+    String? supplierContactPerson,
+    String? supplierNotes,
+    int? priceRating,
+    int? stockQualityRating,
+    int? availabilityRating,
+    String ratingNote = '',
   }) async {
-    final supabase = await _requireOnlineRole(user, [
-      RetivoxRole.owner,
-      RetivoxRole.admin,
-    ]);
+    if (!const [RetivoxRole.owner, RetivoxRole.admin].contains(user.role)) {
+      throw const DashboardRepositoryException(
+        'Only owners and administrators can record supplier deliveries.',
+      );
+    }
     if (items.isEmpty || supplierName.trim().isEmpty) {
       throw const DashboardRepositoryException(
         'Select a supplier and add at least one product.',
       );
     }
-    await supabase.rpc(
-      'dashboard_record_supplier_delivery',
-      params: {
-        'p_branch_id': branchId,
-        'p_supplier_name': supplierName.trim(),
-        'p_reference_code': referenceCode.trim(),
-        'p_items': items,
-        'p_supplier_id': supplierId,
-        'p_supplier_phone': null,
-        'p_supplier_email': null,
-        'p_supplier_contact_person': null,
-        'p_supplier_notes': null,
-        'p_price_rating': null,
-        'p_stock_quality_rating': null,
-        'p_availability_rating': null,
-        'p_rating_note': null,
-      },
-    );
+    if (priceRating != null && (priceRating < 1 || priceRating > 5) ||
+        stockQualityRating != null &&
+            (stockQualityRating < 1 || stockQualityRating > 5) ||
+        availabilityRating != null &&
+            (availabilityRating < 1 || availabilityRating > 5)) {
+      throw const DashboardRepositoryException('Ratings must be from 1 to 5.');
+    }
+    return _enqueueDashboardAction(user, 'record_supplier_delivery', {
+      'branch_id': branchId,
+      'supplier_id': supplierId.trim().isEmpty ? null : supplierId,
+      'supplier_name': supplierName.trim(),
+      'supplier_phone': supplierPhone,
+      'supplier_email': supplierEmail,
+      'supplier_contact_person': supplierContactPerson,
+      'supplier_notes': supplierNotes,
+      'reference_code': referenceCode.trim(),
+      'items': items,
+      'price_rating': priceRating,
+      'stock_quality_rating': stockQualityRating,
+      'availability_rating': availabilityRating,
+      'rating_note': ratingNote.trim(),
+    });
   }
 
-  Future<void> approveSupplierDelivery(
+  Future<bool> approveSupplierDelivery(
     RetivoxUser user,
     String deliveryId,
   ) async {
-    final supabase = await _requireOnlineRole(user, [RetivoxRole.owner]);
-    await supabase.rpc(
-      'dashboard_approve_supplier_delivery',
-      params: {'p_delivery_id': deliveryId},
-    );
+    if (user.role != RetivoxRole.owner) {
+      throw const DashboardRepositoryException(
+        'Only an owner can approve supplier deliveries.',
+      );
+    }
+    return _enqueueDashboardAction(user, 'approve_supplier_delivery', {
+      'delivery_id': deliveryId,
+    });
   }
 
-  Future<void> acknowledgeSupplierDelivery(
+  Future<bool> acknowledgeSupplierDelivery(
     RetivoxUser user,
     String deliveryId,
   ) async {
-    final supabase = await _requireOnlineRole(user, [
-      RetivoxRole.owner,
-      RetivoxRole.admin,
-    ]);
-    await supabase.rpc(
-      'dashboard_acknowledge_supplier_delivery',
-      params: {'p_delivery_id': deliveryId},
-    );
+    if (!const [RetivoxRole.owner, RetivoxRole.admin].contains(user.role)) {
+      throw const DashboardRepositoryException(
+        'Only owners and administrators can acknowledge deliveries.',
+      );
+    }
+    return _enqueueDashboardAction(user, 'acknowledge_supplier_delivery', {
+      'delivery_id': deliveryId,
+    });
   }
 
-  Future<void> editSupplierDelivery(
+  Future<bool> editSupplierDelivery(
     RetivoxUser user, {
     required String deliveryId,
     required String supplierName,
@@ -500,84 +688,135 @@ class DashboardRepository {
     required String reason,
     required List<Map<String, Object?>> items,
   }) async {
-    final supabase = await _requireOnlineRole(user, [
-      RetivoxRole.owner,
-      RetivoxRole.admin,
-    ]);
+    if (!const [RetivoxRole.owner, RetivoxRole.admin].contains(user.role)) {
+      throw const DashboardRepositoryException(
+        'Only owners and administrators can edit supplier deliveries.',
+      );
+    }
     if (supplierName.trim().isEmpty || items.isEmpty) {
       throw const DashboardRepositoryException(
         'Supplier name and at least one delivery item are required.',
       );
     }
-    await supabase.rpc(
-      'dashboard_request_supplier_delivery_edit',
-      params: {
-        'p_delivery_id': deliveryId,
-        'p_supplier_name': supplierName.trim(),
-        'p_reference_code': referenceCode.trim(),
-        'p_items': items,
-        'p_reason': reason.trim().isEmpty ? null : reason.trim(),
-      },
-    );
+    return _enqueueDashboardAction(user, 'edit_supplier_delivery', {
+      'delivery_id': deliveryId,
+      'supplier_name': supplierName.trim(),
+      'reference_code': referenceCode.trim(),
+      'items': items,
+      'reason': reason.trim(),
+    });
   }
 
-  Future<void> reviewSupplierDeliveryEdit(
+  Future<bool> reviewSupplierDeliveryEdit(
     RetivoxUser user, {
     required String requestId,
     required bool approve,
   }) async {
-    final supabase = await _requireOnlineRole(user, [RetivoxRole.owner]);
-    await supabase.rpc(
-      'dashboard_review_supplier_delivery_edit_request',
-      params: {
-        'p_request_id': requestId,
-        'p_action': approve ? 'approve' : 'reject',
-      },
-    );
+    if (user.role != RetivoxRole.owner) {
+      throw const DashboardRepositoryException(
+        'Only an owner can review delivery edit requests.',
+      );
+    }
+    return _enqueueDashboardAction(user, 'review_supplier_delivery_edit', {
+      'request_id': requestId,
+      'approve': approve,
+    });
   }
 
   Future<ProductOptionsSnapshot> loadProductOptions(
     RetivoxUser user, {
     String? productId,
   }) async {
-    final supabase = await _requireOnlineRole(user, [RetivoxRole.owner]);
-    final results = await Future.wait([
-      supabase
-          .from('units_of_measure')
-          .select('id, name, abbreviation, conversion_factor, is_base_unit')
-          .eq('business_id', user.businessId)
-          .eq('is_active', true)
-          .order('conversion_factor')
-          .order('name'),
-      supabase
-          .from('branches')
-          .select('id, name')
-          .eq('business_id', user.businessId)
-          .eq('is_active', true)
-          .isFilter('deleted_at', null)
-          .order('name'),
-    ]);
-    Map<String, dynamic>? product;
-    if (productId != null) {
-      final response = await supabase
-          .from('products')
-          .select(
-            'id, name, sku, category, subcategory, brand_family, product_kind, unit, description, is_active, product_pricing(base_price, min_price, max_price), product_uom_links(id, uom_id, is_purchase_uom, is_sale_uom, is_base_uom, is_default_purchase_uom, is_default_sale_uom), product_pricing_models(id, branch_id, pricing_method, rounding_rule, status, product_price_points(uom_id, quantity_in_uom, base_quantity, price, max_discount_amount))',
-          )
-          .eq('business_id', user.businessId)
-          .eq('id', productId)
-          .isFilter('deleted_at', null)
-          .maybeSingle();
-      if (response == null) {
-        throw const DashboardRepositoryException(
-          'The product is no longer available for editing.',
-        );
+    if (user.role != RetivoxRole.owner) {
+      throw const DashboardRepositoryException(
+        'Only owners can manage the product catalog.',
+      );
+    }
+    final supabase = client;
+    if (supabase != null && await isBackendReachable()) {
+      try {
+        final authUser = await supabase.auth.getUser();
+        if (authUser.user?.id == user.id) {
+          final results = await Future.wait([
+            supabase
+                .from('units_of_measure')
+                .select(
+                  'id, name, abbreviation, conversion_factor, is_base_unit',
+                )
+                .eq('business_id', user.businessId)
+                .eq('is_active', true)
+                .order('conversion_factor')
+                .order('name'),
+            supabase
+                .from('branches')
+                .select('id, name')
+                .eq('business_id', user.businessId)
+                .eq('is_active', true)
+                .isFilter('deleted_at', null)
+                .order('name'),
+          ]);
+          final units = _normalizeRows(results[0]);
+          final branches = _normalizeRows(results[1]);
+          await vault.cacheValue(user, 'dashboard:product-options', [
+            {'units': units, 'branches': branches},
+          ]);
+          Map<String, dynamic>? product;
+          if (productId != null) {
+            final response = await supabase
+                .from('products')
+                .select(
+                  'id, name, sku, category, subcategory, brand_family, product_kind, unit, description, is_active, product_pricing(base_price, min_price, max_price), product_uom_links(id, uom_id, is_purchase_uom, is_sale_uom, is_base_uom, is_default_purchase_uom, is_default_sale_uom), product_pricing_models(id, branch_id, pricing_method, rounding_rule, status, product_price_points(uom_id, quantity_in_uom, base_quantity, price, max_discount_amount))',
+                )
+                .eq('business_id', user.businessId)
+                .eq('id', productId)
+                .isFilter('deleted_at', null)
+                .maybeSingle();
+            if (response == null) {
+              throw const DashboardRepositoryException(
+                'The product is no longer available for editing.',
+              );
+            }
+            product = Map<String, dynamic>.from(response);
+          }
+          return ProductOptionsSnapshot(
+            units: units,
+            branches: branches,
+            product: product,
+          );
+        }
+      } catch (error) {
+        if (!_isNetworkError(error)) rethrow;
       }
-      product = Map<String, dynamic>.from(response);
+    }
+    final cached = await vault.readCachedValue<List<dynamic>>(
+      user,
+      'dashboard:product-options',
+    );
+    if (cached == null || cached.isEmpty || cached.first is! Map) {
+      throw const DashboardRepositoryException(
+        'No product setup data is cached for this account. Connect once to load active units and branches before editing products offline.',
+      );
+    }
+    final options = Map<String, dynamic>.from(cached.first as Map);
+    final productRows = await vault.readCachedValue<List<dynamic>>(
+      user,
+      'dashboard:products',
+    );
+    final product = productId == null
+        ? null
+        : productRows
+              ?.whereType<Map>()
+              .map(Map<String, dynamic>.from)
+              .where((row) => row['id']?.toString() == productId)
+              .firstOrNull;
+    if (productId != null && product == null) {
+      throw const DashboardRepositoryException(
+        'This product is not in the offline cache yet. Connect once to load it before editing offline.',
+      );
     }
     return ProductOptionsSnapshot(
-      units: _normalizeRows(results[0]),
-      branches: _normalizeRows(results[1]),
+      units: _normalizeRows(options['units'] ?? const []),
+      branches: _normalizeRows(options['branches'] ?? const []),
       product: product,
     );
   }
@@ -587,8 +826,13 @@ class DashboardRepository {
     required String name,
     required String abbreviation,
     required double conversionFactor,
+    bool isBaseUnit = false,
   }) async {
-    final supabase = await _requireOnlineRole(user, [RetivoxRole.owner]);
+    if (user.role != RetivoxRole.owner) {
+      throw const DashboardRepositoryException(
+        'Only owners can create units of measure.',
+      );
+    }
     final normalizedName = name.trim();
     final normalizedAbbreviation = abbreviation.trim();
     if (normalizedName.length < 2 ||
@@ -599,12 +843,26 @@ class DashboardRepository {
         conversionFactor <= 0 ||
         conversionFactor >= 1000000 ||
         (conversionFactor * 10000).roundToDouble() !=
-            conversionFactor * 10000) {
+            conversionFactor * 10000 ||
+        (isBaseUnit && conversionFactor != 1)) {
       throw const DashboardRepositoryException(
         'Enter a unit name, abbreviation, and positive conversion factor.',
       );
     }
 
+    if (!_isSyncingDashboardAction && !await isBackendReachable()) {
+      final localId = 'local-uom:${const Uuid().v4()}';
+      await _enqueueDashboardAction(user, 'create_uom', {
+        'local_id': localId,
+        'name': normalizedName,
+        'abbreviation': normalizedAbbreviation,
+        'conversion_factor': conversionFactor,
+        'is_base_unit': isBaseUnit,
+      });
+      return localId;
+    }
+
+    final supabase = await _requireOnlineRole(user, [RetivoxRole.owner]);
     final created = await supabase
         .from('units_of_measure')
         .insert({
@@ -612,7 +870,7 @@ class DashboardRepository {
           'name': normalizedName,
           'abbreviation': normalizedAbbreviation,
           'conversion_factor': conversionFactor,
-          'is_base_unit': false,
+          'is_base_unit': isBaseUnit,
           'is_active': true,
           'created_by': user.id,
         })
@@ -621,7 +879,7 @@ class DashboardRepository {
     return created['id'].toString();
   }
 
-  Future<void> createProduct(
+  Future<String> createProduct(
     RetivoxUser user, {
     required String name,
     required String sku,
@@ -643,7 +901,77 @@ class DashboardRepository {
     required double basePrice,
     required double minPrice,
     required double maxPrice,
+    bool tracksExpiry = false,
+    List<String> barcodes = const [],
   }) async {
+    if (user.role != RetivoxRole.owner) {
+      throw const DashboardRepositoryException(
+        'Only owners can create products.',
+      );
+    }
+    _validateProductFields(
+      name: name,
+      sku: sku,
+      category: category,
+      description: description,
+      subcategory: subcategory,
+      brandFamily: brandFamily,
+      productKind: productKind,
+      basePrice: basePrice,
+      minPrice: minPrice,
+      maxPrice: maxPrice,
+    );
+    if (!_isSyncingDashboardAction && !await isBackendReachable()) {
+      await _validateCachedProductSelections(
+        user,
+        baseUnitId: baseUnitId,
+        purchaseUnitIds: purchaseUnitIds,
+        saleUnitIds: saleUnitIds,
+        defaultPurchaseUnitId: defaultPurchaseUnitId,
+        defaultSaleUnitId: defaultSaleUnitId,
+        salePrices: salePrices,
+        pricePoints: pricePoints,
+        pricingBranchIds: pricingBranchIds,
+        pricingMethod: pricingMethod,
+        roundingRule: roundingRule,
+      );
+      final localId = 'local-product:${const Uuid().v4()}';
+      await _enqueueDashboardAction(user, 'create_product', {
+        'local_product_id': localId,
+        'name': name.trim(),
+        'sku': sku.trim(),
+        'category': category.trim(),
+        'description': description.trim(),
+        'product_kind': productKind,
+        'subcategory': subcategory.trim(),
+        'brand_family': brandFamily.trim(),
+        'tracks_expiry': tracksExpiry,
+        'barcodes': barcodes,
+        'base_unit_id': baseUnitId,
+        'purchase_unit_ids': purchaseUnitIds,
+        'sale_unit_ids': saleUnitIds,
+        'default_purchase_unit_id': defaultPurchaseUnitId,
+        'default_sale_unit_id': defaultSaleUnitId,
+        'sale_prices': salePrices,
+        'price_points': pricePoints
+            .map(
+              (point) => {
+                'uom_id': point.uomId,
+                'quantity': point.quantity,
+                'price': point.price,
+                'max_discount_amount': point.maxDiscountAmount,
+              },
+            )
+            .toList(),
+        'pricing_branch_ids': pricingBranchIds,
+        'pricing_method': pricingMethod,
+        'rounding_rule': roundingRule,
+        'base_price': basePrice,
+        'min_price': minPrice,
+        'max_price': maxPrice,
+      });
+      return 'pending:$localId';
+    }
     final supabase = await _requireOnlineRole(user, [RetivoxRole.owner]);
     _validateProductFields(
       name: name,
@@ -833,6 +1161,7 @@ class DashboardRepository {
         .from('products')
         .update({
           'product_kind': productKind,
+          'tracks_expiry': tracksExpiry,
           'subcategory': subcategory.trim().isEmpty ? null : subcategory.trim(),
           'brand_family': brandFamily.trim().isEmpty
               ? null
@@ -847,6 +1176,7 @@ class DashboardRepository {
         'The product was created, but product classification could not be saved.',
       );
     }
+    await _saveProductBarcodes(supabase, user, createdId, barcodes);
 
     await supabase
         .from('product_uom_links')
@@ -918,9 +1248,10 @@ class DashboardRepository {
             }).toList(),
           );
     }
+    return createdId;
   }
 
-  Future<void> updateProduct(
+  Future<String> updateProduct(
     RetivoxUser user, {
     required String productId,
     required String name,
@@ -944,7 +1275,77 @@ class DashboardRepository {
     required List<String> pricingBranchIds,
     required String pricingMethod,
     required String roundingRule,
+    bool tracksExpiry = false,
+    List<String> barcodes = const [],
   }) async {
+    if (user.role != RetivoxRole.owner) {
+      throw const DashboardRepositoryException(
+        'Only owners can edit products.',
+      );
+    }
+    _validateProductFields(
+      name: name,
+      sku: sku,
+      category: category,
+      description: description,
+      subcategory: subcategory,
+      brandFamily: brandFamily,
+      productKind: productKind,
+      basePrice: basePrice,
+      minPrice: minPrice,
+      maxPrice: maxPrice,
+    );
+    if (!_isSyncingDashboardAction && !await isBackendReachable()) {
+      await _validateCachedProductSelections(
+        user,
+        baseUnitId: baseUnitId,
+        purchaseUnitIds: purchaseUnitIds,
+        saleUnitIds: saleUnitIds,
+        defaultPurchaseUnitId: defaultPurchaseUnitId,
+        defaultSaleUnitId: defaultSaleUnitId,
+        salePrices: salePrices,
+        pricePoints: pricePoints,
+        pricingBranchIds: pricingBranchIds,
+        pricingMethod: pricingMethod,
+        roundingRule: roundingRule,
+      );
+      await _enqueueDashboardAction(user, 'update_product', {
+        'product_id': productId,
+        'name': name.trim(),
+        'sku': sku.trim(),
+        'category': category.trim(),
+        'unit': unit,
+        'description': description.trim(),
+        'product_kind': productKind,
+        'subcategory': subcategory.trim(),
+        'brand_family': brandFamily.trim(),
+        'tracks_expiry': tracksExpiry,
+        'barcodes': barcodes,
+        'base_unit_id': baseUnitId,
+        'purchase_unit_ids': purchaseUnitIds,
+        'sale_unit_ids': saleUnitIds,
+        'default_purchase_unit_id': defaultPurchaseUnitId,
+        'default_sale_unit_id': defaultSaleUnitId,
+        'sale_prices': salePrices,
+        'price_points': pricePoints
+            .map(
+              (point) => {
+                'uom_id': point.uomId,
+                'quantity': point.quantity,
+                'price': point.price,
+                'max_discount_amount': point.maxDiscountAmount,
+              },
+            )
+            .toList(),
+        'pricing_branch_ids': pricingBranchIds,
+        'pricing_method': pricingMethod,
+        'rounding_rule': roundingRule,
+        'base_price': basePrice,
+        'min_price': minPrice,
+        'max_price': maxPrice,
+      });
+      return 'pending:$productId';
+    }
     final supabase = await _requireOnlineRole(user, [RetivoxRole.owner]);
     _validateProductFields(
       name: name,
@@ -1094,6 +1495,7 @@ class DashboardRepository {
         .from('products')
         .update({
           'product_kind': productKind,
+          'tracks_expiry': tracksExpiry,
           'subcategory': subcategory.trim().isEmpty ? null : subcategory.trim(),
           'brand_family': brandFamily.trim().isEmpty
               ? null
@@ -1108,6 +1510,7 @@ class DashboardRepository {
         'The product details were updated, but classification could not be saved.',
       );
     }
+    await _saveProductBarcodes(supabase, user, productId, barcodes);
 
     await supabase
         .from('product_uom_links')
@@ -1202,6 +1605,60 @@ class DashboardRepository {
             }).toList(),
           );
     }
+    return productId;
+  }
+
+  Future<void> _saveProductBarcodes(
+    SupabaseClient supabase,
+    RetivoxUser user,
+    String productId,
+    List<String> requestedCodes,
+  ) async {
+    final codes = requestedCodes
+        .map((code) => code.trim())
+        .where((code) => code.isNotEmpty)
+        .toSet()
+        .toList();
+    if (codes.length > 25 || codes.any((code) => code.length > 128)) {
+      throw const DashboardRepositoryException(
+        'Add up to 25 barcode values, each no longer than 128 characters.',
+      );
+    }
+    if (codes.isEmpty) return;
+
+    final rows = _normalizeRows(
+      await supabase
+          .from('product_barcodes')
+          .select('code, product_id')
+          .eq('business_id', user.businessId),
+    );
+    final existing = <String, String>{
+      for (final row in rows)
+        row['code'].toString().trim().toUpperCase(): row['product_id']
+            .toString(),
+    };
+    for (final code in codes) {
+      final owner = existing[code.toUpperCase()];
+      if (owner != null && owner != productId) {
+        throw DashboardRepositoryException(
+          'Barcode $code is already assigned to another product.',
+        );
+      }
+    }
+    final inserts = codes
+        .where((code) => !existing.containsKey(code.toUpperCase()))
+        .map(
+          (code) => {
+            'business_id': user.businessId,
+            'product_id': productId,
+            'code': code,
+            'source': 'manufacturer',
+          },
+        )
+        .toList();
+    if (inserts.isNotEmpty) {
+      await supabase.from('product_barcodes').insert(inserts);
+    }
   }
 
   void _validateProductFields({
@@ -1218,7 +1675,7 @@ class DashboardRepository {
   }) {
     if (name.trim().length < 2 ||
         name.trim().length > 100 ||
-        !RegExp(r'^[a-zA-Z0-9]{1,20}$').hasMatch(sku.trim()) ||
+        !RegExp(r'^[a-zA-Z0-9._-]{1,64}$').hasMatch(sku.trim()) ||
         category.trim().length < 2 ||
         description.length > 500 ||
         subcategory.length > 120 ||
@@ -1236,6 +1693,100 @@ class DashboardRepository {
         maxPrice <= basePrice) {
       throw const DashboardRepositoryException(
         'Pricing must satisfy minimum < base price < maximum.',
+      );
+    }
+  }
+
+  Future<void> _validateCachedProductSelections(
+    RetivoxUser user, {
+    required String baseUnitId,
+    required List<String> purchaseUnitIds,
+    required List<String> saleUnitIds,
+    required String defaultPurchaseUnitId,
+    required String defaultSaleUnitId,
+    required Map<String, double> salePrices,
+    required List<ProductPricePointInput> pricePoints,
+    required List<String> pricingBranchIds,
+    required String pricingMethod,
+    required String roundingRule,
+  }) async {
+    if (purchaseUnitIds.isEmpty ||
+        saleUnitIds.isEmpty ||
+        purchaseUnitIds.toSet().length != purchaseUnitIds.length ||
+        saleUnitIds.toSet().length != saleUnitIds.length ||
+        !purchaseUnitIds.contains(defaultPurchaseUnitId) ||
+        !saleUnitIds.contains(defaultSaleUnitId) ||
+        !const [
+          'fixed_price',
+          'assisted_pack',
+          'manual_quantity',
+        ].contains(pricingMethod) ||
+        !const [
+          'none',
+          'nearest_5',
+          'up_5',
+          'down_5',
+          'nearest_10',
+        ].contains(roundingRule)) {
+      throw const DashboardRepositoryException(
+        'Choose a base unit, purchase units, sale units, and valid defaults before saving offline.',
+      );
+    }
+    final cached = await vault.readCachedValue<List<dynamic>>(
+      user,
+      'dashboard:product-options',
+    );
+    final options = cached
+        ?.whereType<Map>()
+        .map(Map<String, dynamic>.from)
+        .firstOrNull;
+    final units = (options?['units'] as List? ?? const [])
+        .whereType<Map>()
+        .map(Map<String, dynamic>.from)
+        .toList();
+    final ids = <String>{baseUnitId, ...purchaseUnitIds, ...saleUnitIds};
+    final byId = {for (final unit in units) unit['id'].toString(): unit};
+    if (ids.any((id) => !byId.containsKey(id))) {
+      throw const DashboardRepositoryException(
+        'One or more product units are missing from the offline cache. Connect once to refresh unit data.',
+      );
+    }
+    if (_number(byId[baseUnitId]?['conversion_factor']) != 1) {
+      throw const DashboardRepositoryException(
+        'The product base unit must have a conversion factor of 1.',
+      );
+    }
+    for (final id in saleUnitIds) {
+      final price = id == defaultSaleUnitId ? null : salePrices[id];
+      if (id != defaultSaleUnitId &&
+          (price == null || !price.isFinite || price <= 0)) {
+        throw const DashboardRepositoryException(
+          'Enter a positive price for each sale unit before saving offline.',
+        );
+      }
+    }
+    if (pricePoints.any(
+      (point) =>
+          !saleUnitIds.contains(point.uomId) ||
+          !point.quantity.isFinite ||
+          point.quantity <= 0 ||
+          !point.price.isFinite ||
+          point.price < 0 ||
+          !point.maxDiscountAmount.isFinite ||
+          point.maxDiscountAmount < 0,
+    )) {
+      throw const DashboardRepositoryException(
+        'Complete each quantity price using a selected sale unit.',
+      );
+    }
+    final branches = (options?['branches'] as List? ?? const [])
+        .whereType<Map>()
+        .map((branch) => branch['id']?.toString())
+        .whereType<String>()
+        .toSet();
+    if (pricingBranchIds.any((id) => !branches.contains(id))) {
+      throw const DashboardRepositoryException(
+        'One or more pricing branches are missing from the offline cache.',
       );
     }
   }
@@ -1299,7 +1850,7 @@ class DashboardRepository {
     );
   }
 
-  Future<void> saveSupplier(
+  Future<bool> saveSupplier(
     RetivoxUser user, {
     String? supplierId,
     required String name,
@@ -1309,10 +1860,11 @@ class DashboardRepository {
     required String notes,
     required bool isActive,
   }) async {
-    final supabase = await _requireOnlineRole(user, [
-      RetivoxRole.owner,
-      RetivoxRole.admin,
-    ]);
+    if (!const [RetivoxRole.owner, RetivoxRole.admin].contains(user.role)) {
+      throw const DashboardRepositoryException(
+        'Only owners and administrators can manage suppliers.',
+      );
+    }
     final normalizedName = name.trim();
     if (normalizedName.isEmpty || normalizedName.length > 120) {
       throw const DashboardRepositoryException(
@@ -1333,20 +1885,17 @@ class DashboardRepository {
         'Enter a valid supplier email address.',
       );
     }
-    await supabase.rpc(
-      'upsert_business_supplier',
-      params: {
-        'p_supplier_id': supplierId,
-        'p_name': normalizedName,
-        'p_phone': phone.trim().isEmpty ? null : phone.trim(),
-        'p_email': normalizedEmail.isEmpty ? null : normalizedEmail,
-        'p_contact_person': contactPerson.trim().isEmpty
-            ? null
-            : contactPerson.trim(),
-        'p_notes': notes.trim().isEmpty ? null : notes.trim(),
-        'p_is_active': isActive,
-      },
-    );
+    const uuid = Uuid();
+    return _enqueueDashboardAction(user, 'save_supplier', {
+      'supplier_id': supplierId ?? uuid.v4(),
+      'name': normalizedName,
+      'phone': phone.trim(),
+      'email': normalizedEmail,
+      'contact_person': contactPerson.trim(),
+      'notes': notes.trim(),
+      'is_active': isActive,
+      'is_new': supplierId == null,
+    });
   }
 
   Future<void> updateBusinessProfile(
@@ -1495,13 +2044,12 @@ class DashboardRepository {
     });
   }
 
-  Future<void> createBranch(
+  Future<bool> createBranch(
     RetivoxUser user, {
     required String name,
     required String location,
     required String branchType,
   }) async {
-    final supabase = await _requireOnlineRole(user, [RetivoxRole.owner]);
     final normalizedName = name.trim();
     final normalizedLocation = location.trim();
     if (normalizedName.length < 2 ||
@@ -1512,29 +2060,179 @@ class DashboardRepository {
         'Enter a branch name, location, and valid branch type.',
       );
     }
-    final created = await supabase
-        .from('branches')
-        .insert({
-          'business_id': user.businessId,
-          'name': normalizedName,
-          'location': normalizedLocation,
-          'branch_type': branchType,
-        })
-        .select('id')
-        .single();
-    await supabase.from('audit_logs').insert({
+    const uuid = Uuid();
+    final branch = <String, dynamic>{
+      'id': uuid.v4(),
       'business_id': user.businessId,
-      'actor_id': user.id,
-      'entity_type': 'branch',
-      'entity_id': created['id'],
-      'action': 'created',
-      'old_value': null,
-      'new_value': {
-        'name': normalizedName,
-        'location': normalizedLocation,
-        'branch_type': branchType,
-      },
+      'name': normalizedName,
+      'location': normalizedLocation,
+      'branch_type': branchType,
+      'is_active': true,
+    };
+    try {
+      final supabase = await _requireOnlineRole(user, [RetivoxRole.owner]);
+      await _createBranchOnline(supabase, user, branch);
+      await _upsertCachedBranch(user, branch);
+      return false;
+    } catch (error) {
+      if (!_isNetworkError(error)) rethrow;
+      await _queueBranchCreate(user, branch);
+      return true;
+    }
+  }
+
+  Future<void> _createBranchOnline(
+    SupabaseClient supabase,
+    RetivoxUser user,
+    Map<String, dynamic> branch,
+  ) async {
+    final existing = await supabase
+        .from('branches')
+        .select('id')
+        .eq('business_id', user.businessId)
+        .eq('id', branch['id'])
+        .maybeSingle();
+    if (existing == null) {
+      await supabase.from('branches').insert(branch);
+      await supabase.from('audit_logs').insert({
+        'business_id': user.businessId,
+        'actor_id': user.id,
+        'entity_type': 'branch',
+        'entity_id': branch['id'],
+        'action': 'created',
+        'old_value': null,
+        'new_value': {
+          'name': branch['name'],
+          'location': branch['location'],
+          'branch_type': branch['branch_type'],
+        },
+      });
+    }
+  }
+
+  Future<void> _queueBranchCreate(
+    RetivoxUser user,
+    Map<String, dynamic> branch,
+  ) async {
+    final queue = await vault.readCachedValue<List<dynamic>>(
+      user,
+      'dashboard:pending_branch_creates',
+    );
+    await vault.cacheValue(user, 'dashboard:pending_branch_creates', [
+      ...?queue,
+      branch,
+    ]);
+    await _upsertCachedBranch(user, {...branch, 'is_pending_sync': true});
+    await vault.cacheValue(user, 'dashboard:branch:${branch['id']}', {
+      ...branch,
+      'team': <Map<String, dynamic>>[],
+      'bestSellingItem': null,
+      'worstSellingItem': null,
+      'bestEmployee': null,
+      'employeeCount': 0,
+      'totalProfit': 0,
+      'totalSales': 0,
+      'transactions': 0,
+      'updatedAt': DateTime.now().toIso8601String(),
+      'isCached': true,
+      'isPendingSync': true,
     });
+  }
+
+  Future<void> _upsertCachedBranch(
+    RetivoxUser user,
+    Map<String, dynamic> branch,
+  ) async {
+    final cached = await vault.readCachedValue<List<dynamic>>(
+      user,
+      'dashboard:branches',
+    );
+    final rows = cached?.whereType<Map<String, dynamic>>().toList() ?? [];
+    final id = branch['id']?.toString();
+    final index = rows.indexWhere((row) => row['id']?.toString() == id);
+    if (index < 0) {
+      rows.add(branch);
+    } else {
+      rows[index] = {...rows[index], ...branch};
+    }
+    await vault.cacheValue(user, 'dashboard:branches', rows);
+  }
+
+  Future<void> syncPendingBranchCreates(RetivoxUser user) async {
+    final pending = await vault.readCachedValue<List<dynamic>>(
+      user,
+      'dashboard:pending_branch_creates',
+    );
+    if (pending == null || pending.isEmpty) return;
+    final supabase = await _requireOnlineRole(user, [RetivoxRole.owner]);
+    final remaining = <Map<String, dynamic>>[];
+    for (final value in pending) {
+      if (value is! Map<String, dynamic>) continue;
+      final branch = Map<String, dynamic>.from(value);
+      try {
+        await _createBranchOnline(supabase, user, branch);
+        final synced = {...branch, 'is_pending_sync': false};
+        await _upsertCachedBranch(user, synced);
+        final details = await vault.readCachedValue<Map<String, dynamic>>(
+          user,
+          'dashboard:branch:${branch['id']}',
+        );
+        if (details != null) {
+          await vault.cacheValue(user, 'dashboard:branch:${branch['id']}', {
+            ...details,
+            'isPendingSync': false,
+            'isCached': true,
+          });
+        }
+      } catch (error) {
+        if (_isNetworkError(error)) {
+          remaining.add(branch);
+          continue;
+        }
+        rethrow;
+      }
+    }
+    await vault.cacheValue(user, 'dashboard:pending_branch_creates', remaining);
+  }
+
+  Future<Map<String, dynamic>> loadBranchDetails(
+    RetivoxUser user,
+    String branchId,
+  ) async {
+    final cacheKey = 'dashboard:branch:$branchId';
+    final saved = await vault.readCachedValue<Map<String, dynamic>>(
+      user,
+      cacheKey,
+    );
+    if (saved?['isPendingSync'] == true) {
+      return {...saved!, 'isCached': true};
+    }
+    try {
+      final supabase = await _requireOnlineRole(user, RetivoxRole.values);
+      final result = await supabase.rpc(
+        'desktop_branch_details',
+        params: {'p_business_id': user.businessId, 'p_branch_id': branchId},
+      );
+      if (result is! Map<String, dynamic>) {
+        throw const DashboardRepositoryException(
+          'The store details response was invalid.',
+        );
+      }
+      final details = {...result, 'isCached': false};
+      await vault.cacheValue(user, cacheKey, details);
+      return details;
+    } catch (error) {
+      if (!_isNetworkError(error)) rethrow;
+      final cached =
+          saved ??
+          await vault.readCachedValue<Map<String, dynamic>>(user, cacheKey);
+      if (cached == null) {
+        throw const DashboardRepositoryException(
+          'No saved details are available for this store yet. Connect to the internet to load them first.',
+        );
+      }
+      return {...cached, 'isCached': true};
+    }
   }
 
   Future<void> setBranchActive(
@@ -1605,66 +2303,74 @@ class DashboardRepository {
     }
   }
 
-  Future<void> adjustStock(
+  Future<bool> adjustStock(
     RetivoxUser user, {
     required String stockId,
     required int quantity,
     required String operation,
   }) async {
-    final supabase = await _requireOnlineRole(user, [
-      RetivoxRole.owner,
-      RetivoxRole.admin,
-    ]);
+    if (!const [RetivoxRole.owner, RetivoxRole.admin].contains(user.role)) {
+      throw const DashboardRepositoryException(
+        'Only owners and administrators can adjust stock.',
+      );
+    }
     if (quantity <= 0 || !const ['add', 'remove'].contains(operation)) {
       throw const DashboardRepositoryException(
         'Enter a positive quantity and choose add or remove.',
       );
     }
-    await supabase.rpc(
-      'dashboard_adjust_stock',
-      params: {
-        'p_stock_id': stockId,
-        'p_quantity': quantity,
-        'p_operation': operation,
-      },
-    );
+    return _enqueueDashboardAction(user, 'adjust_stock', {
+      'stock_id': stockId,
+      'quantity': quantity,
+      'operation': operation,
+    });
   }
 
-  Future<void> setProductActive(
+  Future<bool> setProductActive(
     RetivoxUser user, {
     required String productId,
     required bool isActive,
   }) async {
+    if (user.role != RetivoxRole.owner) {
+      throw const DashboardRepositoryException(
+        'Only owners can change product availability.',
+      );
+    }
+    if (!await isBackendReachable()) {
+      return _enqueueDashboardAction(user, 'set_product_active', {
+        'product_id': productId,
+        'is_active': isActive,
+      });
+    }
     final supabase = await _requireOnlineRole(user, [RetivoxRole.owner]);
     await supabase.rpc(
       'owner_toggle_product_status',
       params: {'p_product_id': productId, 'p_is_active': isActive},
     );
+    return false;
   }
 
-  Future<void> updateStockThreshold(
+  Future<bool> updateStockThreshold(
     RetivoxUser user, {
     required String stockId,
     required String branchId,
     required int threshold,
   }) async {
-    final supabase = await _requireOnlineRole(user, [
-      RetivoxRole.owner,
-      RetivoxRole.admin,
-    ]);
+    if (!const [RetivoxRole.owner, RetivoxRole.admin].contains(user.role)) {
+      throw const DashboardRepositoryException(
+        'Only owners and administrators can update stock thresholds.',
+      );
+    }
     if (threshold < 0) {
       throw const DashboardRepositoryException(
         'Low-stock threshold cannot be negative.',
       );
     }
-    await supabase.rpc(
-      'dashboard_update_low_stock_threshold',
-      params: {
-        'p_stock_id': stockId,
-        'p_branch_id': branchId,
-        'p_threshold': threshold,
-      },
-    );
+    return _enqueueDashboardAction(user, 'update_stock_threshold', {
+      'stock_id': stockId,
+      'branch_id': branchId,
+      'threshold': threshold,
+    });
   }
 
   Future<void> recordCashDeposit(
@@ -1675,10 +2381,15 @@ class DashboardRepository {
     required String reference,
     String note = '',
   }) async {
-    final supabase = await _requireOnlineRole(user, [
+    if (!const [
       RetivoxRole.owner,
       RetivoxRole.admin,
-    ]);
+      RetivoxRole.employee,
+    ].contains(user.role)) {
+      throw const DashboardRepositoryException(
+        'Your account cannot record cash deposits.',
+      );
+    }
     final normalizedReference = reference.trim();
     if (!amount.isFinite ||
         amount <= 0 ||
@@ -1689,19 +2400,16 @@ class DashboardRepository {
         'Enter a positive amount, a 3–80 character deposit reference, and a note no longer than 180 characters.',
       );
     }
-    await supabase.rpc(
-      'record_branch_cash_deposit',
-      params: {
-        'p_branch_id': branchId,
-        'p_deposit_date':
-            '${depositDate.year.toString().padLeft(4, '0')}-'
-            '${depositDate.month.toString().padLeft(2, '0')}-'
-            '${depositDate.day.toString().padLeft(2, '0')}',
-        'p_amount': amount,
-        'p_deposit_reference': normalizedReference,
-        'p_note': note.trim().isEmpty ? null : note.trim(),
-      },
-    );
+    await _enqueueDashboardAction(user, 'record_cash_deposit', {
+      'branch_id': branchId,
+      'deposit_date':
+          '${depositDate.year.toString().padLeft(4, '0')}-'
+          '${depositDate.month.toString().padLeft(2, '0')}-'
+          '${depositDate.day.toString().padLeft(2, '0')}',
+      'amount': amount,
+      'deposit_reference': normalizedReference,
+      'note': note.trim(),
+    });
   }
 
   Future<void> reviewCashDeposit(
@@ -1710,21 +2418,56 @@ class DashboardRepository {
     required String action,
     String reviewNote = '',
   }) async {
-    final supabase = await _requireOnlineRole(user, [RetivoxRole.owner]);
+    if (!const [RetivoxRole.owner, RetivoxRole.admin].contains(user.role)) {
+      throw const DashboardRepositoryException(
+        'Only owners and administrators can review cash deposits.',
+      );
+    }
     if (!const ['approve', 'reject'].contains(action) ||
         reviewNote.trim().length > 180) {
       throw const DashboardRepositoryException(
         'Choose an action and enter a review note of up to 180 characters.',
       );
     }
-    await supabase.rpc(
-      'owner_review_branch_cash_deposit',
-      params: {
-        'p_deposit_id': depositId,
-        'p_action': action,
-        'p_review_note': reviewNote.trim().isEmpty ? null : reviewNote.trim(),
-      },
-    );
+    await _enqueueDashboardAction(user, 'review_cash_deposit', {
+      'deposit_id': depositId,
+      'action': action,
+      'review_note': reviewNote.trim(),
+    });
+  }
+
+  Future<List<Map<String, dynamic>>> loadCashDeposits(RetivoxUser user) async {
+    final snapshot = await loadSection(user, 'cash_deposits');
+    return snapshot.rows;
+  }
+
+  Future<List<Map<String, dynamic>>> loadNotifications(RetivoxUser user) async {
+    final cacheKey = 'dashboard:notifications';
+    final supabase = client;
+    if (supabase != null) {
+      try {
+        final authUser = await supabase.auth.getUser().timeout(
+          const Duration(seconds: 6),
+        );
+        if (authUser.user?.id == user.id) {
+          final rows = _normalizeRows(
+            await supabase
+                .from('notifications')
+                .select('id, type, title, body, metadata, is_read, created_at')
+                .eq('recipient_id', user.id)
+                .order('created_at', ascending: false)
+                .range(0, 49),
+          );
+          await vault.cacheValue(user, cacheKey, rows);
+          return rows;
+        }
+      } catch (error) {
+        if (!_isNetworkError(error)) rethrow;
+      }
+    }
+    final cached = await vault.readCachedValue<List<dynamic>>(user, cacheKey);
+    return cached?.whereType<Map>().map(Map<String, dynamic>.from).toList() ??
+        const [];
   }
 
   Future<void> saveRecurringExpenseTemplate(
@@ -2049,7 +2792,9 @@ class DashboardRepository {
         'This action requires an internet connection.',
       );
     }
-    final authUser = await supabase.auth.getUser();
+    final authUser = await supabase.auth.getUser().timeout(
+      const Duration(seconds: 8),
+    );
     if (authUser.user?.id != user.id) {
       throw const DashboardRepositoryException(
         'Sign in online with this account before continuing.',
@@ -2147,6 +2892,11 @@ class DashboardRepository {
             'Sign in online with this account to refresh finance data.',
           );
         }
+        try {
+          await syncPendingDashboardActions(user);
+        } catch (error) {
+          if (!_isNetworkError(error)) rethrow;
+        }
 
         final branches = _normalizeRows(
           await supabase
@@ -2171,7 +2921,7 @@ class DashboardRepository {
         var transactionQuery = supabase
             .from('transactions')
             .select(
-              'id, total_amount, discount_amount, recorded_at, branch_id, branches(name), transaction_items(product_id, line_total, line_discount_amount, net_line_total, line_cost, gross_profit, base_quantity, products(name, sku))',
+              'id, total_amount, discount_amount, is_credit_sale, recorded_at, branch_id, branches(name), transaction_items(product_id, line_total, line_discount_amount, net_line_total, line_cost, gross_profit, base_quantity, products(name, sku))',
             )
             .eq('business_id', user.businessId)
             .eq('status', 'verified')
@@ -2246,9 +2996,7 @@ class DashboardRepository {
             .select(
               'id, branch_id, deposit_date, amount, expected_cash_amount, variance_amount, deposit_reference, note, review_note, status, created_at, branches(name)',
             )
-            .eq('business_id', user.businessId)
-            .gte('deposit_date', range.$3)
-            .lte('deposit_date', range.$4);
+            .eq('business_id', user.businessId);
         var templateRowsQuery = supabase
             .from('finance_recurring_expense_templates')
             .select(
@@ -2303,6 +3051,102 @@ class DashboardRepository {
         final recurringInstances = _normalizeRows(
           await instanceRowsQuery.order('due_on').range(0, 99),
         );
+        var paymentQuery = supabase
+            .from('payments')
+            .select(
+              'payment_method,amount,status,transactions!inner(branch_id,status)',
+            )
+            .eq('business_id', user.businessId)
+            .gte('payment_at', range.$1)
+            .lte('payment_at', range.$2)
+            .neq('status', 'rejected');
+        if (normalizedBranchId.isNotEmpty) {
+          paymentQuery = paymentQuery.eq(
+            'transactions.branch_id',
+            normalizedBranchId,
+          );
+        } else {
+          paymentQuery = paymentQuery.inFilter(
+            'transactions.branch_id',
+            activeBranchIds,
+          );
+        }
+        final paymentRows = _normalizeRows(await paymentQuery.range(0, 999));
+        final paymentMethods = <String, double>{};
+        for (final payment in paymentRows) {
+          final transaction = payment['transactions'];
+          if (transaction is Map &&
+              ['voided', 'rejected'].contains(transaction['status']))
+            continue;
+          final method = payment['payment_method']?.toString() ?? 'other';
+          paymentMethods[method] =
+              (paymentMethods[method] ?? 0) + _number(payment['amount']);
+        }
+        var receivableQuery = supabase
+            .from('receivable_account_balances')
+            .select(
+              'id,business_id,branch_id,transaction_id,due_date,customer_name,customer_phone,customer_email,branch_name,total_amount,amount_paid,balance_due,account_status',
+            )
+            .eq('business_id', user.businessId);
+        if (normalizedBranchId.isNotEmpty) {
+          receivableQuery = receivableQuery.eq('branch_id', normalizedBranchId);
+        } else {
+          receivableQuery = receivableQuery.inFilter(
+            'branch_id',
+            activeBranchIds,
+          );
+        }
+        final receivableRows = _normalizeRows(
+          await receivableQuery.order('due_date').range(0, 499),
+        );
+        final totalLent = receivableRows.fold<double>(
+          0,
+          (total, row) => total + _number(row['balance_due']),
+        );
+        final receivableTransactionIds = receivableRows
+            .map((row) => row['transaction_id']?.toString())
+            .whereType<String>()
+            .toList();
+        final creditItems = receivableTransactionIds.isEmpty
+            ? <Map<String, dynamic>>[]
+            : _normalizeRows(
+                await supabase
+                    .from('transaction_items')
+                    .select(
+                      'transaction_id,quantity_in_uom,quantity,unit_price_at_sale,line_total,products(name,sku),units_of_measure(name)',
+                    )
+                    .inFilter('transaction_id', receivableTransactionIds)
+                    .range(0, 1999),
+              );
+        final creditPayments = receivableTransactionIds.isEmpty
+            ? <Map<String, dynamic>>[]
+            : _normalizeRows(
+                await supabase
+                    .from('payments')
+                    .select(
+                      'transaction_id,payment_method,amount,status,payment_at,reference_code,mpesa_ref_code',
+                    )
+                    .inFilter('transaction_id', receivableTransactionIds)
+                    .order('payment_at')
+                    .range(0, 1999),
+              );
+        final itemsByTransaction = _groupRows(creditItems, 'transaction_id');
+        final paymentsByTransaction = _groupRows(
+          creditPayments,
+          'transaction_id',
+        );
+        final receivableAccounts = receivableRows.map((row) {
+          final transactionId = row['transaction_id']?.toString() ?? '';
+          return {
+            ...row,
+            'items':
+                itemsByTransaction[transactionId] ??
+                const <Map<String, dynamic>>[],
+            'payments':
+                paymentsByTransaction[transactionId] ??
+                const <Map<String, dynamic>>[],
+          };
+        }).toList();
         return await _cacheFinance(
           user,
           cacheKey,
@@ -2314,6 +3158,9 @@ class DashboardRepository {
           deposits: deposits,
           recurringTemplates: recurringTemplates,
           recurringInstances: recurringInstances,
+          paymentMethods: paymentMethods,
+          totalLent: totalLent,
+          receivableAccounts: receivableAccounts,
         );
       } catch (error) {
         if (!_isNetworkError(error)) rethrow;
@@ -2334,6 +3181,40 @@ class DashboardRepository {
     );
   }
 
+  Future<bool> recordReceivablePayment({
+    required RetivoxUser user,
+    required String receivableId,
+    required String paymentMethod,
+    required double amount,
+    double? amountTendered,
+    String? referenceCode,
+    required double currentBalance,
+    required String branchId,
+  }) async {
+    if (!amount.isFinite || amount <= 0) {
+      throw const DashboardRepositoryException(
+        'Enter a valid payment amount greater than zero.',
+      );
+    }
+    if (amount > currentBalance + 0.009 && !await isBackendReachable()) {
+      throw const DashboardRepositoryException(
+        'This amount is above the last saved balance. Connect to refresh the balance before recording it.',
+      );
+    }
+    return _enqueueDashboardAction(user, 'record_receivable_payment', {
+      'receivable_id': receivableId,
+      'payment_method': paymentMethod,
+      'amount': amount,
+      'amount_tendered': paymentMethod == 'cash'
+          ? amountTendered ?? amount
+          : amount,
+      'reference_code': referenceCode?.trim().isEmpty == true
+          ? null
+          : referenceCode?.trim(),
+      'branch_id': branchId,
+    });
+  }
+
   Future<DashboardSnapshot> _cacheFinance(
     RetivoxUser user,
     String cacheKey,
@@ -2345,6 +3226,9 @@ class DashboardRepository {
     List<Map<String, dynamic>> deposits = const [],
     List<Map<String, dynamic>> recurringTemplates = const [],
     List<Map<String, dynamic>> recurringInstances = const [],
+    Map<String, double> paymentMethods = const {},
+    double totalLent = 0,
+    List<Map<String, dynamic>> receivableAccounts = const [],
   }) async {
     final summary = <String, dynamic>{
       'branches': branches,
@@ -2355,11 +3239,27 @@ class DashboardRepository {
       'cash_deposits': deposits,
       'recurring_templates': recurringTemplates,
       'recurring_instances': recurringInstances,
+      'payment_methods': paymentMethods,
+      'total_lent': totalLent,
+      'receivable_accounts': receivableAccounts,
     };
     await vault.cacheValue(user, cacheKey, [summary]);
+    for (final action in await _pendingDashboardActions(user)) {
+      if (action['type'] == 'record_receivable_payment') {
+        await _cachePendingDashboardAction(user, action);
+      }
+      if (action['type'] == 'record_cash_deposit' ||
+          action['type'] == 'review_cash_deposit') {
+        await _cachePendingDashboardAction(user, action);
+      }
+    }
+    final updated = await vault.readCachedValue<List<dynamic>>(user, cacheKey);
+    final visibleSummary = updated?.isNotEmpty == true && updated!.first is Map
+        ? Map<String, dynamic>.from(updated.first as Map)
+        : summary;
     return DashboardSnapshot(
       section: 'finances',
-      rows: [summary],
+      rows: [visibleSummary],
       updatedAt: await vault.cachedValueUpdatedAt(user, cacheKey),
       isCached: false,
     );
@@ -2384,6 +3284,59 @@ class DashboardRepository {
     );
   }
 
+  Future<DashboardSnapshot> loadExpiryAlerts(RetivoxUser user) async {
+    const cacheKey = 'dashboard:expiry-alerts';
+    final branchIds = user.branches.map((branch) => branch.id).toList();
+    if (branchIds.isNotEmpty && await isBackendReachable()) {
+      try {
+        final supabase = await _requireOnlineRole(user, [
+          RetivoxRole.owner,
+          RetivoxRole.admin,
+        ]);
+        final rows =
+            _normalizeRows(
+              await supabase
+                  .from('product_expiry_alerts')
+                  .select(
+                    'branch_id, product_id, product_name, sku, lot_id, supplier_lot_code, expires_on, days_remaining, base_quantity_on_hand, alert_status',
+                  )
+                  .eq('business_id', user.businessId)
+                  .inFilter('branch_id', branchIds)
+                  .order('expires_on')
+                  .range(0, 199),
+            ).map((row) {
+              final branch = user.branches
+                  .where((item) => item.id == row['branch_id']?.toString())
+                  .firstOrNull;
+              return {
+                ...row,
+                'branch_name': branch?.name ?? 'Branch',
+                'days_remaining': _number(row['days_remaining']),
+                'base_quantity_on_hand': _number(row['base_quantity_on_hand']),
+              };
+            }).toList();
+        await vault.cacheValue(user, cacheKey, rows);
+        return DashboardSnapshot(
+          section: 'expiry_alerts',
+          rows: rows,
+          updatedAt: DateTime.now(),
+          isCached: false,
+        );
+      } catch (error) {
+        if (!_isNetworkError(error)) rethrow;
+      }
+    }
+    final cached = await vault.readCachedValue<List<dynamic>>(user, cacheKey);
+    return DashboardSnapshot(
+      section: 'expiry_alerts',
+      rows:
+          cached?.whereType<Map>().map(Map<String, dynamic>.from).toList() ??
+          const [],
+      updatedAt: await vault.cachedValueUpdatedAt(user, cacheKey),
+      isCached: true,
+    );
+  }
+
   Future<DashboardSnapshot> loadSection(
     RetivoxUser user,
     String section,
@@ -2391,14 +3344,53 @@ class DashboardRepository {
     final supabase = client;
     if (supabase != null) {
       try {
-        final authUser = await supabase.auth.getUser();
+        final authUser = await supabase.auth.getUser().timeout(
+          const Duration(seconds: 8),
+        );
         if (authUser.user?.id != user.id) {
-          throw const DashboardRepositoryException(
-            'Sign in online with this account to refresh dashboard data.',
+          final saved = await vault.readCachedValue<List<dynamic>>(
+            user,
+            'dashboard:$section',
+          );
+          if (saved == null) {
+            throw const DashboardRepositoryException(
+              'Sign in online with this account to load dashboard data.',
+            );
+          }
+          var savedRows = saved.whereType<Map<String, dynamic>>().toList();
+          if (section == 'branches' && user.role == RetivoxRole.owner) {
+            savedRows = await _mergePendingBranchCreates(user, savedRows);
+          }
+          savedRows = await _mergePendingDashboardActions(
+            user,
+            section,
+            savedRows,
+          );
+          return DashboardSnapshot(
+            section: section,
+            rows: savedRows,
+            updatedAt: await vault.cachedValueUpdatedAt(
+              user,
+              'dashboard:$section',
+            ),
+            isCached: true,
           );
         }
-        final rows = await _fetchSection(supabase, user, section);
+        var rows = await _fetchSection(supabase, user, section).timeout(
+          const Duration(seconds: 15),
+          onTimeout: () =>
+              throw TimeoutException('The $section data request timed out.'),
+        );
+        if (section == 'branches' && user.role == RetivoxRole.owner) {
+          try {
+            await syncPendingBranchCreates(user);
+          } catch (error) {
+            if (!_isNetworkError(error)) rethrow;
+          }
+          rows = await _mergePendingBranchCreates(user, rows);
+        }
         await vault.cacheValue(user, 'dashboard:$section', rows);
+        rows = await _mergePendingDashboardActions(user, section, rows);
         return DashboardSnapshot(
           section: section,
           rows: rows,
@@ -2422,12 +3414,1396 @@ class DashboardRepository {
         'No $section data is cached for this account. Connect to the internet to load it first.',
       );
     }
+    var rows = cached.whereType<Map<String, dynamic>>().toList();
+    if (section == 'branches' && user.role == RetivoxRole.owner) {
+      rows = await _mergePendingBranchCreates(user, rows);
+    }
+    rows = await _mergePendingDashboardActions(user, section, rows);
     return DashboardSnapshot(
       section: section,
-      rows: cached.whereType<Map<String, dynamic>>().toList(),
+      rows: rows,
       updatedAt: await vault.cachedValueUpdatedAt(user, 'dashboard:$section'),
       isCached: true,
     );
+  }
+
+  static const _pendingDashboardActionsKey = 'dashboard:pending_actions';
+
+  Future<List<Map<String, dynamic>>> _pendingDashboardActions(
+    RetivoxUser user,
+  ) async {
+    final raw = await vault.readCachedValue<List<dynamic>>(
+      user,
+      _pendingDashboardActionsKey,
+    );
+    return raw
+            ?.whereType<Map>()
+            .map((row) => Map<String, dynamic>.from(row))
+            .toList() ??
+        <Map<String, dynamic>>[];
+  }
+
+  Future<void> _storePendingDashboardActions(
+    RetivoxUser user,
+    List<Map<String, dynamic>> actions,
+  ) => vault.cacheValue(user, _pendingDashboardActionsKey, actions);
+
+  Future<bool> _enqueueDashboardAction(
+    RetivoxUser user,
+    String type,
+    Map<String, dynamic> payload,
+  ) async {
+    final id = const Uuid().v4();
+    final action = <String, dynamic>{
+      'id': id,
+      'type': type,
+      'payload': payload,
+      'queued_at': DateTime.now().toUtc().toIso8601String(),
+      'status': 'pending_sync',
+    };
+    final actions = await _pendingDashboardActions(user);
+    actions.add(action);
+    await _storePendingDashboardActions(user, actions);
+    await _cachePendingDashboardAction(user, action);
+    if (await isBackendReachable()) {
+      try {
+        await syncPendingDashboardActions(user);
+      } catch (error) {
+        if (!_isNetworkError(error)) {
+          final pending = await _pendingDashboardActions(user);
+          final index = pending.indexWhere((row) => row['id'] == id);
+          if (index >= 0) {
+            pending[index]['error'] = error.toString();
+            await _storePendingDashboardActions(user, pending);
+          }
+        }
+      }
+    }
+    return (await _pendingDashboardActions(user))
+        .any((pending) => pending['id'] == id);
+  }
+
+  Future<void> _cachePendingDashboardAction(
+    RetivoxUser user,
+    Map<String, dynamic> action,
+  ) async {
+    final type = action['type']?.toString();
+    final payload = Map<String, dynamic>.from(action['payload'] as Map? ?? {});
+    if (type == 'record_cash_deposit') {
+      final saved = await vault.readCachedValue<List<dynamic>>(
+        user,
+        'dashboard:cash_deposits',
+      );
+      final rows =
+          saved?.whereType<Map>().map(Map<String, dynamic>.from).toList() ??
+          <Map<String, dynamic>>[];
+      rows.removeWhere((row) => row['pending_action_id'] == action['id']);
+      rows.insert(0, {
+        'id': 'local-${action['id']}',
+        'branch_id': payload['branch_id'],
+        'deposit_date': payload['deposit_date'],
+        'amount': payload['amount'],
+        'deposit_reference': payload['deposit_reference'],
+        'note': payload['note'],
+        'status': 'pending_sync',
+        'submitted_role': user.role.name,
+        'deposited_by_name': user.name,
+        'is_pending_sync': true,
+        'pending_action_id': action['id'],
+        'sync_error': action['error'],
+      });
+      await vault.cacheValue(user, 'dashboard:cash_deposits', rows);
+      await _applyPendingCashDepositToFinanceCaches(user, action, payload);
+    }
+    if (type == 'review_cash_deposit') {
+      await _applyPendingCashDepositToFinanceCaches(user, action, payload);
+    }
+    if (type == 'create_uom') {
+      final cached = await vault.readCachedValue<List<dynamic>>(
+        user,
+        'dashboard:product-options',
+      );
+      final options =
+          cached?.whereType<Map>().map(Map<String, dynamic>.from).firstOrNull ??
+          <String, dynamic>{
+            'units': <Map<String, dynamic>>[],
+            'branches': <Map<String, dynamic>>[],
+          };
+      final units = (options['units'] as List? ?? const [])
+          .whereType<Map>()
+          .map(Map<String, dynamic>.from)
+          .toList();
+      units.removeWhere((unit) => unit['id'] == payload['local_id']);
+      units.add({
+        'id': payload['local_id'],
+        'name': payload['name'],
+        'abbreviation': payload['abbreviation'],
+        'conversion_factor': payload['conversion_factor'],
+        'is_base_unit': payload['is_base_unit'] == true,
+        'is_active': true,
+        'is_pending_sync': true,
+      });
+      options['units'] = units;
+      await vault.cacheValue(user, 'dashboard:product-options', [options]);
+    }
+    if (type == 'record_receivable_payment') {
+      await _applyPendingReceivablePaymentToFinanceCaches(
+        user,
+        action,
+        payload,
+      );
+    }
+    if (type == 'create_product' || type == 'update_product') {
+      final product = await _productRowFromAction(user, payload, action);
+      final cached = await vault.readCachedValue<List<dynamic>>(
+        user,
+        'dashboard:products',
+      );
+      final rows =
+          cached?.whereType<Map>().map(Map<String, dynamic>.from).toList() ??
+          <Map<String, dynamic>>[];
+      final id = product['id']?.toString();
+      final index = rows.indexWhere((row) => row['id']?.toString() == id);
+      if (index < 0) {
+        rows.insert(0, product);
+      } else {
+        rows[index] = {...rows[index], ...product};
+      }
+      await vault.cacheValue(user, 'dashboard:products', rows);
+    }
+    if (type == 'set_product_active') {
+      final cached = await vault.readCachedValue<List<dynamic>>(
+        user,
+        'dashboard:products',
+      );
+      if (cached != null) {
+        final rows = cached
+            .whereType<Map>()
+            .map(Map<String, dynamic>.from)
+            .toList();
+        final index = rows.indexWhere(
+          (row) => row['id']?.toString() == payload['product_id']?.toString(),
+        );
+        if (index >= 0)
+          rows[index] = {
+            ...rows[index],
+            'is_active': payload['is_active'],
+            'is_pending_sync': true,
+            'sync_error': action['error'],
+          };
+        await vault.cacheValue(user, 'dashboard:products', rows);
+      }
+    }
+    if (type == 'save_supplier') {
+      final cached = await vault.readCachedValue<List<dynamic>>(
+        user,
+        'dashboard:suppliers',
+      );
+      final rows =
+          cached?.whereType<Map>().map(Map<String, dynamic>.from).toList() ??
+          <Map<String, dynamic>>[];
+      final localId = payload['supplier_id']?.toString();
+      final index = rows.indexWhere(
+        (row) =>
+            row['id']?.toString() == localId ||
+            row['name']?.toString().toLowerCase() ==
+                payload['name']?.toString().toLowerCase(),
+      );
+      final supplier = <String, dynamic>{
+        'id': localId,
+        'name': payload['name'],
+        'phone': payload['phone'],
+        'email': payload['email'],
+        'contact_person': payload['contact_person'],
+        'notes': payload['notes'],
+        'is_active': payload['is_active'],
+        'is_pending_sync': true,
+        'pending_action_id': action['id'],
+      };
+      if (index < 0) {
+        rows.add(supplier);
+      } else {
+        rows[index] = {...rows[index], ...supplier};
+      }
+      await vault.cacheValue(user, 'dashboard:suppliers', rows);
+    }
+    if (type == 'record_supplier_delivery') {
+      final cached = await vault.readCachedValue<List<dynamic>>(
+        user,
+        'dashboard:deliveries',
+      );
+      final rows =
+          cached?.whereType<Map>().map(Map<String, dynamic>.from).toList() ??
+          <Map<String, dynamic>>[];
+      if (!rows.any((row) => row['id'] == action['id'])) {
+        final branch = user.branches
+            .where((item) => item.id == payload['branch_id'])
+            .firstOrNull;
+        rows.insert(0, {
+          'id': action['id'],
+          'to_branch_id': payload['branch_id'],
+          'branches': branch == null
+              ? null
+              : {'id': branch.id, 'name': branch.name},
+          'supplier_id': payload['supplier_id'],
+          'supplier_name': payload['supplier_name'],
+          'reference_code': payload['reference_code'],
+          'status': 'pending_sync',
+          'recorded_at': action['queued_at'],
+          'items': await _pendingDeliveryItems(user, payload),
+          'edit_requests': const [],
+          'is_pending_sync': true,
+          'sync_error': action['error'],
+        });
+        await vault.cacheValue(user, 'dashboard:deliveries', rows);
+      }
+    }
+    if (type == 'approve_supplier_delivery' ||
+        type == 'acknowledge_supplier_delivery') {
+      final cached = await vault.readCachedValue<List<dynamic>>(
+        user,
+        'dashboard:deliveries',
+      );
+      if (cached != null) {
+        final rows = cached
+            .whereType<Map>()
+            .map(Map<String, dynamic>.from)
+            .toList();
+        final id = payload['delivery_id']?.toString();
+        for (var index = 0; index < rows.length; index++) {
+          if (rows[index]['id']?.toString() == id) {
+            rows[index] = {
+              ...rows[index],
+              'status': type == 'approve_supplier_delivery'
+                  ? 'approved'
+                  : 'received',
+              'is_pending_sync': true,
+              'pending_action_id': action['id'],
+            };
+          }
+        }
+        await vault.cacheValue(user, 'dashboard:deliveries', rows);
+      }
+    }
+    if (type == 'edit_supplier_delivery' ||
+        type == 'review_supplier_delivery_edit') {
+      final cached = await vault.readCachedValue<List<dynamic>>(
+        user,
+        'dashboard:deliveries',
+      );
+      if (cached != null) {
+        final rows = cached
+            .whereType<Map>()
+            .map(Map<String, dynamic>.from)
+            .toList();
+        for (var index = 0; index < rows.length; index++) {
+          if (type == 'edit_supplier_delivery' &&
+              rows[index]['id']?.toString() ==
+                  payload['delivery_id']?.toString()) {
+            rows[index] = {
+              ...rows[index],
+              'is_pending_sync': true,
+              'pending_action_id': action['id'],
+            };
+          }
+          if (type == 'review_supplier_delivery_edit') {
+            final requests = (rows[index]['edit_requests'] as List? ?? const [])
+                .whereType<Map>()
+                .map(Map<String, dynamic>.from)
+                .toList();
+            final requestIndex = requests.indexWhere(
+              (request) =>
+                  request['id']?.toString() ==
+                  payload['request_id']?.toString(),
+            );
+            if (requestIndex >= 0) {
+              requests[requestIndex] = {
+                ...requests[requestIndex],
+                'is_pending_sync': true,
+                'queued_decision': payload['approve'] == true
+                    ? 'approve'
+                    : 'reject',
+              };
+              rows[index] = {...rows[index], 'edit_requests': requests};
+            }
+          }
+        }
+        await vault.cacheValue(user, 'dashboard:deliveries', rows);
+      }
+    }
+  }
+
+  Future<void> _applyPendingReceivablePaymentToFinanceCaches(
+    RetivoxUser user,
+    Map<String, dynamic> action,
+    Map<String, dynamic> payload,
+  ) async {
+    final localId = action['id']?.toString();
+    final receivableId = payload['receivable_id']?.toString();
+    final amount = _number(payload['amount']);
+    if (localId == null || receivableId == null || amount <= 0) return;
+
+    final scopes = <String>{'all', ...user.branches.map((branch) => branch.id)};
+    for (final period in const ['today', 'week', 'month']) {
+      for (final scope in scopes) {
+        final key = 'dashboard:finance:$period:$scope';
+        final cached = await vault.readCachedValue<List<dynamic>>(user, key);
+        if (cached == null || cached.isEmpty || cached.first is! Map) continue;
+        final summary = Map<String, dynamic>.from(cached.first as Map);
+        final appliedIds =
+            (summary['_pending_receivable_payment_ids'] as List? ?? const [])
+                .map((value) => value.toString())
+                .toSet();
+        if (appliedIds.contains(localId)) continue;
+
+        final accounts = (summary['receivable_accounts'] as List? ?? const [])
+            .whereType<Map>()
+            .map(Map<String, dynamic>.from)
+            .toList();
+        final index = accounts.indexWhere(
+          (account) => account['id']?.toString() == receivableId,
+        );
+        if (index < 0) continue;
+        final account = accounts[index];
+        final nextBalance = (_number(account['balance_due']) - amount)
+            .clamp(0, double.infinity)
+            .toDouble();
+        account['balance_due'] = nextBalance;
+        account['amount_paid'] = _number(account['amount_paid']) + amount;
+        account['account_status'] = nextBalance <= 0
+            ? 'paid'
+            : _number(account['amount_paid']) > 0
+            ? 'partial'
+            : 'open';
+        final payments = (account['payments'] as List? ?? const [])
+            .whereType<Map>()
+            .map(Map<String, dynamic>.from)
+            .toList();
+        payments.add({
+          'local_id': localId,
+          'payment_method': payload['payment_method'],
+          'amount': amount,
+          'status': 'pending_sync',
+          'payment_at': action['queued_at'],
+          'reference_code': payload['reference_code'],
+          'sync_error': action['error'],
+        });
+        account['payments'] = payments;
+        accounts[index] = account;
+        summary['receivable_accounts'] = accounts;
+        summary['total_lent'] = (_number(summary['total_lent']) - amount)
+            .clamp(0, double.infinity)
+            .toDouble();
+        final methods = Map<String, dynamic>.from(
+          summary['payment_methods'] as Map? ?? const {},
+        );
+        final method = payload['payment_method']?.toString() ?? 'other';
+        methods[method] = _number(methods[method]) + amount;
+        summary['payment_methods'] = methods;
+        appliedIds.add(localId);
+        summary['_pending_receivable_payment_ids'] = appliedIds.toList();
+        await vault.cacheValue(user, key, [summary]);
+      }
+    }
+  }
+
+  Future<void> _applyPendingCashDepositToFinanceCaches(
+    RetivoxUser user,
+    Map<String, dynamic> action,
+    Map<String, dynamic> payload,
+  ) async {
+    final scopes = <String>{'all', ...user.branches.map((branch) => branch.id)};
+    final type = action['type']?.toString();
+    for (final period in const ['today', 'week', 'month']) {
+      for (final scope in scopes) {
+        if (type == 'record_cash_deposit' &&
+            scope != 'all' &&
+            scope != payload['branch_id']?.toString())
+          continue;
+        final key = 'dashboard:finance:$period:$scope';
+        final cached = await vault.readCachedValue<List<dynamic>>(user, key);
+        if (cached == null || cached.isEmpty || cached.first is! Map) continue;
+        final summary = Map<String, dynamic>.from(cached.first as Map);
+        final deposits = (summary['cash_deposits'] as List? ?? const [])
+            .whereType<Map>()
+            .map(Map<String, dynamic>.from)
+            .toList();
+        if (type == 'record_cash_deposit') {
+          if (!deposits.any(
+            (row) => row['pending_action_id'] == action['id'],
+          )) {
+            final branch = user.branches
+                .where((item) => item.id == payload['branch_id'])
+                .firstOrNull;
+            deposits.insert(0, {
+              'id': 'local-${action['id']}',
+              'branch_id': payload['branch_id'],
+              'branches': branch == null
+                  ? null
+                  : {'id': branch.id, 'name': branch.name},
+              'deposit_date': payload['deposit_date'],
+              'amount': payload['amount'],
+              'deposit_reference': payload['deposit_reference'],
+              'note': payload['note'],
+              'status': 'pending_sync',
+              'submitted_role': user.role.name,
+              'is_pending_sync': true,
+              'pending_action_id': action['id'],
+              'sync_error': action['error'],
+            });
+          }
+        } else {
+          final index = deposits.indexWhere(
+            (row) => row['id']?.toString() == payload['deposit_id']?.toString(),
+          );
+          if (index >= 0)
+            deposits[index] = {
+              ...deposits[index],
+              'is_pending_sync': true,
+              'pending_action_id': action['id'],
+              'sync_error': action['error'],
+              'pending_action': payload['action'],
+            };
+        }
+        summary['cash_deposits'] = deposits;
+        await vault.cacheValue(user, key, [summary]);
+      }
+    }
+  }
+
+  Future<Map<String, dynamic>> _productRowFromAction(
+    RetivoxUser user,
+    Map<String, dynamic> payload,
+    Map<String, dynamic> action,
+  ) async {
+    final optionsRaw = await vault.readCachedValue<List<dynamic>>(
+      user,
+      'dashboard:product-options',
+    );
+    final options = optionsRaw
+        ?.whereType<Map>()
+        .map(Map<String, dynamic>.from)
+        .firstOrNull;
+    final units = (options?['units'] as List? ?? const [])
+        .whereType<Map>()
+        .map(Map<String, dynamic>.from)
+        .toList();
+    final unitById = {for (final unit in units) unit['id'].toString(): unit};
+    final allUnitIds = <String>{
+      payload['base_unit_id']?.toString() ?? '',
+      ...(payload['purchase_unit_ids'] as List? ?? const []).map(
+        (id) => id.toString(),
+      ),
+      ...(payload['sale_unit_ids'] as List? ?? const []).map(
+        (id) => id.toString(),
+      ),
+    }..remove('');
+    final links = allUnitIds.map((id) {
+      final unit = unitById[id];
+      return {
+        'uom_id': id,
+        'is_base_uom': id == payload['base_unit_id']?.toString(),
+        'is_purchase_uom': (payload['purchase_unit_ids'] as List? ?? const [])
+            .map((value) => value.toString())
+            .contains(id),
+        'is_sale_uom': (payload['sale_unit_ids'] as List? ?? const [])
+            .map((value) => value.toString())
+            .contains(id),
+        'is_default_purchase_uom':
+            id == payload['default_purchase_unit_id']?.toString(),
+        'is_default_sale_uom':
+            id == payload['default_sale_unit_id']?.toString(),
+        'units_of_measure': unit == null
+            ? null
+            : {
+                'name': unit['name'],
+                'abbreviation': unit['abbreviation'],
+                'conversion_factor': unit['conversion_factor'],
+              },
+      };
+    }).toList();
+    final pricePoints = (payload['price_points'] as List? ?? const [])
+        .whereType<Map>()
+        .map(
+          (point) => {
+            'uom_id': point['uom_id'],
+            'quantity_in_uom': point['quantity'],
+            'price': point['price'],
+            'max_discount_amount': point['max_discount_amount'],
+          },
+        )
+        .toList();
+    final rawPricingMethod =
+        payload['pricing_method']?.toString() ?? 'fixed_price';
+    final effectivePricingMethod =
+        rawPricingMethod == 'fixed_price' &&
+            (payload['sale_unit_ids'] as List? ?? const []).length > 1
+        ? 'assisted_pack'
+        : rawPricingMethod;
+    final productId =
+        payload['local_product_id']?.toString() ??
+        payload['product_id']?.toString();
+    final existingRows = await vault.readCachedValue<List<dynamic>>(
+      user,
+      'dashboard:products',
+    );
+    final existing = existingRows
+        ?.whereType<Map>()
+        .map(Map<String, dynamic>.from)
+        .where((row) => row['id']?.toString() == productId)
+        .firstOrNull;
+    return {
+      ...?existing,
+      'id': productId,
+      'name': payload['name'],
+      'sku': payload['sku'],
+      'category': payload['category'],
+      'subcategory': payload['subcategory'],
+      'brand_family': payload['brand_family'],
+      'product_kind': payload['product_kind'],
+      'tracks_expiry': payload['tracks_expiry'] == true,
+      'barcodes': _stringList(payload['barcodes']),
+      'unit':
+          unitById[payload['base_unit_id']?.toString()]?['abbreviation'] ??
+          unitById[payload['base_unit_id']?.toString()]?['name'],
+      'description': payload['description'],
+      'is_active': existing?['is_active'] ?? true,
+      'product_pricing': {
+        'base_price': payload['base_price'],
+        'min_price': payload['min_price'],
+        'max_price': payload['max_price'],
+      },
+      'product_uom_links': links,
+      'product_pricing_models': [
+        for (final branchId
+            in (payload['pricing_branch_ids'] as List? ?? const []).isEmpty
+                ? <Object?>[null]
+                : (payload['pricing_branch_ids'] as List))
+          {
+            'branch_id': branchId,
+            'pricing_method': effectivePricingMethod,
+            'rounding_rule':
+                effectivePricingMethod == 'assisted_pack' &&
+                    rawPricingMethod == 'fixed_price'
+                ? 'none'
+                : payload['rounding_rule'],
+            'status': 'approved',
+            'product_price_points': pricePoints,
+          },
+      ],
+      'is_pending_sync': true,
+      'pending_action_id': action['id'],
+      'sync_error': action['error'],
+    };
+  }
+
+  Future<List<Map<String, dynamic>>> _pendingDeliveryItems(
+    RetivoxUser user,
+    Map<String, dynamic> payload,
+  ) async {
+    final raw = await vault.readCachedValue<List<dynamic>>(
+      user,
+      'dashboard:transfer-options',
+    );
+    final options = raw
+        ?.whereType<Map>()
+        .map(Map<String, dynamic>.from)
+        .firstOrNull;
+    final products = options?['products'] is List
+        ? (options!['products'] as List)
+              .whereType<Map>()
+              .map(Map<String, dynamic>.from)
+              .toList()
+        : <Map<String, dynamic>>[];
+    final items = (payload['items'] as List? ?? const []).whereType<Map>();
+    return items.map((rawItem) {
+      final item = Map<String, dynamic>.from(rawItem);
+      final product = products
+          .where(
+            (row) => row['id']?.toString() == item['productId']?.toString(),
+          )
+          .firstOrNull;
+      final units = (product?['uom_options'] as List? ?? const [])
+          .whereType<Map>();
+      final unit = units
+          .where((row) => row['id']?.toString() == item['uomId']?.toString())
+          .firstOrNull;
+      return {
+        ...item,
+        'quantity_in_uom': item['quantity'],
+        'quantity_expected': item['quantity'],
+        'quantity_received': 0,
+        'base_quantity_received': 0,
+        'total_cost': ((item['costs'] as List? ?? const [])
+            .whereType<Map>()
+            .fold<double>(0, (sum, cost) => sum + _number(cost['amount']))),
+        'products': product == null
+            ? null
+            : {
+                'id': product['id'],
+                'name': product['name'],
+                'sku': product['sku'],
+              },
+        'units_of_measure': unit == null
+            ? null
+            : {'name': unit['name'], 'abbreviation': unit['abbreviation']},
+      };
+    }).toList();
+  }
+
+  Future<List<Map<String, dynamic>>> _mergePendingDashboardActions(
+    RetivoxUser user,
+    String section,
+    List<Map<String, dynamic>> source,
+  ) async {
+    final actions = await _pendingDashboardActions(user);
+    if (actions.isEmpty) return source;
+    final rows = [...source];
+    for (final action in actions) {
+      final type = action['type']?.toString();
+      final payload = Map<String, dynamic>.from(
+        action['payload'] as Map? ?? {},
+      );
+      if (section == 'cash_deposits' && type == 'record_cash_deposit') {
+        final index = rows.indexWhere(
+          (row) => row['pending_action_id'] == action['id'],
+        );
+        final branch = user.branches
+            .where((item) => item.id == payload['branch_id'])
+            .firstOrNull;
+        final pending = {
+          'id': 'local-${action['id']}',
+          'branch_id': payload['branch_id'],
+          'branches': branch == null
+              ? null
+              : {'id': branch.id, 'name': branch.name},
+          'deposit_date': payload['deposit_date'],
+          'amount': payload['amount'],
+          'deposit_reference': payload['deposit_reference'],
+          'note': payload['note'],
+          'status': 'pending_sync',
+          'submitted_role': user.role.name,
+          'deposited_by_name': user.name,
+          'created_at': action['queued_at'],
+          'is_pending_sync': true,
+          'pending_action_id': action['id'],
+          'sync_error': action['error'],
+        };
+        if (index < 0)
+          rows.insert(0, pending);
+        else
+          rows[index] = {...rows[index], ...pending};
+      }
+      if (section == 'cash_deposits' && type == 'review_cash_deposit') {
+        final index = rows.indexWhere(
+          (row) => row['id']?.toString() == payload['deposit_id']?.toString(),
+        );
+        if (index >= 0)
+          rows[index] = {
+            ...rows[index],
+            'is_pending_sync': true,
+            'pending_action_id': action['id'],
+            'sync_error': action['error'],
+            'pending_action': payload['action'],
+          };
+      }
+      if (section == 'products' &&
+          (type == 'create_product' || type == 'update_product')) {
+        final pending = await _productRowFromAction(user, payload, action);
+        final index = rows.indexWhere(
+          (row) => row['id']?.toString() == pending['id']?.toString(),
+        );
+        if (index < 0) {
+          if (type == 'create_product') rows.insert(0, pending);
+        } else {
+          rows[index] = {...rows[index], ...pending};
+        }
+      }
+      if (section == 'products' && type == 'set_product_active') {
+        final index = rows.indexWhere(
+          (row) => row['id']?.toString() == payload['product_id']?.toString(),
+        );
+        if (index >= 0) {
+          rows[index] = {
+            ...rows[index],
+            'is_active': payload['is_active'],
+            'is_pending_sync': true,
+            'sync_error': action['error'],
+          };
+        }
+      }
+      if (section == 'suppliers' && type == 'save_supplier') {
+        final localId = payload['supplier_id']?.toString();
+        final index = rows.indexWhere(
+          (row) =>
+              row['id']?.toString() == localId ||
+              row['name']?.toString().toLowerCase() ==
+                  payload['name']?.toString().toLowerCase(),
+        );
+        final pending = {
+          'id': localId,
+          'name': payload['name'],
+          'phone': payload['phone'],
+          'email': payload['email'],
+          'contact_person': payload['contact_person'],
+          'notes': payload['notes'],
+          'is_active': payload['is_active'],
+          'is_pending_sync': true,
+          'sync_error': action['error'],
+        };
+        if (index < 0) {
+          rows.add(pending);
+        } else {
+          rows[index] = {...rows[index], ...pending};
+        }
+      }
+      if (section == 'deliveries' &&
+          type == 'record_supplier_delivery' &&
+          !rows.any((row) => row['id']?.toString() == action['id'])) {
+        final branch = user.branches
+            .where((item) => item.id == payload['branch_id'])
+            .firstOrNull;
+        rows.insert(0, {
+          'id': action['id'],
+          'to_branch_id': payload['branch_id'],
+          'branches': branch == null
+              ? null
+              : {'id': branch.id, 'name': branch.name},
+          'supplier_id': payload['supplier_id'],
+          'supplier_name': payload['supplier_name'],
+          'reference_code': payload['reference_code'],
+          'status': 'pending_sync',
+          'recorded_at': action['queued_at'],
+          'items': await _pendingDeliveryItems(user, payload),
+          'edit_requests': const [],
+          'is_pending_sync': true,
+          'sync_error': action['error'],
+        });
+      }
+      if (section == 'deliveries' && type == 'record_supplier_delivery') {
+        final index = rows.indexWhere(
+          (row) => row['id']?.toString() == action['id'],
+        );
+        if (index >= 0) {
+          rows[index] = {
+            ...rows[index],
+            'is_pending_sync': true,
+            'sync_error': action['error'],
+          };
+        }
+      }
+      if (section == 'deliveries' &&
+          (type == 'approve_supplier_delivery' ||
+              type == 'acknowledge_supplier_delivery')) {
+        final deliveryId = payload['delivery_id']?.toString();
+        final index = rows.indexWhere(
+          (row) => row['id']?.toString() == deliveryId,
+        );
+        if (index >= 0 && rows[index]['pending_action_id'] != action['id']) {
+          rows[index] = {
+            ...rows[index],
+            'status': type == 'approve_supplier_delivery'
+                ? 'approved'
+                : 'received',
+            'is_pending_sync': true,
+            'pending_action_id': action['id'],
+            'sync_error': action['error'],
+          };
+        }
+      }
+      if (section == 'deliveries' && type == 'edit_supplier_delivery') {
+        final deliveryId = payload['delivery_id']?.toString();
+        final index = rows.indexWhere(
+          (row) => row['id']?.toString() == deliveryId,
+        );
+        if (index >= 0) {
+          rows[index] = {
+            ...rows[index],
+            'is_pending_sync': true,
+            'sync_error': action['error'],
+          };
+        }
+      }
+      if (section == 'deliveries' && type == 'review_supplier_delivery_edit') {
+        for (var index = 0; index < rows.length; index++) {
+          final requests = (rows[index]['edit_requests'] as List? ?? const [])
+              .whereType<Map>()
+              .map(Map<String, dynamic>.from)
+              .toList();
+          final requestIndex = requests.indexWhere(
+            (request) =>
+                request['id']?.toString() == payload['request_id']?.toString(),
+          );
+          if (requestIndex >= 0) {
+            requests[requestIndex] = {
+              ...requests[requestIndex],
+              'is_pending_sync': true,
+              'queued_decision': payload['approve'] == true
+                  ? 'approve'
+                  : 'reject',
+            };
+            rows[index] = {...rows[index], 'edit_requests': requests};
+          }
+        }
+      }
+      if (section == 'stock' &&
+          (type == 'update_stock_threshold' || type == 'adjust_stock')) {
+        for (var index = 0; index < rows.length; index++) {
+          if (rows[index]['id']?.toString() != payload['stock_id']?.toString())
+            continue;
+          final merged = {...rows[index]};
+          if (type == 'update_stock_threshold') {
+            merged['low_stock_threshold'] = payload['threshold'];
+          } else {
+            final sign = payload['operation'] == 'add' ? 1 : -1;
+            final current = _number(
+              merged['base_quantity_on_hand'] ?? merged['quantity_on_hand'],
+            );
+            merged['quantity_on_hand'] =
+                current + sign * _number(payload['quantity']);
+            merged['base_quantity_on_hand'] = merged['quantity_on_hand'];
+          }
+          merged['is_pending_sync'] = true;
+          merged['pending_action_id'] = action['id'];
+          merged['sync_error'] = action['error'];
+          rows[index] = merged;
+        }
+      }
+    }
+    return rows;
+  }
+
+  Future<void> syncPendingDashboardActions(RetivoxUser user) async {
+    var actions = await _pendingDashboardActions(user);
+    if (actions.isEmpty) return;
+    final supabase = await _requireOnlineRole(user, [
+      RetivoxRole.owner,
+      RetivoxRole.admin,
+      RetivoxRole.employee,
+    ]);
+    for (final queued in actions.toList()) {
+      final action = Map<String, dynamic>.from(queued);
+      final payload = Map<String, dynamic>.from(
+        action['payload'] as Map? ?? {},
+      );
+      _isSyncingDashboardAction = true;
+      try {
+        Object? response;
+        switch (action['type']) {
+          case 'record_cash_deposit':
+            response = await supabase.rpc(
+              'record_branch_cash_deposit_v2',
+              params: {
+                'p_branch_id': payload['branch_id'],
+                'p_deposit_date': payload['deposit_date'],
+                'p_amount': payload['amount'],
+                'p_deposit_reference': payload['deposit_reference'],
+                'p_note': (payload['note'] as String?)?.isEmpty == true
+                    ? null
+                    : payload['note'],
+                'p_local_id': action['id'],
+              },
+            );
+            break;
+          case 'review_cash_deposit':
+            await supabase.rpc(
+              'review_branch_cash_deposit_v2',
+              params: {
+                'p_deposit_id': payload['deposit_id'],
+                'p_action': payload['action'],
+                'p_review_note':
+                    (payload['review_note'] as String?)?.isEmpty == true
+                    ? null
+                    : payload['review_note'],
+                'p_local_id': action['id'],
+              },
+            );
+            break;
+          case 'record_receivable_payment':
+            response = await supabase.rpc(
+              'record_receivable_payment_v2',
+              params: {
+                'p_receivable_id': payload['receivable_id'],
+                'p_payment_method': payload['payment_method'],
+                'p_amount': payload['amount'],
+                'p_amount_tendered': payload['amount_tendered'],
+                'p_reference_code': payload['reference_code'],
+                'p_local_id': action['id'],
+              },
+            );
+            break;
+          case 'create_uom':
+            response = await supabase
+                .from('units_of_measure')
+                .insert({
+                  'business_id': user.businessId,
+                  'name': payload['name'],
+                  'abbreviation': payload['abbreviation'],
+                  'conversion_factor': payload['conversion_factor'],
+                  'is_base_unit': payload['is_base_unit'] == true,
+                  'is_active': true,
+                  'created_by': user.id,
+                })
+                .select(
+                  'id, name, abbreviation, conversion_factor, is_base_unit',
+                )
+                .single();
+            final createdUnitId = (response as Map)['id']?.toString();
+            _replacePendingUnitId(
+              actions,
+              payload['local_id']?.toString(),
+              createdUnitId,
+            );
+            await _rewriteCachedUnitId(
+              user,
+              payload['local_id']?.toString(),
+              createdUnitId,
+            );
+            break;
+          case 'create_product':
+            response = await createProduct(
+              user,
+              name: payload['name'].toString(),
+              sku: payload['sku'].toString(),
+              category: payload['category'].toString(),
+              description: payload['description']?.toString() ?? '',
+              productKind: payload['product_kind'].toString(),
+              subcategory: payload['subcategory']?.toString() ?? '',
+              brandFamily: payload['brand_family']?.toString() ?? '',
+              baseUnitId: payload['base_unit_id'].toString(),
+              purchaseUnitIds: _stringList(payload['purchase_unit_ids']),
+              saleUnitIds: _stringList(payload['sale_unit_ids']),
+              defaultPurchaseUnitId: payload['default_purchase_unit_id']
+                  .toString(),
+              defaultSaleUnitId: payload['default_sale_unit_id'].toString(),
+              salePrices: _doubleMap(payload['sale_prices']),
+              pricePoints: _productPricePoints(payload['price_points']),
+              pricingBranchIds: _stringList(payload['pricing_branch_ids']),
+              pricingMethod: payload['pricing_method'].toString(),
+              roundingRule: payload['rounding_rule'].toString(),
+              basePrice: _number(payload['base_price']),
+              minPrice: _number(payload['min_price']),
+              maxPrice: _number(payload['max_price']),
+              barcodes: _stringList(payload['barcodes']),
+              tracksExpiry: payload['tracks_expiry'] == true,
+            );
+            _replacePendingProductId(
+              actions,
+              payload['local_product_id']?.toString(),
+              response.toString(),
+            );
+            await _rewriteCachedProductId(
+              user,
+              payload['local_product_id']?.toString(),
+              response.toString(),
+            );
+            break;
+          case 'update_product':
+            await updateProduct(
+              user,
+              productId: payload['product_id'].toString(),
+              name: payload['name'].toString(),
+              sku: payload['sku'].toString(),
+              category: payload['category'].toString(),
+              unit: payload['unit']?.toString() ?? '',
+              description: payload['description']?.toString() ?? '',
+              productKind: payload['product_kind'].toString(),
+              subcategory: payload['subcategory']?.toString() ?? '',
+              brandFamily: payload['brand_family']?.toString() ?? '',
+              basePrice: _number(payload['base_price']),
+              minPrice: _number(payload['min_price']),
+              maxPrice: _number(payload['max_price']),
+              baseUnitId: payload['base_unit_id'].toString(),
+              purchaseUnitIds: _stringList(payload['purchase_unit_ids']),
+              saleUnitIds: _stringList(payload['sale_unit_ids']),
+              defaultPurchaseUnitId: payload['default_purchase_unit_id']
+                  .toString(),
+              defaultSaleUnitId: payload['default_sale_unit_id'].toString(),
+              salePrices: _doubleMap(payload['sale_prices']),
+              pricePoints: _productPricePoints(payload['price_points']),
+              pricingBranchIds: _stringList(payload['pricing_branch_ids']),
+              pricingMethod: payload['pricing_method'].toString(),
+              roundingRule: payload['rounding_rule'].toString(),
+              tracksExpiry: payload['tracks_expiry'] == true,
+              barcodes: _stringList(payload['barcodes']),
+            );
+            break;
+          case 'set_product_active':
+            await supabase.rpc(
+              'owner_toggle_product_status',
+              params: {
+                'p_product_id': payload['product_id'],
+                'p_is_active': payload['is_active'],
+              },
+            );
+            break;
+          case 'save_supplier':
+            response = await supabase.rpc(
+              'upsert_business_supplier',
+              params: {
+                'p_supplier_id': payload['is_new'] == true
+                    ? null
+                    : payload['supplier_id'],
+                'p_name': payload['name'],
+                'p_phone': (payload['phone'] as String?)?.isEmpty == true
+                    ? null
+                    : payload['phone'],
+                'p_email': (payload['email'] as String?)?.isEmpty == true
+                    ? null
+                    : payload['email'],
+                'p_contact_person':
+                    (payload['contact_person'] as String?)?.isEmpty == true
+                    ? null
+                    : payload['contact_person'],
+                'p_notes': (payload['notes'] as String?)?.isEmpty == true
+                    ? null
+                    : payload['notes'],
+                'p_is_active': payload['is_active'],
+              },
+            );
+            _replacePendingSupplierId(
+              actions,
+              payload['supplier_id']?.toString(),
+              response?.toString(),
+            );
+            break;
+          case 'record_supplier_delivery':
+            response = await supabase.rpc(
+              'dashboard_record_supplier_delivery',
+              params: {
+                'p_branch_id': payload['branch_id'],
+                'p_supplier_id': payload['supplier_id'],
+                'p_supplier_phone': payload['supplier_phone'],
+                'p_supplier_email': payload['supplier_email'],
+                'p_supplier_contact_person': payload['supplier_contact_person'],
+                'p_supplier_notes': payload['supplier_notes'],
+                'p_supplier_name': payload['supplier_name'],
+                'p_reference_code': payload['reference_code'],
+                'p_items': payload['items'],
+                'p_price_rating': payload['price_rating'],
+                'p_stock_quality_rating': payload['stock_quality_rating'],
+                'p_availability_rating': payload['availability_rating'],
+                'p_rating_note': payload['rating_note'],
+              },
+            );
+            _replacePendingDeliveryId(
+              actions,
+              action['id']?.toString(),
+              response?.toString(),
+            );
+            break;
+          case 'approve_supplier_delivery':
+            await supabase.rpc(
+              'dashboard_approve_supplier_delivery',
+              params: {'p_delivery_id': payload['delivery_id']},
+            );
+            break;
+          case 'acknowledge_supplier_delivery':
+            await supabase.rpc(
+              'dashboard_acknowledge_supplier_delivery',
+              params: {'p_delivery_id': payload['delivery_id']},
+            );
+            break;
+          case 'edit_supplier_delivery':
+            await supabase.rpc(
+              'dashboard_request_supplier_delivery_edit',
+              params: {
+                'p_delivery_id': payload['delivery_id'],
+                'p_supplier_name': payload['supplier_name'],
+                'p_reference_code': payload['reference_code'],
+                'p_items': payload['items'],
+                'p_reason': (payload['reason'] as String?)?.isEmpty == true
+                    ? null
+                    : payload['reason'],
+              },
+            );
+            break;
+          case 'review_supplier_delivery_edit':
+            await supabase.rpc(
+              'dashboard_review_supplier_delivery_edit_request',
+              params: {
+                'p_request_id': payload['request_id'],
+                'p_action': payload['approve'] == true ? 'approve' : 'reject',
+              },
+            );
+            break;
+          case 'adjust_stock':
+            await supabase.rpc(
+              'dashboard_adjust_stock',
+              params: {
+                'p_stock_id': payload['stock_id'],
+                'p_quantity': payload['quantity'],
+                'p_operation': payload['operation'],
+              },
+            );
+            break;
+          case 'update_stock_threshold':
+            await supabase.rpc(
+              'dashboard_update_low_stock_threshold',
+              params: {
+                'p_stock_id': payload['stock_id'],
+                'p_branch_id': payload['branch_id'],
+                'p_threshold': payload['threshold'],
+              },
+            );
+            break;
+          default:
+            action['error'] =
+                'Unsupported saved action. It remains on this device.';
+            await _storePendingDashboardActions(user, actions);
+            _isSyncingDashboardAction = false;
+            continue;
+        }
+        actions.removeWhere((row) => row['id'] == action['id']);
+        await _storePendingDashboardActions(user, actions);
+        if (action['type'] == 'save_supplier') {
+          await _rewriteCachedSupplierId(
+            user,
+            payload['supplier_id']?.toString(),
+            response?.toString(),
+          );
+        }
+        _isSyncingDashboardAction = false;
+      } catch (error) {
+        _isSyncingDashboardAction = false;
+        if (_isNetworkError(error)) {
+          action.remove('error');
+          await _storePendingDashboardActions(user, actions);
+          return;
+        }
+        action['error'] = error.toString();
+        actions = [
+          for (final row in actions)
+            if (row['id'] == action['id']) action else row,
+        ];
+        await _storePendingDashboardActions(user, actions);
+      }
+    }
+  }
+
+  void _replacePendingSupplierId(
+    List<Map<String, dynamic>> actions,
+    String? from,
+    String? to,
+  ) {
+    if (from == null || to == null) return;
+    for (final action in actions) {
+      final payload = Map<String, dynamic>.from(
+        action['payload'] as Map? ?? {},
+      );
+      if (payload['supplier_id'] == from) {
+        payload['supplier_id'] = to;
+        action['payload'] = payload;
+      }
+    }
+  }
+
+  void _replacePendingDeliveryId(
+    List<Map<String, dynamic>> actions,
+    String? from,
+    String? to,
+  ) {
+    if (from == null || to == null) return;
+    for (final action in actions) {
+      final payload = Map<String, dynamic>.from(
+        action['payload'] as Map? ?? {},
+      );
+      if (payload['delivery_id'] == from) {
+        payload['delivery_id'] = to;
+        action['payload'] = payload;
+      }
+    }
+  }
+
+  void _replacePendingUnitId(
+    List<Map<String, dynamic>> actions,
+    String? from,
+    String? to,
+  ) {
+    if (from == null || to == null) return;
+    for (final action in actions) {
+      final payload = Map<String, dynamic>.from(
+        action['payload'] as Map? ?? {},
+      );
+      for (final key in [
+        'base_unit_id',
+        'default_purchase_unit_id',
+        'default_sale_unit_id',
+      ]) {
+        if (payload[key] == from) payload[key] = to;
+      }
+      for (final key in ['purchase_unit_ids', 'sale_unit_ids']) {
+        final ids = _stringList(payload[key]);
+        payload[key] = ids.map((id) => id == from ? to : id).toList();
+      }
+      final prices = _doubleMap(payload['sale_prices']);
+      if (prices.containsKey(from)) {
+        prices[to] = prices.remove(from)!;
+        payload['sale_prices'] = prices;
+      }
+      final points = (payload['price_points'] as List? ?? const [])
+          .whereType<Map>()
+          .map((point) => Map<String, dynamic>.from(point))
+          .toList();
+      for (final point in points) {
+        if (point['uom_id'] == from) point['uom_id'] = to;
+      }
+      payload['price_points'] = points;
+      action['payload'] = payload;
+    }
+  }
+
+  void _replacePendingProductId(
+    List<Map<String, dynamic>> actions,
+    String? from,
+    String? to,
+  ) {
+    if (from == null || to == null) return;
+    for (final action in actions) {
+      final payload = Map<String, dynamic>.from(
+        action['payload'] as Map? ?? {},
+      );
+      if (payload['product_id'] == from) payload['product_id'] = to;
+      action['payload'] = payload;
+    }
+  }
+
+  Future<void> _rewriteCachedUnitId(
+    RetivoxUser user,
+    String? from,
+    String? to,
+  ) async {
+    if (from == null || to == null) return;
+    final cached = await vault.readCachedValue<List<dynamic>>(
+      user,
+      'dashboard:product-options',
+    );
+    if (cached == null || cached.isEmpty || cached.first is! Map) return;
+    final options = Map<String, dynamic>.from(cached.first as Map);
+    final units = (options['units'] as List? ?? const [])
+        .whereType<Map>()
+        .map(Map<String, dynamic>.from)
+        .map(
+          (unit) => unit['id']?.toString() == from
+              ? {...unit, 'id': to, 'is_pending_sync': false}
+              : unit,
+        )
+        .toList();
+    options['units'] = units;
+    await vault.cacheValue(user, 'dashboard:product-options', [options]);
+    final productCache = await vault.readCachedValue<List<dynamic>>(
+      user,
+      'dashboard:products',
+    );
+    if (productCache != null) {
+      final products = productCache
+          .whereType<Map>()
+          .map(Map<String, dynamic>.from)
+          .map((product) {
+            final links = (product['product_uom_links'] as List? ?? const [])
+                .whereType<Map>()
+                .map((rawLink) {
+                  final link = Map<String, dynamic>.from(rawLink);
+                  if (link['uom_id']?.toString() == from) link['uom_id'] = to;
+                  return link;
+                })
+                .toList();
+            return {...product, 'product_uom_links': links};
+          })
+          .toList();
+      await vault.cacheValue(user, 'dashboard:products', products);
+    }
+  }
+
+  Future<void> _rewriteCachedProductId(
+    RetivoxUser user,
+    String? from,
+    String? to,
+  ) async {
+    if (from == null || to == null) return;
+    final cached = await vault.readCachedValue<List<dynamic>>(
+      user,
+      'dashboard:products',
+    );
+    if (cached == null) return;
+    final rows = cached.whereType<Map>().map(Map<String, dynamic>.from).map((
+      row,
+    ) {
+      if (row['id']?.toString() != from) return row;
+      return {
+        ...row,
+        'id': to,
+        'is_pending_sync': false,
+        'pending_action_id': null,
+      };
+    }).toList();
+    await vault.cacheValue(user, 'dashboard:products', rows);
+  }
+
+  List<String> _stringList(Object? value) => value is List
+      ? value.map((item) => item.toString()).toList()
+      : <String>[];
+
+  Map<String, double> _doubleMap(Object? value) {
+    if (value is! Map) return <String, double>{};
+    return {
+      for (final entry in value.entries)
+        entry.key.toString(): _number(entry.value),
+    };
+  }
+
+  List<ProductPricePointInput> _productPricePoints(Object? value) =>
+      (value as List? ?? const []).whereType<Map>().map((point) {
+        return ProductPricePointInput(
+          uomId: point['uom_id'].toString(),
+          quantity: _number(point['quantity']),
+          price: _number(point['price']),
+          maxDiscountAmount: _number(point['max_discount_amount']),
+        );
+      }).toList();
+
+  Future<void> _rewriteCachedSupplierId(
+    RetivoxUser user,
+    String? from,
+    String? to,
+  ) async {
+    if (from == null || to == null) return;
+    final cached = await vault.readCachedValue<List<dynamic>>(
+      user,
+      'dashboard:suppliers',
+    );
+    if (cached == null) return;
+    final rows = cached.whereType<Map>().map(Map<String, dynamic>.from).map((
+      row,
+    ) {
+      if (row['id']?.toString() != from) return row;
+      return {
+        ...row,
+        'id': to,
+        'is_pending_sync': false,
+        'pending_action_id': null,
+      };
+    }).toList();
+    await vault.cacheValue(user, 'dashboard:suppliers', rows);
+  }
+
+  Future<List<Map<String, dynamic>>> _mergePendingBranchCreates(
+    RetivoxUser user,
+    List<Map<String, dynamic>> branches,
+  ) async {
+    final pending = await vault.readCachedValue<List<dynamic>>(
+      user,
+      'dashboard:pending_branch_creates',
+    );
+    if (pending == null || pending.isEmpty) return branches;
+    final rows = [...branches];
+    for (final value in pending.whereType<Map<String, dynamic>>()) {
+      final id = value['id']?.toString();
+      if (!rows.any((row) => row['id']?.toString() == id)) {
+        rows.add({...value, 'is_pending_sync': true});
+      }
+    }
+    return rows;
   }
 
   Future<DashboardSnapshot> loadMoreSection(
@@ -2558,6 +4934,17 @@ class DashboardRepository {
     String action = 'all',
     String entityType = 'all',
   }) async {
+    if (section == 'cash_deposits') {
+      final response = await supabase
+          .from('branch_cash_deposits')
+          .select(
+            'id, branch_id, deposited_by, deposit_date, amount, expected_cash_amount, variance_amount, deposit_reference, note, review_note, status, submitted_role, admin_approved_by, admin_approved_at, created_at, branches(name), depositor:users!branch_cash_deposits_deposited_by_fkey(name, phone, email)',
+          )
+          .eq('business_id', user.businessId)
+          .order('created_at', ascending: false)
+          .range(0, 199);
+      return _normalizeRows(response);
+    }
     if (section == 'transfers') {
       if (user.role == RetivoxRole.employee) {
         throw const DashboardRepositoryException(
@@ -2858,18 +5245,182 @@ class DashboardRepository {
             .isFilter('branches.deleted_at', null)
             .order('branch_id')
             .range(0, 499);
-        return _normalizeRows(response);
+        final rows = _normalizeRows(response);
+        final productIds = rows
+            .map((row) => _nested(row['products'])?['id']?.toString())
+            .whereType<String>()
+            .toSet()
+            .toList();
+        if (productIds.isEmpty) return rows;
+        final uomRows = _normalizeRows(
+          await supabase
+              .from('product_uom_links')
+              .select(
+                'product_id, is_base_uom, is_purchase_uom, is_sale_uom, is_default_sale_uom, is_default_purchase_uom, units_of_measure!inner(id, name, abbreviation, conversion_factor, is_base_unit)',
+              )
+              .eq('business_id', user.businessId)
+              .inFilter('product_id', productIds)
+              .order('is_default_purchase_uom', ascending: false),
+        );
+        final uomsByProduct = _groupRows(uomRows, 'product_id');
+        return rows.map((row) {
+          final productId = _nested(row['products'])?['id']?.toString() ?? '';
+          final uoms = (uomsByProduct[productId] ?? const [])
+              .map((link) {
+                final unit = _nested(link['units_of_measure']);
+                if (unit == null) return null;
+                return <String, dynamic>{
+                  'id': unit['id'],
+                  'name': unit['name'],
+                  'abbreviation': unit['abbreviation'],
+                  'conversion_factor': unit['conversion_factor'],
+                  'is_base_unit': unit['is_base_unit'],
+                  'is_base_uom': link['is_base_uom'],
+                  'is_purchase_uom': link['is_purchase_uom'],
+                  'is_sale_uom': link['is_sale_uom'],
+                  'is_default_sale_uom': link['is_default_sale_uom'],
+                  'is_default_purchase_uom': link['is_default_purchase_uom'],
+                };
+              })
+              .whereType<Map<String, dynamic>>()
+              .toList();
+          return {...row, 'uom_options': uoms};
+        }).toList();
       case 'products':
         final response = await supabase
             .from('products')
             .select(
-              'id, name, sku, category, subcategory, brand_family, product_kind, unit, description, is_active, created_at, product_pricing(base_price, min_price, max_price)',
+              'id, name, sku, category, subcategory, brand_family, product_kind, unit, description, tracks_expiry, is_active',
             )
             .eq('business_id', user.businessId)
             .isFilter('deleted_at', null)
             .order('name')
             .range(0, 499);
-        return _normalizeRows(response);
+        final productRows = _normalizeRows(response);
+        final productIds = productRows
+            .map((row) => row['id'].toString())
+            .toList();
+        final barcodeRows = productIds.isEmpty
+            ? <Map<String, dynamic>>[]
+            : _normalizeRows(
+                await supabase
+                    .from('product_barcodes')
+                    .select('product_id, code')
+                    .eq('business_id', user.businessId)
+                    .eq('is_active', true)
+                    .inFilter('product_id', productIds),
+              );
+        final barcodesByProduct = _groupRows(barcodeRows, 'product_id');
+        final products = productRows.map((product) {
+          final codes =
+              (barcodesByProduct[product['id'].toString()] ?? const [])
+                  .map((row) => row['code']?.toString())
+                  .whereType<String>()
+                  .toList();
+          return {...product, 'barcodes': codes};
+        }).toList();
+        if (products.isEmpty) return products;
+
+        // Keep the catalog usable if an optional relationship is unavailable
+        // in a particular database deployment. The core product query above
+        // is the only query that can prevent the table from rendering.
+        List<Map<String, dynamic>> units = const [];
+        List<Map<String, dynamic>> branches = const [];
+        try {
+          units = _normalizeRows(
+            await supabase
+                .from('units_of_measure')
+                .select(
+                  'id, name, abbreviation, conversion_factor, is_base_unit',
+                )
+                .eq('business_id', user.businessId)
+                .eq('is_active', true)
+                .order('conversion_factor')
+                .order('name'),
+          );
+        } catch (_) {}
+        try {
+          branches = _normalizeRows(
+            await supabase
+                .from('branches')
+                .select('id, name')
+                .eq('business_id', user.businessId)
+                .eq('is_active', true)
+                .isFilter('deleted_at', null)
+                .order('name'),
+          );
+        } catch (_) {}
+        await vault.cacheValue(user, 'dashboard:product-options', [
+          {'units': units, 'branches': branches},
+        ]);
+
+        for (final entry in <({String key, String table, String columns})>[
+          (
+            key: 'product_pricing',
+            table: 'product_pricing',
+            columns: 'product_id, base_price, min_price, max_price',
+          ),
+          (
+            key: 'product_uom_links',
+            table: 'product_uom_links',
+            columns: 'product_id, uom_id, is_purchase_uom, is_sale_uom, is_base_uom, is_default_purchase_uom, is_default_sale_uom, units_of_measure(name, abbreviation, conversion_factor)',
+          ),
+          (
+            key: 'product_pricing_models',
+            table: 'product_pricing_models',
+            columns: 'product_id, branch_id, pricing_method, rounding_rule, status, product_price_points(quantity_in_uom, price, max_discount_amount)',
+          ),
+        ]) {
+          try {
+            final related = _normalizeRows(
+              await supabase
+                  .from(entry.table)
+                  .select(entry.columns)
+                  .eq('business_id', user.businessId)
+                  .inFilter('product_id', productIds),
+            );
+            final byProduct = _groupRows(related, 'product_id');
+            for (final product in products) {
+              final data = byProduct[product['id'].toString()] ?? const [];
+              product[entry.key] = entry.key == 'product_pricing'
+                  ? (data.isEmpty ? null : data.first)
+                  : data;
+            }
+          } catch (_) {
+            for (final product in products) {
+              product.putIfAbsent(
+                entry.key,
+                () => entry.key == 'product_pricing' ? null : const [],
+              );
+            }
+          }
+        }
+        if (user.role == RetivoxRole.employee) return products;
+        final branchIds = user.branches.map((branch) => branch.id).toList();
+        var stockQuery = supabase
+            .from('branch_stock')
+            .select(
+              'product_id, branch_id, quantity_on_hand, branches!inner(name)',
+            )
+            .eq('business_id', user.businessId)
+            .inFilter(
+              'product_id',
+              products.map((row) => row['id'].toString()).toList(),
+            );
+        if (branchIds.isNotEmpty)
+          stockQuery = stockQuery.inFilter('branch_id', branchIds);
+        List<Map<String, dynamic>> stockRows = const [];
+        try {
+          stockRows = _normalizeRows(await stockQuery.range(0, 1999));
+        } catch (_) {}
+        final stockByProduct = _groupRows(stockRows, 'product_id');
+        return products.map((product) {
+          final id = product['id']?.toString() ?? '';
+          return {
+            ...product,
+            'assigned_branch_stock': stockByProduct[id] ?? const [],
+          };
+        }).toList();
       case 'transactions':
         final branchIds = user.branches.map((branch) => branch.id).toList();
         if (branchIds.isEmpty) return const [];
@@ -3070,11 +5621,11 @@ class DashboardRepository {
           await supabase
               .from('supplier_deliveries')
               .select(
-                'id, to_branch_id, supplier_id, supplier_name, reference_code, status, requested_by, approved_by, acknowledged_by, created_at, delivered_at, branches!inner(name)',
+                'id, to_branch_id, supplier_id, supplier_name, reference_code, status, requested_by, approved_by, acknowledged_by, recorded_at, delivered_at, branches!inner(name)',
               )
               .eq('business_id', user.businessId)
               .inFilter('to_branch_id', branchIds)
-              .order('created_at', ascending: false)
+              .order('recorded_at', ascending: false)
               .range(0, 99),
         );
         if (deliveries.isEmpty) return deliveries;
@@ -3125,6 +5676,22 @@ class DashboardRepository {
             .order('name')
             .range(0, 199);
         return _normalizeRows(response);
+      case 'stock_movements':
+        if (user.role == RetivoxRole.employee) {
+          throw const DashboardRepositoryException(
+            'Stock movement history is only available to owners and administrators.',
+          );
+        }
+        final branchIds = user.branches
+            .where((branch) => branch.role == 'admin' || branch.role == 'owner')
+            .map((branch) => branch.id)
+            .toList();
+        if (branchIds.isEmpty) return const [];
+        final movements = await supabase.rpc(
+          'dashboard_stock_movement_history',
+          params: {'p_branch_ids': branchIds, 'p_limit': 100, 'p_offset': 0},
+        );
+        return _normalizeRows(movements);
       case 'employees':
         if (user.role == RetivoxRole.owner) {
           final response = await supabase
@@ -3224,6 +5791,9 @@ class DashboardRepository {
     return message.contains('failed host lookup') ||
         message.contains('socketexception') ||
         message.contains('clientexception') ||
+        message.contains('failed to fetch') ||
+        message.contains('auth session missing') ||
+        message.contains('network request failed') ||
         message.contains('network is unreachable') ||
         message.contains('connection refused') ||
         message.contains('connection reset') ||

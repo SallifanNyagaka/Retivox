@@ -17,7 +17,7 @@ import Toast from '../../../../components/ui/Toast'
 import LoadingOverlay from '../../../../components/ui/LoadingOverlay'
 import { applyDashboardTheme, getDashboardThemeKey } from '../../../../components/dashboard/DashboardThemeProvider'
 import { useToast } from '../../../../lib/hooks/useToast'
-import { changePassword, initiateSubscriptionStkPush, logoutFromSettings, submitOwnerLoginReview, submitSubscriptionPayment, updateBusinessProfile } from './actions'
+import { changePassword, initiateSubscriptionStkPush, initiateSubscriptionPesapalCheckout, logoutFromSettings, requestPesapalAutoRenewCancellation, confirmPesapalAutoRenewCancellation, submitOwnerLoginReview, submitSubscriptionPayment, updateBusinessProfile } from './actions'
 import type { BusinessSettingsRow, FormState, LoginReviewRow, SubscriptionPaymentRequestRow, SubscriptionPlanOption, SubscriptionRow, UserProfileRow } from './types'
 
 /**
@@ -87,6 +87,7 @@ function formatStatusLabel(status: string) {
 
 function getPaymentMethodLabel(method: SubscriptionPaymentRequestRow['payment_method']) {
   if (method === 'mpesa_stk') return 'M-Pesa STK Push'
+  if (method === 'pesapal') return 'Pesapal hosted checkout'
   if (method === 'mpesa_manual') return 'M-Pesa'
   if (method === 'bank_transfer') return 'Bank transfer'
   if (method === 'cash_deposit') return 'Cash deposit'
@@ -645,11 +646,13 @@ function SubscriptionSection({
   paymentRequests: SubscriptionPaymentRequestRow[]
 }) {
   const router = useRouter()
-  const [paymentMethod, setPaymentMethod] = useState<SubscriptionPaymentRequestRow['payment_method']>('mpesa_stk')
-  const [billingInterval, setBillingInterval] = useState<'monthly' | 'yearly'>(subscription?.next_billing_interval ?? subscription?.billing_interval ?? 'monthly')
+  const [paymentMethod, setPaymentMethod] = useState<SubscriptionPaymentRequestRow['payment_method'] | 'pesapal'>('mpesa_stk')
+  const [billingInterval, setBillingInterval] = useState<'monthly' | 'yearly' | 'lifetime'>(subscription?.billing_interval === 'lifetime' ? 'lifetime' : subscription?.next_billing_interval ?? subscription?.billing_interval ?? 'monthly')
   const activePlan = subscription?.plan ?? business.subscription_plan
   const [selectedPlanKey, setSelectedPlanKey] = useState(subscription?.next_plan_key ?? (activePlan === 'trial' ? '' : activePlan))
   const [referenceCode, setReferenceCode] = useState('')
+  const [promotionCode, setPromotionCode] = useState('')
+  const [autoRenew, setAutoRenew] = useState(false)
   const [payerPhone, setPayerPhone] = useState('')
   const [stkPhone, setStkPhone] = useState('')
   const [billingClock, setBillingClock] = useState(() => new Date(billingAsOf).getTime())
@@ -662,8 +665,10 @@ function SubscriptionSection({
     error: null,
     success: false,
   })
+  const [pesapalState, pesapalAction, isPesapalPending] = useActionState<FormState, FormData>(initiateSubscriptionPesapalCheckout, { error: null, success: false })
   const previousPending = useRef(isPending)
   const previousStkPending = useRef(isStkPending)
+  const previousPesapalPending = useRef(isPesapalPending)
   const activeStatus = subscription?.status ?? business.subscription_status
   const now = billingClock
   const scheduledPeriodStartTime = subscription?.next_period_start ? new Date(subscription.next_period_start).getTime() : null
@@ -672,17 +677,22 @@ function SubscriptionSection({
   const displayBillingInterval = verifiedPlanIsDue ? subscription?.next_billing_interval ?? 'monthly' : subscription?.billing_interval ?? 'monthly'
   const selectedPlan = plans.find((plan) => plan.plan_key === selectedPlanKey) ?? null
   const selectedAmount = selectedPlan
-    ? billingInterval === 'yearly'
-      ? Math.round(Number(selectedPlan.monthly_amount) * 12 * (1 - Number(selectedPlan.annual_discount_percent) / 100) * 100) / 100
-      : Number(selectedPlan.monthly_amount)
+    ? billingInterval === 'lifetime'
+      ? Number(selectedPlan.lifetime_amount ?? 0)
+      : billingInterval === 'yearly'
+        ? Number(selectedPlan.yearly_amount)
+        : Number(selectedPlan.monthly_amount)
     : 0
   const periodEndTime = subscription?.current_period_end ? new Date(subscription.current_period_end).getTime() : null
-  const displayPeriodEndTime = verifiedPlanIsDue
-    ? now + (displayBillingInterval === 'yearly' ? 365 : 30) * 86400000
+  const displayPeriodEndTime = subscription?.license_type === 'lifetime'
+    ? null
+    : verifiedPlanIsDue
+    ? now + (displayBillingInterval === 'lifetime' ? 0 : displayBillingInterval === 'yearly' ? 365 : 30) * 86400000
     : periodEndTime
   const daysUntilRenewal = displayPeriodEndTime === null ? null : Math.max(0, Math.ceil((displayPeriodEndTime - now) / 86400000))
   const isPeriodOver = periodEndTime !== null && periodEndTime <= now && !verifiedPlanIsDue
-  const graceEndsAt = periodEndTime === null ? null : periodEndTime + 3 * 86400000
+  const hasRenewalGrace = activePlan !== 'trial' && !subscription?.cancelled_at
+  const graceEndsAt = periodEndTime === null || !hasRenewalGrace ? null : periodEndTime + 7 * 86400000
   const graceDaysRemaining = graceEndsAt === null ? 0 : Math.max(0, Math.ceil((graceEndsAt - now) / 86400000))
   const pendingPlan = subscription?.next_plan_key ? plans.find((plan) => plan.plan_key === subscription.next_plan_key) : null
 
@@ -696,10 +706,11 @@ function SubscriptionSection({
 
     if (previousPending.current && !isPending) {
       if (state.success) {
-        toast.success('Payment reference submitted for verification')
+        toast.success(state.message ?? 'Payment reference submitted for verification')
         refreshTimer = setTimeout(() => {
           setReferenceCode('')
           setPayerPhone('')
+          setPromotionCode('')
           router.refresh()
         }, 0)
       } else if (state.error) {
@@ -738,6 +749,20 @@ function SubscriptionSection({
     }
   }, [isStkPending, router, stkState.error, stkState.message, stkState.success, toast])
 
+  useEffect(() => {
+    if (previousPesapalPending.current && !isPesapalPending) {
+      if (pesapalState.success && pesapalState.checkoutUrl) {
+        window.location.assign(pesapalState.checkoutUrl)
+      } else if (pesapalState.success) {
+        toast.success(pesapalState.message ?? 'Subscription updated successfully')
+        router.refresh()
+      } else if (pesapalState.error) {
+        toast.error(pesapalState.error)
+      }
+    }
+    previousPesapalPending.current = isPesapalPending
+  }, [isPesapalPending, pesapalState.checkoutUrl, pesapalState.error, pesapalState.message, pesapalState.success, router, toast])
+
   const onSubmitPayment = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
 
@@ -747,6 +772,7 @@ function SubscriptionSection({
     formData.set('paymentMethod', paymentMethod)
     formData.set('referenceCode', referenceCode)
     formData.set('payerPhone', payerPhone)
+    formData.set('promotionCode', promotionCode)
 
     startTransition(() => {
       action(formData)
@@ -760,15 +786,27 @@ function SubscriptionSection({
     formData.set('phone', stkPhone)
     formData.set('planKey', selectedPlanKey)
     formData.set('billingInterval', billingInterval)
+    formData.set('promotionCode', promotionCode)
 
     startTransition(() => {
       stkAction(formData)
     })
   }
 
+  const onSubmitPesapal = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const formData = new FormData()
+    formData.set('planKey', selectedPlanKey)
+    formData.set('billingInterval', billingInterval)
+    formData.set('phone', stkPhone || payerPhone)
+    formData.set('promotionCode', promotionCode)
+    formData.set('autoRenew', String(autoRenew))
+    startTransition(() => pesapalAction(formData))
+  }
+
   return (
     <>
-    {(isPending || isStkPending) && <LoadingOverlay message={isStkPending ? 'Sending M-Pesa prompt...' : 'Submitting payment reference...'} />}
+    {(isPending || isStkPending || isPesapalPending) && <LoadingOverlay message={isStkPending ? 'Sending M-Pesa prompt...' : isPesapalPending ? 'Preparing secure Pesapal checkout...' : 'Submitting payment reference...'} />}
     {toastState && (
       <Toast
         message={toastState.message}
@@ -786,11 +824,13 @@ function SubscriptionSection({
           </p>
           <p style={{ fontSize: 13, color: 'var(--color-text-muted)', margin: '6px 0 0' }}>
               {displayPlanKey === 'trial'
-              ? 'Free access for 30 days from registration.'
+              ? `Free access for ${plans.find((plan) => plan.plan_key === 'trial')?.trial_days ?? 30} days from registration.`
                 : `${subscription?.branch_count ?? 0} branches · ${displayBillingInterval} billing`}
           </p>
           <p style={{ fontSize: 13, color: 'var(--color-text-muted)', margin: '4px 0 0' }}>
-            {verifiedPlanIsDue
+            {subscription?.license_type === 'lifetime'
+              ? 'Lifetime license · no recurring renewal'
+              : verifiedPlanIsDue
               ? 'A verified payment is ready; access resumes with this paid plan.'
               : daysUntilRenewal === null
               ? 'Renewal date not available'
@@ -819,7 +859,7 @@ function SubscriptionSection({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p style={{ fontSize: 14, fontWeight: 750, color: 'var(--color-text-primary)', margin: 0 }}>Choose a plan</p>
           <div className="flex gap-2" role="group" aria-label="Billing period">
-            {(['monthly', 'yearly'] as const).map((interval) => (
+            {(['monthly', 'yearly', 'lifetime'] as const).map((interval) => (
               <button
                 key={interval}
                 type="button"
@@ -828,7 +868,7 @@ function SubscriptionSection({
                 onClick={() => setBillingInterval(interval)}
                 style={{ borderRadius: 8, padding: '8px 12px' }}
               >
-                {interval === 'monthly' ? 'Monthly' : 'Yearly'}
+                {interval === 'monthly' ? 'Monthly' : interval === 'yearly' ? 'Yearly' : 'Lifetime'}
               </button>
             ))}
           </div>
@@ -838,15 +878,15 @@ function SubscriptionSection({
           {plans.map((plan) => {
             const isCurrent = plan.plan_key === activePlan
             const isSelected = plan.plan_key === selectedPlanKey
-            const annualAmount = Math.round(Number(plan.monthly_amount) * 12 * (1 - Number(plan.annual_discount_percent) / 100) * 100) / 100
-            const price = billingInterval === 'yearly' ? annualAmount : Number(plan.monthly_amount)
-            const unit = billingInterval === 'yearly' ? '/year' : '/month'
+            const intervalAvailable = billingInterval === 'monthly' ? plan.monthly_enabled : billingInterval === 'yearly' ? plan.yearly_enabled : plan.lifetime_enabled
+            const price = billingInterval === 'lifetime' ? Number(plan.lifetime_amount ?? 0) : billingInterval === 'yearly' ? Number(plan.yearly_amount) : Number(plan.monthly_amount)
+            const unit = billingInterval === 'yearly' ? '/year' : billingInterval === 'lifetime' ? ' once' : '/month'
 
             return (
               <button
                 key={plan.id}
                 type="button"
-                disabled={plan.plan_key === 'trial' && !isCurrent}
+                disabled={!intervalAvailable || (plan.plan_key === 'trial' && !isCurrent)}
                 aria-pressed={isSelected}
                 onClick={() => {
                   if (plan.plan_key !== 'trial') setSelectedPlanKey(plan.plan_key)
@@ -890,13 +930,14 @@ function SubscriptionSection({
                 {selectedPlan.name} · {billingInterval} · {formatMoney(selectedAmount, selectedPlan.currency)}
               </p>
               <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
-                {activePlan === 'trial' && !isPeriodOver ? 'Starts after your free month' : isPeriodOver ? 'Starts immediately after payment is verified' : 'Starts at your next renewal after payment is verified'}
+                {billingInterval === 'lifetime' ? 'Permanent license after payment verification' : activePlan === 'trial' && !isPeriodOver ? 'Starts after your free trial' : isPeriodOver ? 'Starts immediately after payment is verified' : 'Starts at your next renewal after payment is verified'}
               </span>
             </div>
 
             <div className="flex flex-wrap gap-2" style={{ marginTop: 14 }} role="group" aria-label="Subscription payment method">
               {([
                 ['mpesa_stk', 'M-Pesa prompt'],
+                ['pesapal', 'Card / bank (Pesapal)'],
                 ['mpesa_manual', 'M-Pesa reference'],
                 ['bank_transfer', 'Bank transfer'],
                 ['cash_deposit', 'Cash deposit'],
@@ -921,13 +962,41 @@ function SubscriptionSection({
                   M-Pesa phone number
                   <input value={stkPhone} onChange={(event) => setStkPhone(event.target.value)} placeholder="07XXXXXXXX" required style={inputStyle} />
                 </label>
-                <button type="submit" className="btn-success" disabled={isStkPending || !Number.isInteger(selectedAmount)} style={{ borderRadius: 8, padding: '11px 18px' }}>
+                <label style={{ fontSize: 13 }}>
+                  Promotion code
+                  <input value={promotionCode} onChange={(event) => setPromotionCode(event.target.value.toUpperCase())} placeholder="Optional" style={inputStyle} />
+                </label>
+                <button type="submit" className="btn-success" disabled={isStkPending || billingInterval === 'lifetime' || !Number.isInteger(selectedAmount)} style={{ borderRadius: 8, padding: '11px 18px' }}>
                   {isStkPending ? 'Sending prompt...' : `Pay ${formatMoney(selectedAmount, selectedPlan.currency)}`}
                 </button>
                 {stkState.error && <p style={{ margin: 0, fontSize: 13, color: 'var(--color-danger)' }}>{stkState.error}</p>}
                 {!Number.isInteger(selectedAmount) && <p style={{ margin: 0, fontSize: 12, color: 'var(--color-text-muted)' }}>This amount is not a whole number; select a manual payment method.</p>}
                 <p style={{ gridColumn: '1 / -1', margin: 0, fontSize: 12, color: 'var(--color-text-muted)' }}>
                   Complete the prompt on your phone. Retivox never asks for or stores your M-Pesa PIN.
+                </p>
+              </form>
+            ) : paymentMethod === 'pesapal' ? (
+              <form onSubmit={onSubmitPesapal} className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end" style={{ marginTop: 14 }}>
+                <label style={{ fontSize: 13 }}>
+                  Customer phone (optional when your account email is available)
+                  <input value={stkPhone || payerPhone} onChange={(event) => setStkPhone(event.target.value)} placeholder="07XXXXXXXX" style={inputStyle} />
+                </label>
+                <label style={{ fontSize: 13 }}>
+                  Promotion code
+                  <input value={promotionCode} onChange={(event) => setPromotionCode(event.target.value.toUpperCase())} placeholder="Optional" style={inputStyle} />
+                </label>
+                {billingInterval !== 'lifetime' && (
+                  <label className="flex items-start gap-2" style={{ gridColumn: '1 / -1', fontSize: 13, color: 'var(--color-text-primary)' }}>
+                    <input type="checkbox" checked={autoRenew} onChange={(event) => setAutoRenew(event.target.checked)} style={{ marginTop: 2 }} />
+                    <span><strong>Request automatic renewal</strong><span style={{ display: 'block', marginTop: 3, color: 'var(--color-text-muted)', fontSize: 12, lineHeight: 1.5 }}>Optional. Only eligible Visa or Mastercard cards support this. You must approve the recurring authorization on Pesapal. Renewals are scheduled before the next period ends and require full price without a promotion or subscription credit.</span></span>
+                  </label>
+                )}
+                <button type="submit" className="btn-success" disabled={isPesapalPending || selectedAmount <= 0} style={{ borderRadius: 8, padding: '11px 18px' }}>
+                  {isPesapalPending ? 'Preparing checkout...' : `Pay ${formatMoney(selectedAmount, selectedPlan.currency)}`}
+                </button>
+                {pesapalState.error && <p role="alert" style={{ gridColumn: '1 / -1', margin: 0, fontSize: 13, color: 'var(--color-danger)' }}>{pesapalState.error}</p>}
+                <p style={{ gridColumn: '1 / -1', margin: 0, fontSize: 12, color: 'var(--color-text-muted)' }}>
+                  You will complete payment on Pesapal&apos;s hosted page. Retivox verifies the provider status before activating the plan.
                 </p>
               </form>
             ) : (
@@ -939,6 +1008,10 @@ function SubscriptionSection({
                 <label style={{ fontSize: 13 }}>
                   Payer phone or note
                   <input value={payerPhone} onChange={(event) => setPayerPhone(event.target.value)} placeholder="Optional" style={inputStyle} />
+                </label>
+                <label style={{ fontSize: 13 }}>
+                  Promotion code
+                  <input value={promotionCode} onChange={(event) => setPromotionCode(event.target.value.toUpperCase())} placeholder="Optional" style={inputStyle} />
                 </label>
                 <button type="submit" className="btn-primary" disabled={isPending} style={{ borderRadius: 8, padding: '11px 16px' }}>
                   {isPending ? 'Submitting...' : 'Submit for review'}
@@ -952,6 +1025,10 @@ function SubscriptionSection({
           </div>
         )}
       </div>
+
+      {subscription && subscription.license_type !== 'lifetime' && subscription.auto_renew_status !== 'disabled' && (
+        <PesapalAutoRenewPanel status={subscription.auto_renew_status} />
+      )}
 
       <div style={{ borderTop: '1px solid var(--color-border)', marginTop: 20, paddingTop: 18 }}>
         <p style={{ fontSize: 14, fontWeight: 700, color: 'var(--color-text-primary)', marginTop: 0 }}>
@@ -1017,6 +1094,41 @@ function SubscriptionSection({
       </div>
     </Card>
     </>
+  )
+}
+
+function PesapalAutoRenewPanel({ status }: { status: SubscriptionRow['auto_renew_status'] }) {
+  const router = useRouter()
+  const [cancelState, cancelAction, cancelPending] = useActionState<FormState, FormData>(requestPesapalAutoRenewCancellation, { error: null, success: false })
+  const [confirmState, confirmAction, confirmPending] = useActionState<FormState, FormData>(confirmPesapalAutoRenewCancellation, { error: null, success: false })
+
+  useEffect(() => {
+    if (cancelState.success || confirmState.success) router.refresh()
+  }, [cancelState.success, confirmState.success, router])
+
+  const messages: Record<SubscriptionRow['auto_renew_status'], string> = {
+    disabled: 'Automatic renewal is off.',
+    pending_enrollment: 'Waiting for Pesapal to verify the initial card payment and recurring authorization. No recurring charge is active yet.',
+    active: 'Pesapal reports an active recurring authorization for eligible card payments.',
+    cancel_requested: 'After canceling the schedule in Pesapal, confirm below. Retivox cannot cancel the provider schedule directly.',
+    cancelled: 'Automatic renewal is cancelled in Retivox. Your paid access remains active until its end date.',
+    payment_failed: 'The latest automatic renewal failed. Use a manual renewal method to keep service active.',
+    reauthorization_required: 'The schedule needs renewed authorization, commonly after a price change. Cancel the old schedule in Pesapal before enrolling again.',
+  }
+
+  return (
+    <div style={{ border: '1px solid var(--color-border)', borderRadius: 8, padding: 14, marginTop: 16 }}>
+      <p style={{ margin: 0, fontSize: 13, fontWeight: 750, color: 'var(--color-text-primary)' }}>Pesapal auto-renewal · {formatStatusLabel(status)}</p>
+      <p style={{ margin: '5px 0 0', fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.5 }}>{messages[status]}</p>
+      {(status === 'active' || status === 'payment_failed' || status === 'reauthorization_required' || status === 'cancel_requested') && (
+        <div className="flex flex-wrap gap-2" style={{ marginTop: 10 }}>
+          {status !== 'cancel_requested' && <form action={cancelAction}><button className="btn-outline" type="submit" disabled={cancelPending} style={{ borderRadius: 7, padding: '8px 12px' }}>{cancelPending ? 'Preparing...' : 'Start cancellation'}</button></form>}
+          {status === 'cancel_requested' && <form action={confirmAction}><button className="btn-primary" type="submit" disabled={confirmPending} style={{ borderRadius: 7, padding: '8px 12px' }}>{confirmPending ? 'Confirming...' : 'I canceled it in Pesapal'}</button></form>}
+        </div>
+      )}
+      {(cancelState.error || confirmState.error) && <p role="alert" style={{ margin: '8px 0 0', color: 'var(--color-danger)', fontSize: 12 }}>{cancelState.error || confirmState.error}</p>}
+      {(cancelState.message || confirmState.message) && <p role="status" style={{ margin: '8px 0 0', color: 'var(--color-success)', fontSize: 12 }}>{cancelState.message || confirmState.message}</p>}
+    </div>
   )
 }
 

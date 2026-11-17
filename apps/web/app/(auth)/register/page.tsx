@@ -376,6 +376,9 @@ export default function RegisterPage() {
               onBlur={e => { e.currentTarget.style.borderColor = 'var(--color-border)'; e.currentTarget.style.boxShadow = 'none' }}
             />
           </div>
+          <p style={{ margin: 0, fontSize: 12, lineHeight: 1.5, color: 'var(--color-text-muted)' }}>
+            Use an email that is not assigned to another Retivox account, regardless of its role. You can enter a different email here, or ask an authorized owner/admin to close the existing account before reusing its email.
+          </p>
         </div>
 
         {/* Phone */}

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { createClient as createSupabaseClient } from '@supabase/supabase-js'
 import { NextResponse } from 'next/server'
 import { z } from 'zod'
 import {
@@ -8,6 +9,7 @@ import {
   type DarajaStkPushResponse,
 } from '../../../../lib/payments/daraja'
 import { createServiceRoleClient } from '../../../../lib/supabase/admin'
+import { effectiveSubscriptionStatus } from '../../../../lib/subscriptions/status'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -15,8 +17,9 @@ export const dynamic = 'force-dynamic'
 const stkSchema = z.object({
   action: z.literal('stk'),
   phone: z.string().trim().min(9).max(20),
-  planKey: z.enum(['starter', 'growth', 'enterprise']),
+  planKey: z.string().regex(/^[a-z][a-z0-9_]{1,39}$/),
   billingInterval: z.enum(['monthly', 'yearly']),
+  promotionCode: z.string().trim().max(40).optional(),
 })
 
 type OwnerProfile = {
@@ -41,15 +44,15 @@ export async function GET(request: Request) {
       .eq('id', businessId)
       .maybeSingle(),
     supabase.from('subscriptions')
-      .select('id, plan, status, branch_count, monthly_amount, currency, current_period_end, billing_interval, next_plan_key, next_billing_interval, next_period_start')
+      .select('id, plan, status, cancelled_at, branch_count, monthly_amount, currency, current_period_end, billing_interval, license_type, next_plan_key, next_billing_interval, next_period_start')
       .eq('business_id', businessId)
       .maybeSingle(),
     supabase.from('platform_subscription_plans')
-      .select('id, plan_key, name, description, monthly_amount, annual_discount_percent, currency, branch_limit, sort_order')
+      .select('id, plan_key, name, description, monthly_amount, annual_discount_percent, yearly_amount, lifetime_amount, monthly_enabled, yearly_enabled, lifetime_enabled, trial_days, features, currency, branch_limit, sort_order')
       .eq('is_active', true)
       .order('sort_order', { ascending: true }),
     supabase.from('subscription_payment_requests')
-      .select('id, amount, currency, plan_key, billing_interval, payment_method, reference_code, payer_phone, status, review_note, submitted_at, reviewed_at, provider_checkout_request_id, provider_receipt_number, provider_paid_amount, provider_phone_number, provider_result_description')
+      .select('id, amount, currency, plan_key, billing_interval, purchase_kind, credit_applied, payment_method, reference_code, payer_phone, status, review_note, submitted_at, reviewed_at, provider_checkout_request_id, provider_receipt_number, provider_paid_amount, provider_phone_number, provider_result_description')
       .eq('business_id', businessId)
       .order('submitted_at', { ascending: false })
       .limit(10),
@@ -57,11 +60,25 @@ export async function GET(request: Request) {
   const error = businessResult.error ?? subscriptionResult.error ?? plansResult.error ?? requestsResult.error
   if (error) return json({ error: 'Unable to load subscription details.' }, 500)
 
+  const effectiveStatus = effectiveSubscriptionStatus(
+    subscriptionResult.data?.cancelled_at ? 'cancelled' : subscriptionResult.data?.plan === 'trial' ? 'trial' : subscriptionResult.data?.status ?? businessResult.data?.subscription_status,
+    subscriptionResult.data?.current_period_end,
+    Date.now(),
+    { isTrial: subscriptionResult.data?.plan === 'trial', cancelledAt: subscriptionResult.data?.cancelled_at },
+  )
+
   return json({
     success: true,
     data: {
-      business: businessResult.data,
-      subscription: subscriptionResult.data,
+      business: businessResult.data
+        ? { ...businessResult.data, subscription_status: effectiveStatus }
+        : null,
+      subscription: subscriptionResult.data
+        ? {
+            ...subscriptionResult.data,
+            status: effectiveStatus,
+          }
+        : null,
       plans: plansResult.data ?? [],
       paymentRequests: requestsResult.data ?? [],
     },
@@ -72,7 +89,7 @@ export async function POST(request: Request) {
   const authorized = await authorizeOwner(request)
   if ('response' in authorized) return authorized.response
 
-  const { supabase, profile } = authorized
+  const { supabase, profile, token } = authorized
   if (!profile.business_id) return json({ error: 'Business context is missing.' }, 403)
 
   const body = await readBody(request)
@@ -89,53 +106,6 @@ export async function POST(request: Request) {
   }
 
   const businessId = profile.business_id
-  const [subscriptionResult, planResult] = await Promise.all([
-    supabase.from('subscriptions').select('id').eq('business_id', businessId).maybeSingle(),
-    supabase.from('platform_subscription_plans')
-      .select('plan_key, monthly_amount, annual_discount_percent, currency')
-      .eq('plan_key', parsed.data.planKey)
-      .eq('is_active', true)
-      .maybeSingle(),
-  ])
-  if (subscriptionResult.error || planResult.error || !planResult.data) {
-    return json({ error: 'The selected subscription plan is unavailable.' }, 400)
-  }
-
-  let subscription = subscriptionResult.data
-  if (!subscription) {
-    const now = new Date()
-    const { data, error } = await supabase.from('subscriptions').insert({
-      business_id: businessId,
-      plan: 'trial',
-      status: 'active',
-      branch_count: 1,
-      monthly_amount: 0,
-      currency: planResult.data.currency,
-      current_period_start: now.toISOString(),
-      current_period_end: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-    }).select('id').single()
-    if (error?.code === '23505') {
-      const { data: existing, error: lookupError } = await supabase.from('subscriptions')
-        .select('id').eq('business_id', businessId).maybeSingle()
-      if (lookupError || !existing) {
-        return json({ error: 'Unable to prepare the subscription payment.' }, 500)
-      }
-      subscription = existing
-    } else {
-      if (error || !data) return json({ error: 'Unable to prepare the subscription payment.' }, 500)
-      subscription = data
-    }
-  }
-
-  const plan = planResult.data
-  const monthlyAmount = Number(plan.monthly_amount)
-  const amount = parsed.data.billingInterval === 'yearly'
-    ? Math.round(monthlyAmount * 12 * (1 - Number(plan.annual_discount_percent) / 100) * 100) / 100
-    : monthlyAmount
-  if (!Number.isInteger(amount) || amount <= 0) {
-    return json({ error: 'M-Pesa STK Push requires a whole-number amount. Use a manual payment for this plan.' }, 400)
-  }
-
   let prompt: Awaited<ReturnType<typeof getDarajaPromptConfiguration>>
   try {
     prompt = await getDarajaPromptConfiguration()
@@ -145,28 +115,58 @@ export async function POST(request: Request) {
     }, 503)
   }
   const referenceCode = `STK-${randomUUID()}`
+  const userClient = createSupabaseClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!, {
+    global: { headers: { Authorization: `Bearer ${token}` } },
+    auth: { autoRefreshToken: false, persistSession: false },
+  })
+  const { data: paymentRequestId, error: pricingError } = await userClient
+    .rpc('owner_submit_subscription_payment_v2', {
+      p_plan_key: parsed.data.planKey,
+      p_billing_interval: parsed.data.billingInterval,
+      p_reference_code: referenceCode,
+      p_payment_method: 'mpesa_stk',
+      p_payer_phone: phone,
+    })
+  if (pricingError) return json({ error: pricingError.message }, 400)
+  if (!paymentRequestId) return json({ success: true, message: 'Your eligible subscription credit covered this change. The license is active.' })
+
+  if (parsed.data.promotionCode) {
+    const { error: promotionError } = await userClient.rpc('owner_apply_subscription_promotion', {
+      p_payment_request_id: paymentRequestId,
+      p_code: parsed.data.promotionCode,
+    })
+    if (promotionError) {
+      await supabase.from('subscription_payment_requests').update({
+        status: 'rejected',
+        review_note: `Promotion rejected before payment: ${promotionError.message}`.slice(0, 240),
+        provider_result_description: 'Payment was not verified because the promotion code could not be applied.',
+        reviewed_at: new Date().toISOString(),
+      }).eq('id', paymentRequestId).eq('business_id', businessId).eq('status', 'pending')
+      return json({ error: promotionError.message }, 400)
+    }
+  }
+
   const { data: payment, error: paymentError } = await supabase
     .from('subscription_payment_requests')
-    .insert({
-      business_id: businessId,
-      subscription_id: subscription.id,
-      submitted_by: profile.id,
-      amount,
-      currency: String(plan.currency ?? 'KES'),
-      payment_method: 'mpesa_stk',
-      plan_key: parsed.data.planKey,
-      billing_interval: parsed.data.billingInterval,
-      reference_code: referenceCode,
-      payer_phone: phone,
-      status: 'pending',
-      provider: 'daraja',
-      plan_monthly_amount: monthlyAmount,
-      provider_result_description: `STK Push queued for ${parsed.data.planKey} ${parsed.data.billingInterval} plan; PayBill ${prompt.shortcode}, account ${prompt.accountReference}`,
-    })
-    .select('id')
+    .select('id,amount,currency,status')
+    .eq('id', paymentRequestId)
+    .eq('business_id', businessId)
     .single()
   if (paymentError || !payment) {
     return json({ error: 'Unable to create the payment request.' }, 500)
+  }
+  if (payment.status === 'verified' || Number(payment.amount) <= 0) {
+    return json({ success: true, message: 'Your promotion or subscription credit covered the full amount. The license is active.' })
+  }
+  const amount = Number(payment.amount)
+  if (!Number.isInteger(amount) || amount <= 0) {
+    await supabase.from('subscription_payment_requests').update({
+      status: 'rejected',
+      provider_result_description: 'M-Pesa STK requires a whole-number amount; no prompt was sent.',
+      review_note: 'Use a manual payment method for this price.',
+      reviewed_at: new Date().toISOString(),
+    }).eq('id', payment.id)
+    return json({ error: 'M-Pesa STK Push requires a whole-number amount. Use a manual payment method for this plan.' }, 400)
   }
 
   let providerResponse: DarajaStkPushResponse
@@ -263,7 +263,7 @@ async function authorizeOwner(request: Request) {
   ) {
     return { response: json({ error: 'Only an active business owner can manage subscriptions.' }, 403) }
   }
-  return { supabase, profile }
+  return { supabase, profile, token }
 }
 
 async function readBody(request: Request): Promise<unknown | null> {

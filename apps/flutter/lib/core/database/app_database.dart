@@ -221,6 +221,23 @@ class AppDatabase extends GeneratedDatabase {
     variables: [Variable.withString(accountId)],
   ).get();
 
+  Future<List<QueryRow>> cashSalesNeedingLegacyRetry(String accountId) =>
+      customSelect(
+        '''
+        SELECT local_id, encrypted_payload, error_message
+        FROM offline_sales
+        WHERE account_id = ?
+          AND status = 'needs_correction'
+          AND (
+            lower(COALESCE(error_message, '')) LIKE '%invalid input syntax for type date%'
+            OR lower(COALESCE(error_message, '')) LIKE '%cash deposit/reference code%'
+            OR lower(COALESCE(error_message, '')) LIKE '%transaction_id%ambiguous%'
+          )
+        ORDER BY recorded_at ASC
+        ''',
+        variables: [Variable.withString(accountId)],
+      ).get();
+
   Future<List<QueryRow>> salesForAccount(String accountId) => customSelect(
     '''
         SELECT local_id, branch_id, status, encrypted_payload, server_id, error_message, recorded_at

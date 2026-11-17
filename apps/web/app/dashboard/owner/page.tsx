@@ -22,6 +22,7 @@ import TimeGreeting from '../../../components/dashboard/TimeGreeting'
 import { Card, CardHeader } from '../../../components/ui/Card'
 import { Badge } from '../../../components/ui/Badge'
 import { getOperationalAlerts } from '../../../lib/dashboard/operationalAlerts'
+import { effectiveSubscriptionStatus } from '../../../lib/subscriptions/status'
 
 // ── Types ──
 type Branch = {
@@ -384,27 +385,48 @@ export default async function OwnerDashboardPage() {
   const supabase = await createClient()
 
   // Fetch all data in parallel for performance
-  const [businessResponse, metrics, branches, stockAlerts, approvals, transactions, operationalAlerts] = await Promise.all([
-    supabase.from('businesses').select('currency').eq('id', businessId).single(),
+  const [businessResponse, metrics, branches, stockAlerts, approvals, transactions, operationalAlerts, receivableResponse] = await Promise.all([
+    supabase.from('businesses').select('currency, subscription_status, subscriptions(plan, status, cancelled_at, current_period_end)').eq('id', businessId).single(),
     getOwnerMetrics(businessId),
     getBranchSummaries(businessId),
     getStockAlerts(businessId),
     getPendingApprovals(businessId),
     getRecentTransactions(businessId),
     getOperationalAlerts(profile.id, businessId, { minimumRole: 'admin', baseHref: '/dashboard/owner', limit: 8 }),
+    supabase.from('receivable_account_balances').select('balance_due').eq('business_id', businessId).gt('balance_due', 0),
   ])
 
   if (businessResponse.error) {
     throw businessResponse.error
   }
 
-  const business = businessResponse.data as { currency: string } | null
+  const business = businessResponse.data as {
+    currency: string
+    subscription_status: string
+    subscriptions: { plan: string; status: string; cancelled_at: string | null; current_period_end: string | null } | { plan: string; status: string; cancelled_at: string | null; current_period_end: string | null }[] | null
+  } | null
 
   if (!business?.currency) {
     throw new Error('Business currency missing')
   }
 
   const currency = business.currency
+  const subscription = Array.isArray(business.subscriptions) ? business.subscriptions[0] ?? null : business.subscriptions
+  const subscriptionStatus = effectiveSubscriptionStatus(
+    subscription?.cancelled_at ? 'cancelled' : subscription?.plan === 'trial' ? 'trial' : subscription?.status ?? business.subscription_status,
+    subscription?.current_period_end,
+    Date.now(),
+    { isTrial: subscription?.plan === 'trial', cancelledAt: subscription?.cancelled_at },
+  )
+  const periodEnd = subscription?.current_period_end ? new Date(subscription.current_period_end).getTime() : null
+  const daysToPeriodEnd = periodEnd === null ? null : Math.ceil((periodEnd - Date.now()) / 86400000)
+  const graceDaysRemaining = periodEnd === null || subscription?.plan === 'trial' || subscription?.cancelled_at
+    ? 0
+    : Math.max(0, Math.ceil((periodEnd + 7 * 86400000 - Date.now()) / 86400000))
+  const showSubscriptionNotice = subscriptionStatus === 'past_due'
+    || subscriptionStatus === 'expired'
+    || (['active', 'trial'].includes(subscriptionStatus) && [7, 3, 2, 1].includes(daysToPeriodEnd ?? -1))
+  const totalLent = (receivableResponse.data ?? []).reduce((sum, account) => sum + Number(account.balance_due ?? 0), 0)
 
   const typedBranches = branches as Branch[]
   const typedAlerts = stockAlerts as StockAlert[]
@@ -432,8 +454,34 @@ export default async function OwnerDashboardPage() {
         </p>
       </div>
 
+      {showSubscriptionNotice ? (
+        <Card padding="md" style={{ borderColor: subscriptionStatus === 'expired' ? 'var(--color-danger)' : '#d99a21' }}>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p style={{ margin: 0, fontWeight: 850, color: subscriptionStatus === 'expired' ? 'var(--color-danger)' : 'var(--color-text-primary)' }}>
+                {subscriptionStatus === 'expired'
+                  ? 'Subscription expired'
+                  : subscriptionStatus === 'past_due'
+                    ? `Subscription payment is due · ${graceDaysRemaining} grace days remaining`
+                    : subscriptionStatus === 'trial'
+                      ? `Free trial ends in ${daysToPeriodEnd} days`
+                    : `Subscription renewal due in ${daysToPeriodEnd} days`}
+              </p>
+              <p style={{ margin: '4px 0 0', fontSize: 13, color: 'var(--color-text-muted)' }}>
+                {subscriptionStatus === 'expired'
+                  ? 'Business changes are paused. Renew your plan to restore them.'
+                  : 'Review your plan and arrange renewal in subscription settings.'}
+              </p>
+            </div>
+            <Link href="/dashboard/owner/settings" className="btn-outline" style={{ padding: '8px 12px', borderRadius: 8, whiteSpace: 'nowrap' }}>
+              Subscription settings
+            </Link>
+          </div>
+        </Card>
+      ) : null}
+
       {/* Metric cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-6 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-7 gap-4">
         <MetricCard
           label="Total sales today"
           value={formatCurrency(metrics.totalRevenue, currency)}
@@ -476,7 +524,19 @@ export default async function OwnerDashboardPage() {
           }
           icon={<AlertIcon />}
         />
+        <Link href="/dashboard/owner/receivables" aria-label="View outstanding credit balances">
+          <MetricCard label="Total lent (outstanding)" value={formatCurrency(totalLent, currency)} deltaType={totalLent > 0 ? 'down' : 'neutral'} icon={<RevenueIcon />} />
+        </Link>
       </div>
+
+      <Card padding="md">
+        <CardHeader title="Payments received today" />
+        <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
+          {Object.entries(metrics.paymentMethodsToday).length === 0 ? <span style={{ color: 'var(--color-text-muted)' }}>No payments recorded today.</span> : Object.entries(metrics.paymentMethodsToday).map(([method, amount]) => (
+            <span key={method} style={{ color: 'var(--color-text-primary)' }}><strong>{method.replace(/_/g, ' ')}:</strong> {formatCurrency(amount, currency)}</span>
+          ))}
+        </div>
+      </Card>
 
       {/* Branch overview + Stock alerts */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">

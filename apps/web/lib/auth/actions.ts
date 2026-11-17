@@ -23,6 +23,7 @@ import {
   GlobalRole,
 } from '@smartretail/shared'
 import logger from '../logger'
+import { isRetivoxEmailInUse, RETIVOX_EMAIL_IN_USE_MESSAGE } from './accountEmail'
 import { recordLoginAttempt } from '../platform/auth'
 import { createServiceRoleClient } from '../supabase/admin'
 
@@ -54,8 +55,25 @@ const getAdminClient = () =>
     process.env.SUPABASE_SERVICE_ROLE_KEY!
   )
 
+async function rollbackIncompleteRegistration(adminClient: ReturnType<typeof getAdminClient>, userId: string, businessId?: string) {
+  try {
+    const { error: authDeleteError } = await adminClient.auth.admin.deleteUser(userId)
+    if (authDeleteError) {
+      logger.error('Incomplete registration cleanup could not remove auth user', { userId, businessId, error: authDeleteError })
+      return
+    }
+    if (businessId) {
+      const { error: businessDeleteError } = await adminClient.from('businesses').delete().eq('id', businessId)
+      if (businessDeleteError) logger.error('Incomplete registration cleanup could not remove new business', { userId, businessId, error: businessDeleteError })
+    }
+  } catch (error) {
+    logger.error('Incomplete registration cleanup threw an error', { userId, businessId, error })
+  }
+}
+
 /**
- * Creates a new business and owner account in one atomic flow.
+ * Creates a new business and owner account with compensating cleanup if a
+ * later database insert fails after Supabase Auth has created the user.
  *
  * Flow:
  * 1. Validate user and business data using Zod schemas
@@ -110,10 +128,28 @@ export async function registerBusinessAndOwner(
     }
   }
 
+  // A normalized email identifies exactly one Retivox account across all roles.
+  // Check before Auth sign-up to avoid creating partial businesses on conflicts.
+  const adminClient = getAdminClient()
+  try {
+    if (await isRetivoxEmailInUse(adminClient, email)) {
+      return { error: RETIVOX_EMAIL_IN_USE_MESSAGE, success: false }
+    }
+  } catch (error: unknown) {
+    logger.error('Account email registration check failed', {
+      email,
+      error,
+    })
+    return {
+      error: 'We could not verify this email right now. Please try again shortly.',
+      success: false,
+    }
+  }
+
   // Create Supabase auth user — regular client is fine for auth
   const supabase = await createClient()
   const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
-    email,
+    email: email.trim().toLowerCase(),
     password,
   })
 
@@ -125,7 +161,26 @@ export async function registerBusinessAndOwner(
     }
   }
 
+  if (
+    !signUpData.session &&
+    Array.isArray(signUpData.user.identities) &&
+    signUpData.user.identities.length === 0
+  ) {
+    return {
+      error: RETIVOX_EMAIL_IN_USE_MESSAGE,
+      success: false,
+    }
+  }
+
   const userId = signUpData.user.id
+  const { data: trialPlan } = await adminClient
+    .from('platform_subscription_plans')
+    .select('trial_days')
+    .eq('plan_key', 'trial')
+    .maybeSingle()
+  const trialDays = Math.min(90, Math.max(0, Number(trialPlan?.trial_days ?? 30)))
+  const trialStartedAt = new Date()
+  const trialEndsAt = new Date(trialStartedAt.getTime() + trialDays * 24 * 60 * 60 * 1000)
 
   // Generate URL-safe slug from business name
   const slug = businessName
@@ -138,8 +193,6 @@ export async function registerBusinessAndOwner(
 
   // Use admin client for all DB inserts — user has no business_id yet
   // so RLS would block these inserts with the regular client
-  const adminClient = getAdminClient()
-
   // Insert business record
   const { data: businessData, error: businessInsertError } = await adminClient
     .from('businesses')
@@ -151,15 +204,16 @@ export async function registerBusinessAndOwner(
       timezone,
       subscription_plan: 'trial',
       subscription_status: 'active',
-      trial_ends_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+      trial_ends_at: trialEndsAt.toISOString(),
     })
     .select('id')
     .single()
 
   if (businessInsertError || !businessData?.id) {
     logger.error('Business insert failed', { email, error: businessInsertError?.message })
+    await rollbackIncompleteRegistration(adminClient, userId)
     return {
-      error: businessInsertError?.message ?? 'Unable to create business',
+      error: 'Unable to finish business registration. Please try again.',
       success: false,
     }
   }
@@ -171,21 +225,22 @@ export async function registerBusinessAndOwner(
     id: userId,
     business_id: businessId,
     name,
-    email,
+    email: email.trim().toLowerCase(),
     phone,
     global_role: 'owner',
   })
 
   if (userInsertError) {
     logger.error('User profile insert failed', { userId, businessId, error: userInsertError.message })
+    await rollbackIncompleteRegistration(adminClient, userId, businessId)
     return {
-      error: userInsertError.message ?? 'Unable to create user profile',
+      error: 'Unable to finish business registration. Please try again.',
       success: false,
     }
   }
 
-  // Start every new business on the free 30-day trial.
-  const { error: subscriptionError } = await adminClient.from('subscriptions').insert({
+  // Start every new business on the platform-configured free trial.
+  const { data: subscription, error: subscriptionError } = await adminClient.from('subscriptions').insert({
     business_id: businessId,
     plan: 'trial',
     status: 'active',
@@ -193,16 +248,34 @@ export async function registerBusinessAndOwner(
     monthly_amount: 0,
     currency: 'KES',
     payment_provider: null,
-    current_period_start: new Date().toISOString(),
-    current_period_end: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-  })
+    current_period_start: trialStartedAt.toISOString(),
+    current_period_end: trialEndsAt.toISOString(),
+  }).select('id').single()
 
-  if (subscriptionError) {
-    logger.error('Subscription insert failed', { businessId, error: subscriptionError.message })
+  if (subscriptionError || !subscription?.id) {
+    logger.error('Subscription insert failed', { businessId, error: subscriptionError })
+    await rollbackIncompleteRegistration(adminClient, userId, businessId)
     return {
-      error: subscriptionError.message ?? 'Unable to create subscription',
+      error: 'Unable to finish business registration. Please try again.',
       success: false,
     }
+  }
+
+  const { error: trialEventError } = await adminClient.from('subscription_license_events').insert({
+    business_id: businessId,
+    subscription_id: subscription.id,
+    actor_user_id: userId,
+    event_type: 'trial_started',
+    from_plan: null,
+    to_plan: 'trial',
+    from_interval: null,
+    to_interval: 'monthly',
+    reason: `Configured ${trialDays}-day free trial started at registration`,
+  })
+  if (trialEventError) {
+    logger.error('Trial subscription audit insert failed', { userId, businessId, error: trialEventError })
+    await rollbackIncompleteRegistration(adminClient, userId, businessId)
+    return { error: 'Unable to finish business registration. Please try again.', success: false }
   }
 
   logger.info('Business and owner registered successfully', { userId, businessId })
@@ -239,7 +312,7 @@ export async function loginUser(
 
   const supabase = await createClient()
   const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
-    email,
+    email: email.trim().toLowerCase(),
     password,
   })
 

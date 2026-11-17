@@ -174,6 +174,7 @@ const ownerNav: { section: string; items: NavItem[] }[] = [
     items: [
       { label: 'Finances', href: '/dashboard/owner/finances', icon: <ChartIcon /> },
       { label: 'Transactions', href: '/dashboard/owner/transactions', icon: <ReceiptIcon /> },
+      { label: 'Data exports', href: '/dashboard/owner/exports', icon: <ReceiptIcon /> },
     ],
   },
   {

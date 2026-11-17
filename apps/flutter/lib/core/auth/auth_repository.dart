@@ -2,17 +2,26 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'offline_account_vault.dart';
 import 'retivox_user.dart';
+import '../network/backend_health_check.dart';
 
 class AuthRepository {
-  const AuthRepository({required this.vault, required this.client});
+  const AuthRepository({
+    required this.vault,
+    required this.client,
+    required this.backendHealthCheck,
+  });
 
   final OfflineAccountVault vault;
   final SupabaseClient? client;
+  final BackendHealthCheck backendHealthCheck;
+
+  bool get isOnlineSignInConfigured =>
+      client != null && backendHealthCheck.isConfigured;
 
   Future<RetivoxUser> signInOnline({
     required String email,
     required String password,
-    required String offlinePin,
+    String? offlinePin,
   }) async {
     final supabase = client;
     if (supabase == null) {
@@ -34,7 +43,7 @@ class AuthRepository {
 
     try {
       final profile = await _loadProfile(supabase, authUser.id);
-      await vault.authorizeAccount(profile, offlinePin);
+      await vault.authorizeAccount(profile, offlinePin: offlinePin);
       return profile;
     } catch (_) {
       await supabase.auth.signOut(scope: SignOutScope.local);
@@ -46,6 +55,13 @@ class AuthRepository {
     required String email,
     required String pin,
   }) => vault.unlockOffline(email, pin);
+
+  /// Checks Supabase Auth directly rather than treating a connected Wi-Fi or
+  /// Ethernet interface as proof that the sign-in service is reachable.
+  Future<bool> isBackendReachable() =>
+      client != null && backendHealthCheck.isConfigured
+      ? backendHealthCheck.isReachable()
+      : Future.value(false);
 
   Future<void> signOut(RetivoxUser user) async {
     if (client != null) {

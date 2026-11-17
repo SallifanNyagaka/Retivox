@@ -1,16 +1,8 @@
 /**
  * Daraja STK Push client for subscription payments.
  *
- * Required env vars:
- * - MPESA_CONSUMER_KEY
- * - MPESA_CONSUMER_SECRET
- * - MPESA_SHORTCODE
- * - MPESA_PASSKEY
- * Optional:
- * - MPESA_ENV=sandbox|production
- * - MPESA_BASE_URL
- * - MPESA_TRANSACTION_TYPE=CustomerPayBillOnline
- * - MPESA_CALLBACK_URL
+ * Credentials and callback settings are managed in the platform payment
+ * settings form. Provider credentials are decrypted server-side from Vault.
  */
 
 import { createServiceRoleClient } from '../supabase/admin'
@@ -42,7 +34,7 @@ export type DarajaPromptConfiguration = {
   missing: string[]
 }
 
-type DarajaConfig = {
+export type DarajaConfig = {
   consumerKey: string
   consumerSecret: string
   shortcode: string
@@ -68,62 +60,33 @@ type PlatformPaymentSettingsRow = {
 type DarajaConfigResolution = {
   config: DarajaConfig | null
   missing: string[]
-  source: 'platform' | 'env' | 'mixed' | 'none'
+  source: 'platform' | 'none'
 }
 
 async function getPlatformDarajaSettings(): Promise<PlatformPaymentSettingsRow | null> {
   try {
     const serviceClient = createServiceRoleClient()
-    const { data, error } = await serviceClient
-      .from('platform_payment_settings')
-      .select('environment, business_shortcode, account_reference, transaction_type, callback_url, consumer_key, consumer_secret, passkey')
-      .eq('provider', 'daraja')
-      .eq('is_active', true)
-      .order('updated_at', { ascending: false })
-      .limit(1)
-      .maybeSingle()
+    const { data, error } = await serviceClient.rpc('platform_get_daraja_settings')
 
     if (error) {
       return null
     }
 
-    return data as PlatformPaymentSettingsRow | null
+    const row = Array.isArray(data) ? data[0] : null
+    return (row as PlatformPaymentSettingsRow | undefined) ?? null
   } catch {
     return null
   }
 }
 
-function getDefaultCallbackUrl() {
-  const appUrl = process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL || process.env.NEXT_PUBLIC_APP_URL
-
-  if (!appUrl) {
-    return undefined
-  }
-
-  const baseUrl = appUrl.startsWith('http://') || appUrl.startsWith('https://')
-    ? appUrl
-    : `https://${appUrl}`
-
-  try {
-    return new URL('/api/daraja/stk-callback', baseUrl).toString()
-  } catch {
-    return undefined
-  }
-}
-
 async function resolveDarajaConfig(): Promise<DarajaConfigResolution> {
   const settings = await getPlatformDarajaSettings()
-  const configuredEnvironment = settings?.environment ?? (process.env.MPESA_ENV === 'production' ? 'production' : 'sandbox')
-  const consumerKey = process.env.MPESA_CONSUMER_KEY
-  const consumerSecret = process.env.MPESA_CONSUMER_SECRET
-  const shortcode = process.env.MPESA_SHORTCODE
-  const passkey = process.env.MPESA_PASSKEY
-  const callbackUrl = process.env.MPESA_CALLBACK_URL || getDefaultCallbackUrl()
-  const resolvedConsumerKey = settings?.consumer_key || consumerKey
-  const resolvedConsumerSecret = settings?.consumer_secret || consumerSecret
-  const resolvedShortcode = configuredEnvironment === 'sandbox' ? '174379' : settings?.business_shortcode || shortcode
-  const resolvedPasskey = settings?.passkey || passkey
-  const resolvedCallbackUrl = settings?.callback_url || callbackUrl
+  const configuredEnvironment = settings?.environment ?? 'sandbox'
+  const resolvedConsumerKey = settings?.consumer_key ?? null
+  const resolvedConsumerSecret = settings?.consumer_secret ?? null
+  const resolvedShortcode = settings?.business_shortcode ?? null
+  const resolvedPasskey = settings?.passkey ?? null
+  const resolvedCallbackUrl = settings?.callback_url ?? null
   const requiredFields: Array<[string, string | undefined | null]> = [
     ['consumer key', resolvedConsumerKey],
     ['consumer secret', resolvedConsumerSecret],
@@ -135,21 +98,7 @@ async function resolveDarajaConfig(): Promise<DarajaConfigResolution> {
     .filter(([, value]) => !value)
     .map(([label]) => label)
 
-  const platformValues = [
-    settings?.consumer_key,
-    settings?.consumer_secret,
-    settings?.business_shortcode,
-    settings?.passkey,
-    settings?.callback_url,
-  ].filter(Boolean).length
-  const envValues = [
-    consumerKey,
-    consumerSecret,
-    shortcode,
-    passkey,
-    callbackUrl,
-  ].filter(Boolean).length
-  const source = platformValues === 5 ? 'platform' : envValues === 5 ? 'env' : platformValues > 0 || envValues > 0 ? 'mixed' : 'none'
+  const source = settings ? 'platform' : 'none'
 
   if (missing.length > 0) {
     return {
@@ -167,9 +116,9 @@ async function resolveDarajaConfig(): Promise<DarajaConfigResolution> {
       passkey: resolvedPasskey as string,
       callbackUrl: resolvedCallbackUrl as string,
       environment: configuredEnvironment,
-      baseUrl: process.env.MPESA_BASE_URL || (configuredEnvironment === 'production' ? 'https://api.safaricom.co.ke' : 'https://sandbox.safaricom.co.ke'),
-      transactionType: settings?.transaction_type || process.env.MPESA_TRANSACTION_TYPE || 'CustomerPayBillOnline',
-      accountReference: settings?.account_reference || process.env.MPESA_ACCOUNT_REFERENCE || 'RETIVOX',
+      baseUrl: configuredEnvironment === 'production' ? 'https://api.safaricom.co.ke' : 'https://sandbox.safaricom.co.ke',
+      transactionType: settings?.transaction_type || 'CustomerPayBillOnline',
+      accountReference: settings?.account_reference || 'RETIVOX',
     },
     missing: [],
     source,
@@ -183,12 +132,12 @@ export async function getDarajaConfigurationStatus() {
     isConfigured: resolution.missing.length === 0,
     missing: resolution.missing,
     source: resolution.source,
-    environment: resolution.config?.environment ?? process.env.MPESA_ENV ?? 'sandbox',
-    shortcodeSet: Boolean(resolution.config?.shortcode || process.env.MPESA_SHORTCODE),
-    callbackUrlSet: Boolean(resolution.config?.callbackUrl || process.env.MPESA_CALLBACK_URL || getDefaultCallbackUrl()),
-    consumerKeySet: Boolean(resolution.config?.consumerKey || process.env.MPESA_CONSUMER_KEY),
-    consumerSecretSet: Boolean(resolution.config?.consumerSecret || process.env.MPESA_CONSUMER_SECRET),
-    passkeySet: Boolean(resolution.config?.passkey || process.env.MPESA_PASSKEY),
+    environment: resolution.config?.environment ?? 'sandbox',
+    shortcodeSet: Boolean(resolution.config?.shortcode),
+    callbackUrlSet: Boolean(resolution.config?.callbackUrl),
+    consumerKeySet: Boolean(resolution.config?.consumerKey),
+    consumerSecretSet: Boolean(resolution.config?.consumerSecret),
+    passkeySet: Boolean(resolution.config?.passkey),
   }
 }
 
@@ -205,7 +154,7 @@ export async function getDarajaPromptConfiguration() {
     transactionType: resolution.config.transactionType,
     accountReference: resolution.config.accountReference,
     callbackUrl: resolution.config.callbackUrl,
-    isTestMode: false,
+    isTestMode: resolution.config.environment === 'sandbox',
     missing: [],
   } satisfies DarajaPromptConfiguration
 }
@@ -267,6 +216,7 @@ async function getAccessToken(config: DarajaConfig) {
       Authorization: `Basic ${credentials}`,
     },
     cache: 'no-store',
+    signal: AbortSignal.timeout(15000),
   })
 
   const payload = (await response.json()) as { access_token?: string; errorMessage?: string }
@@ -276,6 +226,13 @@ async function getAccessToken(config: DarajaConfig) {
   }
 
   return payload.access_token
+}
+
+/** Checks merchant credentials using OAuth only; it does not initiate a payment. */
+export async function testBusinessDarajaConnection(businessId: string, ownerId: string) {
+  const config = await getBusinessDarajaConfig(businessId, ownerId)
+  await getAccessToken(config)
+  return `Daraja credentials authenticated successfully in ${config.environment} mode. No payment prompt was sent.`
 }
 
 export async function initiateDarajaStkPush(input: {
@@ -297,7 +254,46 @@ export async function initiateDarajaStkPush(input: {
     throw new Error(`Subscription M-Pesa STK Push is not configured. Missing: ${resolution.missing.join(', ')}.`)
   }
 
-  const config = resolution.config
+  return initiateDarajaStkPushWithConfig({ ...input, phone }, resolution.config)
+}
+
+export async function getBusinessDarajaConfig(businessId: string, ownerId: string): Promise<DarajaConfig> {
+  const serviceClient = createServiceRoleClient()
+  const { data, error } = await serviceClient.rpc('owner_get_payment_provider_config', {
+    p_business_id: businessId,
+    p_actor_id: ownerId,
+    p_provider: 'daraja',
+  })
+  if (error) throw new Error('Could not load the business M-Pesa configuration.')
+  const row = Array.isArray(data) ? data[0] as PlatformPaymentSettingsRow | undefined : undefined
+  if (!row?.consumer_key || !row.consumer_secret || !row.passkey || !row.business_shortcode || !row.callback_url) {
+    throw new Error('Configure and save the business Daraja credentials before using M-Pesa prompts.')
+  }
+  let callback: URL
+  try { callback = new URL(row.callback_url) } catch { throw new Error('The saved Daraja callback URL is invalid.') }
+  if (callback.protocol !== 'https:') throw new Error('The Daraja callback URL must use HTTPS.')
+  return {
+    consumerKey: row.consumer_key,
+    consumerSecret: row.consumer_secret,
+    passkey: row.passkey,
+    shortcode: row.business_shortcode,
+    callbackUrl: callback.toString(),
+    environment: row.environment,
+    baseUrl: row.environment === 'production' ? 'https://api.safaricom.co.ke' : 'https://sandbox.safaricom.co.ke',
+    transactionType: row.transaction_type || 'CustomerPayBillOnline',
+    accountReference: row.account_reference || 'RETIVOX',
+  }
+}
+
+export async function initiateDarajaStkPushWithConfig(input: {
+  phone: string
+  amount: number
+  accountReference?: string
+  transactionDescription: string
+}, config: DarajaConfig): Promise<DarajaStkPushResponse> {
+  const amount = Number(input.amount)
+  const phone = normalizeKenyanPhoneNumber(input.phone)
+  if (!Number.isInteger(amount) || amount <= 0) throw new Error('Enter a valid whole-number payment amount.')
   const accessToken = await getAccessToken(config)
   const timestamp = getTimestamp()
   const password = Buffer.from(`${config.shortcode}${config.passkey}${timestamp}`).toString('base64')
@@ -322,11 +318,12 @@ export async function initiateDarajaStkPush(input: {
       TransactionDesc: input.transactionDescription.slice(0, 64),
     }),
     cache: 'no-store',
+    signal: AbortSignal.timeout(15000),
   })
 
   const payload = (await response.json()) as DarajaStkPushResponse
 
-  if (!response.ok || payload.errorCode) {
+  if (!response.ok || payload.errorCode || payload.ResponseCode !== '0') {
     throw new Error(payload.errorMessage ?? payload.ResponseDescription ?? 'Daraja STK Push request failed')
   }
 
@@ -340,7 +337,10 @@ export async function verifyDarajaStkCheckout(checkoutRequestId: string): Promis
     throw new Error(`Subscription M-Pesa STK Push is not configured. Missing: ${resolution.missing.join(', ')}.`)
   }
 
-  const config = resolution.config
+  return verifyDarajaStkCheckoutWithConfig(checkoutRequestId, resolution.config)
+}
+
+export async function verifyDarajaStkCheckoutWithConfig(checkoutRequestId: string, config: DarajaConfig): Promise<number> {
   const accessToken = await getAccessToken(config)
   const timestamp = getTimestamp()
   const password = Buffer.from(`${config.shortcode}${config.passkey}${timestamp}`).toString('base64')
@@ -369,4 +369,35 @@ export async function verifyDarajaStkCheckout(checkoutRequestId: string): Promis
   }
 
   return resultCode
+}
+
+export async function registerDarajaC2BCallbacksWithConfig(
+  config: DarajaConfig,
+  confirmationUrl: string,
+  validationUrl: string,
+): Promise<string> {
+  for (const value of [confirmationUrl, validationUrl]) {
+    const parsed = new URL(value)
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password) {
+      throw new Error('Daraja callback URLs must be public HTTPS URLs.')
+    }
+  }
+  const accessToken = await getAccessToken(config)
+  const response = await fetch(`${config.baseUrl}/mpesa/c2b/v2/registerurl`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      ShortCode: config.shortcode,
+      ResponseType: 'Completed',
+      ConfirmationURL: confirmationUrl,
+      ValidationURL: validationUrl,
+    }),
+    cache: 'no-store',
+    signal: AbortSignal.timeout(15000),
+  })
+  const payload = await response.json() as { ResponseDescription?: string; errorCode?: string; errorMessage?: string }
+  if (!response.ok || payload.errorCode || payload.errorMessage) {
+    throw new Error(payload.errorMessage ?? payload.ResponseDescription ?? 'Daraja rejected the C2B callback registration.')
+  }
+  return payload.ResponseDescription ?? 'C2B callback registration request accepted by Daraja.'
 }

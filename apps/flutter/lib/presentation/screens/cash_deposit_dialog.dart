@@ -28,7 +28,7 @@ class _CashDepositDialogState extends State<CashDepositDialog> {
   String? _error;
 
   List<BranchAccess> get _managedBranches => widget.user.branches
-      .where((branch) => branch.role == 'admin' || branch.role == 'owner')
+      .where((branch) => branch.role == 'admin' || branch.role == 'owner' || branch.role == 'employee')
       .toList();
 
   @override

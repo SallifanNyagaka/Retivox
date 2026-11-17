@@ -123,44 +123,6 @@ export async function recordLoginAttempt(input: {
   }
 }
 
-export async function bootstrapPlatformUserIfNeeded(email: string, password: string): Promise<PlatformUserRow | null> {
-  const bootstrapEmail = process.env.PLATFORM_BOOTSTRAP_EMAIL?.trim().toLowerCase()
-  const bootstrapPassword = process.env.PLATFORM_BOOTSTRAP_PASSWORD ?? ''
-
-  if (!bootstrapEmail || !bootstrapPassword || email.toLowerCase() !== bootstrapEmail || password !== bootstrapPassword) {
-    return null
-  }
-
-  const serviceClient = createServiceRoleClient()
-  const { count } = await serviceClient
-    .from('platform_users')
-    .select('id', { count: 'exact', head: true })
-
-  if ((count ?? 0) > 0) {
-    return null
-  }
-
-  const passwordDetails = await createPlatformPassword(password)
-  const { data, error } = await serviceClient
-    .from('platform_users')
-    .insert({
-      name: process.env.PLATFORM_BOOTSTRAP_NAME?.trim() || 'Retivox Developer',
-      email: bootstrapEmail,
-      password_salt: passwordDetails.salt,
-      password_hash: passwordDetails.hash,
-      role: 'developer',
-      is_active: true,
-    })
-    .select('id, name, email, role, password_salt, password_hash, is_active')
-    .single()
-
-  if (error) {
-    throw new Error(error.message)
-  }
-
-  return data as PlatformUserRow
-}
-
 export async function createPlatformSession(platformUserId: string) {
   const token = crypto.randomBytes(32).toString('base64url')
   const tokenHash = hashValue(token)

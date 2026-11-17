@@ -7,6 +7,7 @@ import 'package:uuid/uuid.dart';
 import '../../core/auth/offline_account_vault.dart';
 import '../../core/auth/retivox_user.dart';
 import '../../core/database/app_database.dart';
+import '../../core/network/backend_health_check.dart';
 
 class SaleProduct {
   const SaleProduct({
@@ -25,6 +26,7 @@ class SaleProduct {
     required this.baseQuantityReserved,
     required this.recoveryItemId,
     required this.stockSource,
+    this.barcodes = const [],
   });
 
   final String optionId;
@@ -42,6 +44,7 @@ class SaleProduct {
   final double baseQuantityReserved;
   final String? recoveryItemId;
   final String stockSource;
+  final List<String> barcodes;
 
   factory SaleProduct.fromJson(Map<String, dynamic> row) {
     final recoveryItemId = row['recovery_item_id'] as String?;
@@ -68,6 +71,9 @@ class SaleProduct {
       ),
       recoveryItemId: recoveryItemId,
       stockSource: row['stock_source'] as String? ?? 'normal',
+      barcodes: (row['barcodes'] as List? ?? const [])
+          .map((value) => value.toString())
+          .toList(),
     );
   }
 
@@ -87,6 +93,7 @@ class SaleProduct {
     'base_quantity_reserved': baseQuantityReserved,
     'recovery_item_id': recoveryItemId,
     'stock_source': stockSource,
+    'barcodes': barcodes,
   };
 
   factory SaleProduct.fromCachedJson(Map<String, dynamic> row) {
@@ -110,6 +117,7 @@ class SaleProduct {
       baseQuantityReserved: product.baseQuantityReserved,
       recoveryItemId: product.recoveryItemId,
       stockSource: product.stockSource,
+      barcodes: product.barcodes,
     );
   }
 
@@ -190,6 +198,8 @@ class LocalSale {
     required this.items,
     required this.errorMessage,
     this.serverId,
+    this.paymentMethod = 'cash',
+    this.mpesaReference,
   });
 
   final String localId;
@@ -200,6 +210,22 @@ class LocalSale {
   final List<Map<String, dynamic>> items;
   final String? errorMessage;
   final String? serverId;
+  final String paymentMethod;
+  final String? mpesaReference;
+
+  String get receiptNumber {
+    final compact = localId
+        .replaceAll(RegExp(r'[^a-fA-F0-9]'), '')
+        .toUpperCase();
+    final suffix = compact.length >= 16
+        ? compact.substring(0, 16)
+        : localId
+              .toUpperCase()
+              .replaceAll(RegExp(r'[^A-Z0-9]'), '')
+              .padRight(16, '0')
+              .substring(0, 16);
+    return 'RVX-$suffix';
+  }
 }
 
 class SaleRepository {
@@ -207,12 +233,19 @@ class SaleRepository {
     required this.database,
     required this.vault,
     required this.client,
+    required this.backendHealthCheck,
   });
 
   final AppDatabase database;
   final OfflineAccountVault vault;
   final SupabaseClient? client;
+  final BackendHealthCheck backendHealthCheck;
   final Map<String, Future<void>> _activeSyncs = {};
+
+  Future<bool> isBackendReachable() =>
+      client != null && backendHealthCheck.isConfigured
+      ? backendHealthCheck.isReachable()
+      : Future.value(false);
 
   Future<DateTime?> productCatalogUpdatedAt(
     RetivoxUser user,
@@ -235,9 +268,41 @@ class SaleRepository {
             'The server returned an invalid product list.',
           );
         }
-        final rows = response
-            .whereType<Map<String, dynamic>>()
-            .map(SaleProduct.fromJson)
+        final rawRows = response.whereType<Map<String, dynamic>>().toList();
+        final productIds = rawRows
+            .map((row) => row['product_id']?.toString())
+            .whereType<String>()
+            .toSet()
+            .toList();
+        final rawBarcodeRows = productIds.isEmpty
+            ? const <dynamic>[]
+            : await supabase
+                  .from('product_barcodes')
+                  .select('product_id, code')
+                  .eq('business_id', user.businessId)
+                  .eq('is_active', true)
+                  .inFilter('product_id', productIds);
+        final barcodeRows = rawBarcodeRows
+            .whereType<Map>()
+            .map(Map<String, dynamic>.from)
+            .toList();
+        final barcodesByProduct = <String, List<String>>{};
+        for (final barcode in barcodeRows) {
+          final productId = barcode['product_id']?.toString();
+          final code = barcode['code']?.toString();
+          if (productId != null && code != null) {
+            (barcodesByProduct[productId] ??= <String>[]).add(code);
+          }
+        }
+        final rows = rawRows
+            .map(
+              (row) => SaleProduct.fromJson({
+                ...row,
+                'barcodes':
+                    barcodesByProduct[row['product_id']?.toString()] ??
+                    const <String>[],
+              }),
+            )
             .toList();
         await vault.cacheValue(
           user,
@@ -283,6 +348,13 @@ class SaleRepository {
     required String paymentMethod,
     required String mpesaReference,
     required double previewTotal,
+    double? amountPaid,
+    double? amountTendered,
+    bool isCredit = false,
+    String? customerName,
+    String? customerPhone,
+    String? customerEmail,
+    String? dueDate,
   }) async {
     if (items.isEmpty) {
       throw const SaleRepositoryException('Add at least one product.');
@@ -306,9 +378,14 @@ class SaleRepository {
       'branchId': branchId,
       'items': items,
       'paymentMethod': paymentMethod,
+      'amountPaid': isCredit ? (amountPaid ?? 0) : null,
+      'amountTendered': amountTendered,
+      'isCredit': isCredit,
       'discountAmount': 0,
-      'customerName': null,
-      'customerPhone': null,
+      'customerName': customerName,
+      'customerPhone': customerPhone,
+      'customerEmail': customerEmail,
+      'dueDate': _optionalString(dueDate),
       'mpesaRefCode': paymentMethod == 'mpesa_manual'
           ? mpesaReference.trim()
           : null,
@@ -367,6 +444,11 @@ class SaleRepository {
   Future<void> _syncPending(RetivoxUser user) async {
     final supabase = client;
     if (supabase == null) return;
+
+    // Repair only known cash-only failures from older desktop builds: blank
+    // date casts and the retired requirement for a per-sale deposit code.
+    await _retryKnownLegacyCashFailures(user);
+
     final pending = await database.pendingSales(user.id);
     if (pending.isEmpty) return;
 
@@ -404,8 +486,8 @@ class SaleRepository {
         );
         final args = _rpcArguments(payload, localId);
         final rpc = user.role == RetivoxRole.employee
-            ? 'employee_record_transaction_offline'
-            : 'dashboard_record_transaction_offline';
+            ? 'employee_record_transaction_offline_v2'
+            : 'dashboard_record_transaction_offline_v2';
         final result = await supabase.rpc(rpc, params: args);
         final resultRow = result is List ? result.firstOrNull : result;
         if (resultRow is! Map<String, dynamic> ||
@@ -464,6 +546,46 @@ class SaleRepository {
           status: 'needs_correction',
           errorMessage: error.toString(),
         );
+      }
+    }
+  }
+
+  Future<void> _retryKnownLegacyCashFailures(RetivoxUser user) async {
+    final failed = await database.cashSalesNeedingLegacyRetry(user.id);
+    for (final row in failed) {
+      final localId = row.read<String>('local_id');
+      try {
+        final payload = await vault.decryptForAccount(
+          user.id,
+          row.read<String>('encrypted_payload'),
+        );
+        final dueDate = payload['dueDate']?.toString().trim() ?? '';
+        final message =
+            row.readNullable<String>('error_message')?.toLowerCase() ?? '';
+        final isEmptyDateError = message.contains(
+          'invalid input syntax for type date',
+        );
+        final isObsoleteCashCodeError = message.contains(
+          'cash deposit/reference code',
+        );
+        final isAmbiguousTransactionIdError =
+            message.contains('transaction_id') && message.contains('ambiguous');
+        if (payload['paymentMethod'] != 'cash' ||
+            payload['isCredit'] == true ||
+            (!isObsoleteCashCodeError &&
+                !isAmbiguousTransactionIdError &&
+                !(isEmptyDateError && dueDate.isEmpty))) {
+          continue;
+        }
+        if (dueDate.isEmpty) payload['dueDate'] = null;
+        await database.replaceSalePayload(
+          localId,
+          await vault.encryptForAccount(user.id, payload),
+        );
+        await database.updateSale(localId: localId, status: 'pending_sync');
+      } catch (_) {
+        // Leave the failed record visible for correction if it cannot be
+        // decrypted or safely repaired.
       }
     }
   }
@@ -529,6 +651,8 @@ class SaleRepository {
               .toList(),
           errorMessage: row.readNullable<String>('error_message'),
           serverId: row.readNullable<String>('server_id'),
+          paymentMethod: payload['paymentMethod']?.toString() ?? 'cash',
+          mpesaReference: payload['mpesaRefCode']?.toString(),
         ),
       );
     }
@@ -549,11 +673,15 @@ class SaleRepository {
     final common = <String, dynamic>{
       'p_items': items,
       'p_payment_method': payload['paymentMethod'],
+      'p_amount_paid': payload['amountPaid'],
+      'p_amount_tendered': payload['amountTendered'],
+      'p_customer_email': payload['customerEmail'],
+      'p_due_date': _optionalString(payload['dueDate']),
+      'p_is_credit': payload['isCredit'] ?? false,
       'p_discount_amount': payload['discountAmount'],
       'p_customer_name': payload['customerName'],
       'p_customer_phone': payload['customerPhone'],
-      'p_mpesa_ref_code': payload['mpesaRefCode'],
-      'p_cash_deposit_code': payload['cashDepositCode'],
+      'p_reference_code': payload['mpesaRefCode'],
       'p_recorded_at': recordedAt,
       'p_local_id': localId,
     };
@@ -572,6 +700,11 @@ class SaleRepository {
         message.contains('connection refused') ||
         message.contains('connection reset') ||
         message.contains('connection timed out');
+  }
+
+  String? _optionalString(Object? value) {
+    final normalized = value?.toString().trim();
+    return normalized == null || normalized.isEmpty ? null : normalized;
   }
 }
 

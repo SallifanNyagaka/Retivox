@@ -26,23 +26,28 @@ class OfflineAccountVault {
   );
   static final _cipher = AesGcm.with256bits();
 
-  Future<void> authorizeAccount(RetivoxUser user, String pin) async {
-    _validatePin(pin);
+  Future<void> authorizeAccount(RetivoxUser user, {String? offlinePin}) async {
+    if (offlinePin != null) _validatePin(offlinePin);
     final accounts = await _readAccounts();
     final existing = accounts[user.id];
     final dataKey = await _getOrCreateDataKey(user.id);
-    final salt = existing?['salt'] as String? ?? _randomBase64(16);
-    final verifier = await _derivePin(pin, base64Decode(salt));
-
-    accounts[user.id] = {
-      'email': user.email.trim().toLowerCase(),
-      'salt': salt,
-      'verifier': base64Encode(verifier),
-      'failedAttempts': 0,
-      'lockedUntil': null,
-    };
-
-    await _secureStorage.write(key: _accountsKey, value: jsonEncode(accounts));
+    if (offlinePin != null || existing != null) {
+      final salt = existing?['salt'] as String? ?? _randomBase64(16);
+      final verifier = offlinePin == null
+          ? existing!['verifier'] as String
+          : base64Encode(await _derivePin(offlinePin, base64Decode(salt)));
+      accounts[user.id] = {
+        'email': user.email.trim().toLowerCase(),
+        'salt': salt,
+        'verifier': verifier,
+        'failedAttempts': 0,
+        'lockedUntil': null,
+      };
+      await _secureStorage.write(
+        key: _accountsKey,
+        value: jsonEncode(accounts),
+      );
+    }
     await _saveProfile(user, dataKey);
   }
 
@@ -259,7 +264,7 @@ class OfflineAccountVault {
       return utf8.decode(await _cipher.decrypt(box, secretKey: key));
     } on SecretBoxAuthenticationError {
       throw const OfflineAccountException(
-        'Saved offline data could not be authenticated.',
+        'The saved offline profile is damaged or out of sync. Sign in online with your password to refresh this computer’s profile. Pending offline sales remain stored.',
       );
     }
   }

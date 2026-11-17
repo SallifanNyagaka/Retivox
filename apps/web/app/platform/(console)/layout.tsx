@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import Link from 'next/link'
-import { BarChart3, Building2, CreditCard, LogOut, MessageSquareQuote, Moon, ShieldCheck, Tags } from 'lucide-react'
+import { BarChart3, Building2, CreditCard, LogOut, Mail, MessageSquareQuote, Moon, Settings, ShieldCheck, Tags, Wrench } from 'lucide-react'
 import { requirePlatformUser } from '../../../lib/platform/auth'
 import { logoutPlatformUser } from '../actions'
 
@@ -8,7 +8,11 @@ const navItems = [
   { href: '/platform', label: 'Overview', icon: BarChart3 },
   { href: '/platform/businesses', label: 'Businesses', icon: Building2 },
   { href: '/platform/pricing', label: 'Pricing', icon: Tags },
+  { href: '/platform/promotions', label: 'Promotions & retention', icon: Tags },
+  { href: '/platform/integrations', label: 'Setup requests', icon: Wrench },
   { href: '/platform/payments', label: 'M-Pesa account', icon: CreditCard },
+  { href: '/platform/communications', label: 'Email delivery', icon: Mail },
+  { href: '/platform/settings', label: 'Runtime settings', icon: Settings },
   { href: '/platform/dormant', label: 'Dormancy', icon: Moon },
   { href: '/platform/reviews', label: 'Reviews', icon: MessageSquareQuote },
   { href: '/platform/login-attempts', label: 'Login attempts', icon: ShieldCheck },

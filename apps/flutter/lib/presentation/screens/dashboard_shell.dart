@@ -1,11 +1,13 @@
 import 'dart:async';
 
-import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 
 import '../../core/auth/retivox_user.dart';
 import '../../features/dashboard/dashboard_repository.dart';
 import '../../features/sales/sale_repository.dart';
+import '../theme/retivox_theme.dart';
+import '../widgets/retivox_badge.dart';
+import '../widgets/retivox_role_badge.dart';
 import 'account_settings_screen.dart';
 import 'admin_directory_screen.dart';
 import 'analytics_screen.dart';
@@ -14,6 +16,7 @@ import 'dashboard_data_screen.dart';
 import 'finance_screen.dart';
 import 'pos_screen.dart';
 import 'transfers_screen.dart';
+import '../widgets/overview_section.dart';
 
 class DashboardShell extends StatefulWidget {
   const DashboardShell({
@@ -38,10 +41,10 @@ class DashboardShell extends StatefulWidget {
 }
 
 class _DashboardShellState extends State<DashboardShell> {
-  final _connectivity = Connectivity();
-  StreamSubscription<List<ConnectivityResult>>? _subscription;
+  Timer? _connectionTimer;
   String _selectedSection = 'overview';
   bool _isConnected = false;
+  int _overviewRefreshVersion = 0;
   int _pendingSales = 0;
   bool _isRefreshing = false;
 
@@ -54,47 +57,35 @@ class _DashboardShellState extends State<DashboardShell> {
   @override
   void initState() {
     super.initState();
-    _subscription = _connectivity.onConnectivityChanged.listen(
-      (results) {
-        if (mounted) {
-          setState(
-            () => _isConnected = results.any(
-              (result) => result != ConnectivityResult.none,
-            ),
-          );
-        }
-      },
-      onError: (Object error, StackTrace stackTrace) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Connection status unavailable: $error')),
-          );
-        }
-      },
-    );
     unawaited(_refreshStatus());
+    _connectionTimer = Timer.periodic(
+      const Duration(seconds: 15),
+      (_) => unawaited(_refreshStatus()),
+    );
   }
 
   @override
   void dispose() {
-    _subscription?.cancel();
+    _connectionTimer?.cancel();
     super.dispose();
   }
 
   Future<void> _refreshStatus() async {
     setState(() => _isRefreshing = true);
     try {
-      final connectivity = await _connectivity.checkConnectivity();
+      final reachable = await widget.dashboardRepository.isBackendReachable();
       final pending = await widget.saleRepository.database.countSalesForAccount(
         widget.user.id,
       );
       if (mounted) {
+        final connectionChanged = reachable != _isConnected;
+        final reconnected = reachable && !_isConnected;
         setState(() {
-          _isConnected = connectivity.any(
-            (result) => result != ConnectivityResult.none,
-          );
+          _isConnected = reachable;
           _pendingSales = pending;
+          if (connectionChanged) _overviewRefreshVersion++;
         });
+        if (reconnected) unawaited(_syncPendingOnReconnect());
       }
     } catch (error) {
       if (mounted) {
@@ -110,8 +101,9 @@ class _DashboardShellState extends State<DashboardShell> {
   Future<void> _refreshAndSync() async {
     try {
       await _refreshStatus();
-      await widget.saleRepository.syncPending(widget.user);
+      await _syncQueuedData();
       await _refreshStatus();
+      if (mounted) setState(() => _overviewRefreshVersion++);
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -125,24 +117,70 @@ class _DashboardShellState extends State<DashboardShell> {
     }
   }
 
-  void _selectSection(_NavItem item) {
-    if (!item.available) {
+  Future<void> _syncPendingOnReconnect() async {
+    await _syncQueuedData();
+    try {
+      final pending = await widget.saleRepository.database.countSalesForAccount(
+        widget.user.id,
+      );
+      if (mounted)
+        setState(() {
+          _pendingSales = pending;
+          _overviewRefreshVersion++;
+        });
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Could not refresh the pending change count: $error'),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _syncQueuedData() async {
+    final failures = <String>[];
+    try {
+      await widget.dashboardRepository.syncPendingBranchCreates(widget.user);
+    } catch (error) {
+      failures.add('stores: $error');
+    }
+    try {
+      await widget.saleRepository.syncPending(widget.user);
+    } catch (error) {
+      failures.add('sales: $error');
+    }
+    try {
+      await widget.dashboardRepository.syncPendingDashboardActions(widget.user);
+    } catch (error) {
+      failures.add('dashboard changes: $error');
+    }
+    if (failures.isNotEmpty && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            '${item.label} is in the dashboard parity rollout and is not available in this build yet.',
+            'Some saved changes remain queued: ${failures.join(' · ')}',
           ),
         ),
       );
-      return;
     }
+  }
+
+  void _selectSection(_NavItem item) {
     setState(() => _selectedSection = item.id);
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    final bg = isDark
+        ? RetivoxTheme.backgroundDark
+        : RetivoxTheme.backgroundLight;
+
     return Scaffold(
+      backgroundColor: bg,
       body: SafeArea(
         child: Row(
           children: [
@@ -159,15 +197,18 @@ class _DashboardShellState extends State<DashboardShell> {
                 children: [
                   _TopPanel(
                     user: widget.user,
+                    repository: widget.dashboardRepository,
                     isConnected: _isConnected,
                     pendingSales: _pendingSales,
                     isRefreshing: _isRefreshing,
+                    darkMode: widget.darkMode,
+                    onDarkModeChanged: widget.onDarkModeChanged,
                     onRefresh: _refreshAndSync,
                     onSignOut: widget.onSignOut,
                   ),
                   Expanded(
                     child: ColoredBox(
-                      color: theme.colorScheme.surfaceContainerLowest,
+                      color: bg,
                       child: _selectedSection == 'sales'
                           ? PosScreen(
                               user: widget.user,
@@ -176,13 +217,13 @@ class _DashboardShellState extends State<DashboardShell> {
                               embedded: true,
                             )
                           : _selectedSection == 'overview'
-                          ? _OverviewWorkspace(
+                          ? OverviewSection(
                               user: widget.user,
-                              isConnected: _isConnected,
-                              pendingSales: _pendingSales,
-                              onOpenSales: () =>
-                                  setState(() => _selectedSection = 'sales'),
+                              repository: widget.dashboardRepository,
+                              refreshVersion: _overviewRefreshVersion,
                               onRefresh: _refreshAndSync,
+                              onNavigate: (section) =>
+                                  setState(() => _selectedSection = section),
                             )
                           : _selectedSection == 'analytics'
                           ? AnalyticsScreen(
@@ -221,6 +262,7 @@ class _DashboardShellState extends State<DashboardShell> {
                               user: widget.user,
                               section: _selectedSection,
                               repository: widget.dashboardRepository,
+                              refreshVersion: _overviewRefreshVersion,
                             ),
                     ),
                   ),
@@ -234,97 +276,195 @@ class _DashboardShellState extends State<DashboardShell> {
   }
 }
 
+/// Topbar matching apps/web/app/dashboard/layout.tsx (56px height, surface background, RoleBadge).
 class _TopPanel extends StatelessWidget {
   const _TopPanel({
     required this.user,
+    required this.repository,
     required this.isConnected,
     required this.pendingSales,
     required this.isRefreshing,
+    required this.darkMode,
+    required this.onDarkModeChanged,
     required this.onRefresh,
     required this.onSignOut,
   });
 
   final RetivoxUser user;
+  final DashboardRepository repository;
   final bool isConnected;
   final int pendingSales;
   final bool isRefreshing;
+  final bool darkMode;
+  final Future<void> Function(bool enabled) onDarkModeChanged;
   final VoidCallback onRefresh;
   final VoidCallback onSignOut;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final role = user.role.name[0].toUpperCase() + user.role.name.substring(1);
+    final isDark = theme.brightness == Brightness.dark;
+    final surface = isDark
+        ? RetivoxTheme.surfaceDark
+        : RetivoxTheme.surfaceLight;
+    final border = isDark ? RetivoxTheme.borderDark : RetivoxTheme.borderLight;
+    final textPrimary = isDark
+        ? RetivoxTheme.textPrimaryDark
+        : RetivoxTheme.textPrimaryLight;
+    final textMuted = isDark
+        ? RetivoxTheme.textMutedDark
+        : RetivoxTheme.textMutedLight;
+
     return Container(
-      height: 66,
+      height: RetivoxTheme.topbarHeight,
       padding: const EdgeInsets.symmetric(horizontal: 24),
       decoration: BoxDecoration(
-        color: theme.colorScheme.surface,
-        border: Border(
-          bottom: BorderSide(color: theme.colorScheme.outlineVariant),
-        ),
+        color: surface,
+        border: Border(bottom: BorderSide(color: border)),
       ),
       child: Row(
         children: [
+          // Business name matching web topbar
           Text(
-            'Retivox',
-            style: theme.textTheme.titleLarge?.copyWith(
-              fontWeight: FontWeight.w700,
-              color: theme.colorScheme.primary,
+            user.businessName,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+              color: textMuted,
             ),
           ),
-          const SizedBox(width: 20),
-          Expanded(
-            child: Text(
-              user.email,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: theme.textTheme.bodyMedium?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
+          const Spacer(),
+
+          // Connection status pill
+          RetivoxBadge(
+            variant: isConnected
+                ? RetivoxBadgeVariant.success
+                : RetivoxBadgeVariant.muted,
+            label: isConnected ? 'Online' : 'Offline',
+            leading: Icon(
+              isConnected ? Icons.cloud_done_rounded : Icons.cloud_off_rounded,
+              size: 13,
+              color: isConnected
+                  ? (isDark ? const Color(0xFF34D399) : const Color(0xFF047857))
+                  : textMuted,
             ),
-          ),
-          Chip(
-            avatar: Icon(
-              isConnected
-                  ? Icons.cloud_done_outlined
-                  : Icons.cloud_off_outlined,
-              size: 18,
-            ),
-            label: Text(isConnected ? 'Online' : 'Offline'),
-            visualDensity: VisualDensity.compact,
           ),
           const SizedBox(width: 8),
-          Chip(
-            avatar: const Icon(Icons.sync, size: 18),
-            label: Text(
-              pendingSales == 0 ? 'All synced' : '$pendingSales pending',
+
+          // Sync status pill
+          RetivoxBadge(
+            variant: pendingSales == 0
+                ? RetivoxBadgeVariant.muted
+                : RetivoxBadgeVariant.warning,
+            label: pendingSales == 0 ? 'All synced' : '$pendingSales pending',
+            leading: Icon(
+              Icons.sync_rounded,
+              size: 13,
+              color: pendingSales == 0
+                  ? textMuted
+                  : (isDark
+                        ? const Color(0xFFFBBF24)
+                        : const Color(0xFFB45309)),
             ),
-            visualDensity: VisualDensity.compact,
           ),
-          const SizedBox(width: 8),
-          Text('$role · ${user.name}', style: theme.textTheme.bodyMedium),
+          const SizedBox(width: 12),
+
+          // Refresh button
           IconButton(
-            tooltip: 'Refresh and sync',
+            tooltip: 'Refresh & sync',
+            iconSize: 18,
+            visualDensity: VisualDensity.compact,
+            padding: const EdgeInsets.all(6),
+            constraints: const BoxConstraints(),
             onPressed: isRefreshing ? null : onRefresh,
             icon: isRefreshing
-                ? const SizedBox.square(
-                    dimension: 18,
+                ? const SizedBox(
+                    width: 14,
+                    height: 14,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
-                : const Icon(Icons.refresh),
+                : Icon(Icons.refresh_rounded, color: textMuted),
           ),
+          const SizedBox(width: 4),
+
           IconButton(
-            tooltip: 'Sign out',
+            tooltip: 'Notifications',
+            iconSize: 18,
+            visualDensity: VisualDensity.compact,
+            padding: const EdgeInsets.all(6),
+            constraints: const BoxConstraints(),
+            onPressed: () => _showNotifications(context),
+            icon: Icon(Icons.notifications_outlined, color: textMuted),
+          ),
+          const SizedBox(width: 4),
+
+          // Dark mode toggle
+          IconButton(
+            tooltip: darkMode
+                ? 'Switch to light theme'
+                : 'Switch to dark theme',
+            iconSize: 18,
+            visualDensity: VisualDensity.compact,
+            padding: const EdgeInsets.all(6),
+            constraints: const BoxConstraints(),
+            onPressed: () => onDarkModeChanged(!darkMode),
+            icon: Icon(
+              darkMode ? Icons.light_mode_outlined : Icons.dark_mode_outlined,
+              color: textMuted,
+            ),
+          ),
+          const SizedBox(width: 16),
+
+          // User Name
+          Text(
+            user.name,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: textPrimary,
+            ),
+          ),
+          const SizedBox(width: 10),
+
+          // Role Badge
+          RetivoxRoleBadge(role: user.role.name),
+          const SizedBox(width: 8),
+          OutlinedButton.icon(
             onPressed: onSignOut,
-            icon: const Icon(Icons.logout),
+            icon: const Icon(Icons.logout_rounded, size: 16),
+            label: const Text('Sign out'),
+            style: OutlinedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              minimumSize: Size.zero,
+              visualDensity: VisualDensity.compact,
+            ),
           ),
         ],
       ),
     );
   }
+
+  Future<void> _showNotifications(BuildContext context) async {
+    try {
+      final notices = await repository.loadNotifications(user);
+      if (!context.mounted) return;
+      await showDialog<void>(context: context, builder: (dialogContext) => AlertDialog(
+        title: const Text('Notifications'),
+        content: SizedBox(width: 480, height: 420, child: notices.isEmpty
+          ? const Center(child: Text('You have no notifications.'))
+          : ListView.separated(itemCount: notices.length, separatorBuilder: (_, _) => const Divider(height: 1), itemBuilder: (context, index) {
+              final notice = notices[index];
+              return ListTile(dense: true, leading: Icon(notice['is_read'] == true ? Icons.notifications_none : Icons.notifications_active_outlined), title: Text(notice['title']?.toString() ?? 'Notification'), subtitle: Text('${notice['body'] ?? ''}\n${notice['created_at'] ?? ''}'));
+            })),
+        actions: [TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Close'))],
+      ));
+    } catch (error) {
+      if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not load notifications: $error')));
+    }
+  }
 }
 
+/// Sidebar matching apps/web/components/dashboard/Sidebar.tsx (240px width, uppercase section headers, active green pill).
 class _RoleSidebar extends StatelessWidget {
   const _RoleSidebar({
     required this.businessName,
@@ -345,54 +485,90 @@ class _RoleSidebar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    final surface = isDark
+        ? RetivoxTheme.surfaceDark
+        : RetivoxTheme.surfaceLight;
+    final border = isDark ? RetivoxTheme.borderDark : RetivoxTheme.borderLight;
+    final primaryColor = isDark
+        ? RetivoxTheme.primaryDarkMode
+        : RetivoxTheme.primaryLightMode;
+    final textPrimary = isDark
+        ? RetivoxTheme.textPrimaryDark
+        : RetivoxTheme.textPrimaryLight;
+    final textMuted = isDark
+        ? RetivoxTheme.textMutedDark
+        : RetivoxTheme.textMutedLight;
+
     return Container(
-      width: 252,
+      width: RetivoxTheme.sidebarWidth,
       decoration: BoxDecoration(
-        color: theme.colorScheme.surface,
-        border: Border(
-          right: BorderSide(color: theme.colorScheme.outlineVariant),
-        ),
+        color: surface,
+        border: Border(right: BorderSide(color: border)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          // Logo & Business branding matching web
           Padding(
-            padding: const EdgeInsets.fromLTRB(18, 22, 18, 18),
-            child: Row(
+            padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                CircleAvatar(
-                  backgroundColor: theme.colorScheme.primaryContainer,
-                  foregroundColor: theme.colorScheme.onPrimaryContainer,
-                  child: const Icon(Icons.storefront_outlined),
+                Row(
+                  children: [
+                    Container(
+                      width: 28,
+                      height: 28,
+                      decoration: BoxDecoration(
+                        color: primaryColor,
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      alignment: Alignment.center,
+                      child: const Text(
+                        'R',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Text(
+                      'Retivox',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                        color: primaryColor,
+                        letterSpacing: -0.3,
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        businessName,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.titleSmall?.copyWith(
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      Text(
-                        user.branches.firstOrNull?.name ?? 'Employee workspace',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
+                const SizedBox(height: 10),
+                Text(
+                  businessName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: textPrimary,
                   ),
+                ),
+                Text(
+                  user.branches.firstOrNull?.name ?? 'Headquarters',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 11, color: textMuted),
                 ),
               ],
             ),
           ),
-          const Divider(height: 1),
+          Divider(color: border, height: 1),
+
+          // Nav Sections matching web
           Expanded(
             child: ListView(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
@@ -400,54 +576,57 @@ class _RoleSidebar extends StatelessWidget {
                 for (final group in groups) ...[
                   if (group.label.isNotEmpty)
                     Padding(
-                      padding: const EdgeInsets.fromLTRB(12, 14, 12, 6),
+                      padding: const EdgeInsets.fromLTRB(10, 14, 10, 6),
                       child: Text(
                         group.label.toUpperCase(),
-                        style: theme.textTheme.labelSmall?.copyWith(
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: textMuted,
                           letterSpacing: 0.8,
-                          color: theme.colorScheme.onSurfaceVariant,
                         ),
                       ),
                     ),
-                  for (final item in group.items)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 2),
-                      child: Tooltip(
-                        message: item.available
-                            ? item.label
-                            : '${item.label} is being implemented',
-                        child: ListTile(
-                          dense: true,
-                          enabled: item.available,
-                          selected: selectedSection == item.id,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(9),
-                          ),
-                          leading: Icon(item.icon, size: 20),
-                          title: Text(item.label),
-                          trailing: item.available
-                              ? null
-                              : Icon(
-                                  Icons.lock_outline,
-                                  size: 15,
-                                  color: theme.colorScheme.onSurfaceVariant,
-                                ),
-                          onTap: () => onSelect(item),
-                        ),
-                      ),
+                  for (final item in group.items) ...[
+                    _NavItemTile(
+                      item: item,
+                      isSelected: selectedSection == item.id,
+                      onTap: () => onSelect(item),
                     ),
+                    const SizedBox(height: 2),
+                  ],
                 ],
               ],
             ),
           ),
-          const Divider(height: 1),
+          Divider(color: border, height: 1),
+
+          // User info and sign out footer
           Padding(
-            padding: const EdgeInsets.all(10),
-            child: ListTile(
-              dense: true,
-              leading: const Icon(Icons.logout),
-              title: const Text('Sign out'),
+            padding: const EdgeInsets.all(12),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(8),
               onTap: onSignOut,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 8,
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.logout_rounded, size: 18, color: textMuted),
+                    const SizedBox(width: 10),
+                    Text(
+                      'Sign out',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                        color: textMuted,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
           ),
         ],
@@ -456,256 +635,62 @@ class _RoleSidebar extends StatelessWidget {
   }
 }
 
-class _OverviewWorkspace extends StatelessWidget {
-  const _OverviewWorkspace({
-    required this.user,
-    required this.isConnected,
-    required this.pendingSales,
-    required this.onOpenSales,
-    required this.onRefresh,
+/// Navigation item tile styled to match Retivox web sidebar links.
+class _NavItemTile extends StatelessWidget {
+  const _NavItemTile({
+    required this.item,
+    required this.isSelected,
+    required this.onTap,
   });
 
-  final RetivoxUser user;
-  final bool isConnected;
-  final int pendingSales;
-  final VoidCallback onOpenSales;
-  final VoidCallback onRefresh;
+  final _NavItem item;
+  final bool isSelected;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return ListView(
-      padding: const EdgeInsets.all(28),
-      children: [
-        Text('Overview', style: theme.textTheme.headlineSmall),
-        const SizedBox(height: 6),
-        Text(
-          'Welcome, ${user.name}. This workspace adapts to your ${user.role.name} access.',
-          style: theme.textTheme.bodyMedium,
-        ),
-        const SizedBox(height: 24),
-        Wrap(
-          spacing: 16,
-          runSpacing: 16,
-          children: [
-            _SummaryCard(
-              title: 'Connection',
-              value: isConnected ? 'Online' : 'Offline',
-              detail: isConnected
-                  ? 'Server features are reachable'
-                  : 'Using saved information on this device',
-              icon: isConnected ? Icons.cloud_done_outlined : Icons.cloud_off,
-            ),
-            _SummaryCard(
-              title: 'Branches',
-              value: '${user.branches.length}',
-              detail: 'Branches available to this account',
-              icon: Icons.store_outlined,
-            ),
-            _SummaryCard(
-              title: 'Pending sales',
-              value: '$pendingSales',
-              detail: pendingSales == 0
-                  ? 'No unsynced or unresolved sales'
-                  : 'Saved locally; sync when connected',
-              icon: Icons.sync,
-            ),
-          ],
-        ),
-        const SizedBox(height: 24),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Your branches', style: theme.textTheme.titleLarge),
-                const SizedBox(height: 8),
-                if (user.branches.isEmpty)
-                  const Text('No branch access is saved for this account.')
-                else
-                  ...user.branches.map(
-                    (branch) => ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: const Icon(Icons.store_outlined),
-                      title: Text(branch.name),
-                      subtitle: Text('${branch.role} access'),
-                    ),
-                  ),
-              ],
-            ),
+    final isDark = theme.brightness == Brightness.dark;
+
+    final primaryColor = isDark
+        ? RetivoxTheme.primaryDarkMode
+        : RetivoxTheme.primaryLightMode;
+    final activeBg = isDark
+        ? RetivoxTheme.successDark
+        : RetivoxTheme.primaryLight;
+    final textMuted = isDark
+        ? RetivoxTheme.textMutedDark
+        : RetivoxTheme.textMutedLight;
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: isSelected ? activeBg : Colors.transparent,
+            borderRadius: BorderRadius.circular(8),
           ),
-        ),
-        const SizedBox(height: 20),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: Wrap(
-            spacing: 12,
+          child: Row(
             children: [
-              FilledButton.icon(
-                onPressed: onOpenSales,
-                icon: const Icon(Icons.point_of_sale),
-                label: const Text('Open point of sale'),
+              Icon(
+                item.icon,
+                size: 18,
+                color: isSelected ? primaryColor : textMuted,
               ),
-              OutlinedButton.icon(
-                onPressed: onRefresh,
-                icon: const Icon(Icons.refresh),
-                label: const Text('Refresh and sync'),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 18),
-        const _RolloutNotice(),
-      ],
-    );
-  }
-}
-
-class _TransactionsWorkspace extends StatefulWidget {
-  const _TransactionsWorkspace({
-    required this.user,
-    required this.repository,
-    required this.onRefresh,
-  });
-
-  final RetivoxUser user;
-  final SaleRepository repository;
-  final VoidCallback onRefresh;
-
-  @override
-  State<_TransactionsWorkspace> createState() => _TransactionsWorkspaceState();
-}
-
-class _TransactionsWorkspaceState extends State<_TransactionsWorkspace> {
-  late Future<List<LocalSale>> _sales;
-
-  @override
-  void initState() {
-    super.initState();
-    _sales = widget.repository.listSales(widget.user.id);
-  }
-
-  void _reload() {
-    setState(() => _sales = widget.repository.listSales(widget.user.id));
-    widget.onRefresh();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return FutureBuilder<List<LocalSale>>(
-      future: _sales,
-      builder: (context, snapshot) {
-        if (snapshot.hasError) {
-          return Center(
-            child: SelectableText(
-              'Could not load local transaction history: ${snapshot.error}',
-            ),
-          );
-        }
-        if (!snapshot.hasData) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        final sales = snapshot.data!;
-        return ListView(
-          padding: const EdgeInsets.all(28),
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Transactions',
-                        style: theme.textTheme.headlineSmall,
-                      ),
-                      const SizedBox(height: 6),
-                      const Text(
-                        'Sales recorded on this desktop. Online transaction history is being connected.',
-                      ),
-                    ],
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  item.label,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
+                    color: isSelected ? primaryColor : textMuted,
                   ),
                 ),
-                IconButton(
-                  tooltip: 'Refresh',
-                  onPressed: _reload,
-                  icon: const Icon(Icons.refresh),
-                ),
-              ],
-            ),
-            const SizedBox(height: 20),
-            if (sales.isEmpty)
-              const Card(
-                child: ListTile(
-                  leading: Icon(Icons.receipt_long_outlined),
-                  title: Text('No locally saved sales yet'),
-                  subtitle: Text(
-                    'Sales recorded on this desktop will appear here.',
-                  ),
-                ),
-              )
-            else
-              Card(
-                clipBehavior: Clip.antiAlias,
-                child: Column(
-                  children: [
-                    for (final sale in sales)
-                      ListTile(
-                        leading: const Icon(Icons.receipt_long_outlined),
-                        title: Text(
-                          '${widget.user.currency} ${sale.totalAmount.toStringAsFixed(2)}',
-                        ),
-                        subtitle: Text(
-                          '${sale.recordedAt} · ${sale.status.replaceAll('_', ' ')}'
-                          '${sale.errorMessage == null ? '' : '\n${sale.errorMessage}'}',
-                        ),
-                        isThreeLine: sale.errorMessage != null,
-                      ),
-                  ],
-                ),
               ),
-            const SizedBox(height: 18),
-            const _RolloutNotice(),
-          ],
-        );
-      },
-    );
-  }
-}
-
-class _SummaryCard extends StatelessWidget {
-  const _SummaryCard({
-    required this.title,
-    required this.value,
-    required this.detail,
-    required this.icon,
-  });
-
-  final String title;
-  final String value;
-  final String detail;
-  final IconData icon;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return SizedBox(
-      width: 260,
-      child: Card(
-        child: Padding(
-          padding: const EdgeInsets.all(18),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Icon(icon, color: theme.colorScheme.primary),
-              const SizedBox(height: 12),
-              Text(title, style: theme.textTheme.bodyMedium),
-              const SizedBox(height: 4),
-              Text(value, style: theme.textTheme.headlineSmall),
-              const SizedBox(height: 4),
-              Text(detail, style: theme.textTheme.bodySmall),
             ],
           ),
         ),
@@ -714,24 +699,7 @@ class _SummaryCard extends StatelessWidget {
   }
 }
 
-class _RolloutNotice extends StatelessWidget {
-  const _RolloutNotice();
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Card(
-      color: theme.colorScheme.secondaryContainer,
-      child: const Padding(
-        padding: EdgeInsets.all(16),
-        child: Text(
-          'Desktop dashboard parity is being built in sections. Unavailable sections are marked in the navigation; they are not yet represented as complete.',
-        ),
-      ),
-    );
-  }
-}
-
+/// Overview dashboard matching apps/web/app/dashboard/owner/page.tsx.
 class _NavGroup {
   const _NavGroup(this.label, this.items);
 
@@ -740,234 +708,124 @@ class _NavGroup {
 }
 
 class _NavItem {
-  const _NavItem({
-    required this.id,
-    required this.label,
-    required this.icon,
-    this.available = false,
-  });
+  const _NavItem({required this.id, required this.label, required this.icon});
 
   final String id;
   final String label;
   final IconData icon;
-  final bool available;
 }
 
 const _ownerGroups = <_NavGroup>[
   _NavGroup('', [
-    _NavItem(
-      id: 'overview',
-      label: 'Overview',
-      icon: Icons.dashboard_outlined,
-      available: true,
-    ),
+    _NavItem(id: 'overview', label: 'Overview', icon: Icons.dashboard_outlined),
     _NavItem(
       id: 'analytics',
       label: 'Analytics',
       icon: Icons.query_stats_outlined,
-      available: true,
     ),
   ]),
   _NavGroup('Management', [
-    _NavItem(
-      id: 'branches',
-      label: 'Branches',
-      icon: Icons.store_outlined,
-      available: true,
-    ),
-    _NavItem(
-      id: 'stock',
-      label: 'Stock',
-      icon: Icons.inventory_2_outlined,
-      available: true,
-    ),
-    _NavItem(
-      id: 'products',
-      label: 'Products',
-      icon: Icons.sell_outlined,
-      available: true,
-    ),
-    _NavItem(
-      id: 'transfers',
-      label: 'Transfers',
-      icon: Icons.swap_horiz,
-      available: true,
-    ),
+    _NavItem(id: 'branches', label: 'Branches', icon: Icons.store_outlined),
+    _NavItem(id: 'stock', label: 'Stock', icon: Icons.inventory_2_outlined),
+    _NavItem(id: 'products', label: 'Products', icon: Icons.sell_outlined),
+    _NavItem(id: 'transfers', label: 'Transfers', icon: Icons.swap_horiz),
   ]),
   _NavGroup('People', [
     _NavItem(
       id: 'admins',
       label: 'Admins',
       icon: Icons.admin_panel_settings_outlined,
-      available: true,
     ),
-    _NavItem(
-      id: 'employees',
-      label: 'Employees',
-      icon: Icons.people_outline,
-      available: true,
-    ),
+    _NavItem(id: 'employees', label: 'Employees', icon: Icons.people_outline),
     _NavItem(
       id: 'suppliers',
       label: 'Suppliers',
       icon: Icons.local_shipping_outlined,
-      available: true,
     ),
     _NavItem(
       id: 'deliveries',
       label: 'Deliveries',
       icon: Icons.inventory_outlined,
-      available: true,
     ),
   ]),
   _NavGroup('Finance', [
-    _NavItem(
-      id: 'sales',
-      label: 'New transaction',
-      icon: Icons.point_of_sale,
-      available: true,
-    ),
+    _NavItem(id: 'sales', label: 'New transaction', icon: Icons.point_of_sale),
     _NavItem(
       id: 'finances',
       label: 'Finances',
       icon: Icons.account_balance_wallet_outlined,
-      available: true,
     ),
     _NavItem(
       id: 'transactions',
       label: 'Transactions',
       icon: Icons.receipt_long_outlined,
-      available: true,
     ),
+    _NavItem(id: 'cash_deposits', label: 'Cash deposits', icon: Icons.payments_outlined),
   ]),
   _NavGroup('System', [
-    _NavItem(
-      id: 'audit',
-      label: 'Audit log',
-      icon: Icons.security_outlined,
-      available: true,
-    ),
-    _NavItem(
-      id: 'settings',
-      label: 'Settings',
-      icon: Icons.settings_outlined,
-      available: true,
-    ),
+    _NavItem(id: 'audit', label: 'Audit log', icon: Icons.security_outlined),
+    _NavItem(id: 'settings', label: 'Settings', icon: Icons.settings_outlined),
   ]),
 ];
 
 const _adminGroups = <_NavGroup>[
   _NavGroup('', [
-    _NavItem(
-      id: 'overview',
-      label: 'Overview',
-      icon: Icons.dashboard_outlined,
-      available: true,
-    ),
+    _NavItem(id: 'overview', label: 'Overview', icon: Icons.dashboard_outlined),
   ]),
   _NavGroup('Management', [
-    _NavItem(
-      id: 'stock',
-      label: 'Stock',
-      icon: Icons.inventory_2_outlined,
-      available: true,
-    ),
+    _NavItem(id: 'stock', label: 'Stock', icon: Icons.inventory_2_outlined),
     _NavItem(
       id: 'damages',
       label: 'Damages',
       icon: Icons.warning_amber_outlined,
-      available: true,
     ),
-    _NavItem(
-      id: 'products',
-      label: 'Products',
-      icon: Icons.sell_outlined,
-      available: true,
-    ),
-    _NavItem(
-      id: 'transfers',
-      label: 'Transfers',
-      icon: Icons.swap_horiz,
-      available: true,
-    ),
+    _NavItem(id: 'products', label: 'Products', icon: Icons.sell_outlined),
+    _NavItem(id: 'transfers', label: 'Transfers', icon: Icons.swap_horiz),
   ]),
   _NavGroup('People', [
-    _NavItem(
-      id: 'employees',
-      label: 'Employees',
-      icon: Icons.people_outline,
-      available: true,
-    ),
+    _NavItem(id: 'employees', label: 'Employees', icon: Icons.people_outline),
     _NavItem(
       id: 'suppliers',
       label: 'Suppliers',
       icon: Icons.local_shipping_outlined,
-      available: true,
     ),
     _NavItem(
       id: 'deliveries',
       label: 'Deliveries',
       icon: Icons.inventory_outlined,
-      available: true,
     ),
   ]),
   _NavGroup('Finance', [
-    _NavItem(
-      id: 'sales',
-      label: 'New transaction',
-      icon: Icons.point_of_sale,
-      available: true,
-    ),
+    _NavItem(id: 'sales', label: 'New transaction', icon: Icons.point_of_sale),
     _NavItem(
       id: 'transactions',
       label: 'Transactions',
       icon: Icons.receipt_long_outlined,
-      available: true,
     ),
+    _NavItem(id: 'cash_deposits', label: 'Cash deposits', icon: Icons.payments_outlined),
   ]),
   _NavGroup('System', [
-    _NavItem(
-      id: 'settings',
-      label: 'Settings',
-      icon: Icons.settings_outlined,
-      available: true,
-    ),
+    _NavItem(id: 'settings', label: 'Settings', icon: Icons.settings_outlined),
   ]),
 ];
 
 const _employeeGroups = <_NavGroup>[
   _NavGroup('', [
-    _NavItem(
-      id: 'overview',
-      label: 'Overview',
-      icon: Icons.dashboard_outlined,
-      available: true,
-    ),
-    _NavItem(
-      id: 'sales',
-      label: 'Point of sale',
-      icon: Icons.point_of_sale,
-      available: true,
-    ),
+    _NavItem(id: 'overview', label: 'Overview', icon: Icons.dashboard_outlined),
+    _NavItem(id: 'sales', label: 'Point of sale', icon: Icons.point_of_sale),
     _NavItem(
       id: 'transactions',
       label: 'Transactions',
       icon: Icons.receipt_long_outlined,
-      available: true,
     ),
+    _NavItem(id: 'cash_deposits', label: 'Cash deposits', icon: Icons.payments_outlined),
   ]),
   _NavGroup('Workspace', [
     _NavItem(
       id: 'damages',
       label: 'Damaged stock',
       icon: Icons.warning_amber_outlined,
-      available: true,
     ),
-    _NavItem(
-      id: 'settings',
-      label: 'Settings',
-      icon: Icons.settings_outlined,
-      available: true,
-    ),
+    _NavItem(id: 'settings', label: 'Settings', icon: Icons.settings_outlined),
   ]),
 ];

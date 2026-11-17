@@ -274,7 +274,7 @@ export default function AdminRowActions({ admin, branches, availableBranches }: 
       </button>
       {!isAdminLocked && (
         <DangerDeleteButton
-          entityLabel="Admin"
+          entityLabel="Admin account"
           entityName={admin.name}
           idField="userId"
           idValue={admin.id}

@@ -129,7 +129,7 @@ class _SupplierDeliveryEditDialogState
     }
     setState(() => _saving = true);
     try {
-      await widget.repository.editSupplierDelivery(
+      final pendingSync = await widget.repository.editSupplierDelivery(
         widget.user,
         deliveryId: widget.delivery['id'].toString(),
         supplierName: _supplierName.text,
@@ -149,7 +149,7 @@ class _SupplierDeliveryEditDialogState
           return payload;
         }).toList(),
       );
-      if (mounted) Navigator.of(context).pop(true);
+      if (mounted) Navigator.of(context).pop(pendingSync);
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -306,7 +306,7 @@ class _SupplierDeliveryEditDialogState
     ),
     actions: [
       TextButton(
-        onPressed: _saving ? null : () => Navigator.of(context).pop(false),
+        onPressed: _saving ? null : () => Navigator.of(context).pop(null),
         child: const Text('Cancel'),
       ),
       FilledButton(

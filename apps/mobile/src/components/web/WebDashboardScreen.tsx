@@ -6,7 +6,8 @@
  * without duplicating complex forms in React Native.
  */
 
-import { useMemo, useRef, useState } from 'react'
+import AsyncStorage from '@react-native-async-storage/async-storage'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Platform, StyleSheet, Text, View } from 'react-native'
 import { RefreshCcw } from 'lucide-react-native'
 import { WebView } from 'react-native-webview'
@@ -17,7 +18,7 @@ import { Button } from '../ui/Button'
 import { EmptyState } from '../ui/EmptyState'
 import { LoadingSpinner } from '../ui/LoadingSpinner'
 import { useTheme } from '../../hooks/useTheme'
-import { WEB_APP_URL } from '../../lib/config/env'
+import { supabase } from '../../lib/supabase/client'
 import { useAuthStore } from '../../store/authStore'
 
 export type WebDashboardScreenProps = {
@@ -32,13 +33,13 @@ export type WebDashboardScreenProps = {
  * @param path - Dashboard path.
  * @returns Absolute URL or null.
  */
-function buildSessionHandoffUrl(): string | null {
-  if (!WEB_APP_URL) {
+function buildSessionHandoffUrl(webAppUrl: string | null): string | null {
+  if (!webAppUrl) {
     return null
   }
 
   try {
-    return new URL('/api/mobile/session', WEB_APP_URL.endsWith('/') ? WEB_APP_URL : `${WEB_APP_URL}/`).toString()
+    return new URL('/api/mobile/session', webAppUrl.endsWith('/') ? webAppUrl : `${webAppUrl}/`).toString()
   } catch {
     return null
   }
@@ -66,8 +67,40 @@ export function WebDashboardScreen({ title, subtitle, path }: WebDashboardScreen
   const webViewRef = useRef<WebViewType>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const url = useMemo(() => buildSessionHandoffUrl(), [])
+  const [webAppUrl, setWebAppUrl] = useState<string | null>(null)
+  const [runtimeConfigLoading, setRuntimeConfigLoading] = useState(true)
+  useEffect(() => {
+    let mounted = true
+    const loadRuntimeUrl = async () => {
+      const cacheKey = 'retivox:public-runtime:web-app-url'
+      const cachedUrl = await AsyncStorage.getItem(cacheKey).catch(() => null)
+      if (mounted && cachedUrl && isAllowedWebAppUrl(cachedUrl)) setWebAppUrl(cachedUrl)
+
+      const { data, error: configError } = await supabase.rpc('public_app_runtime_config')
+      const row = Array.isArray(data) ? data[0] as { web_app_url?: string } | undefined : undefined
+      const nextUrl = row?.web_app_url ? normalizeWebAppUrl(row.web_app_url) : null
+      if (!configError && nextUrl) {
+        await AsyncStorage.setItem(cacheKey, nextUrl).catch(() => undefined)
+        if (mounted) setWebAppUrl(nextUrl)
+      }
+      if (mounted) setRuntimeConfigLoading(false)
+    }
+    void loadRuntimeUrl().catch(() => {
+      if (mounted) setRuntimeConfigLoading(false)
+    })
+    return () => { mounted = false }
+  }, [])
+  const url = useMemo(() => buildSessionHandoffUrl(webAppUrl), [webAppUrl])
   const showLocalhostHint = Boolean(url && Platform.OS !== 'web' && isLocalhostUrl(url))
+
+  if (runtimeConfigLoading && !url) {
+    return (
+      <SafeAreaView edges={['bottom']} style={[styles.safeArea, { backgroundColor: theme.colors.background }]}>
+        <ScreenHeader title={title} subtitle={subtitle} />
+        <View style={styles.center}><LoadingSpinner label="Loading app configuration..." /></View>
+      </SafeAreaView>
+    )
+  }
 
   if (!url) {
     return (
@@ -76,7 +109,7 @@ export function WebDashboardScreen({ title, subtitle, path }: WebDashboardScreen
         <View style={styles.center}>
           <EmptyState
             heading="Web app URL is missing"
-            subtitle="Set EXPO_PUBLIC_WEB_APP_URL in apps/mobile/.env to your Vercel URL or your computer LAN URL."
+            subtitle="An administrator needs to set the web app URL under Platform → Runtime settings. This value will be cached for offline launches."
           />
         </View>
       </SafeAreaView>
@@ -126,7 +159,7 @@ export function WebDashboardScreen({ title, subtitle, path }: WebDashboardScreen
       {showLocalhostHint ? (
         <View style={[styles.hint, { backgroundColor: theme.colors.accentLight }]}>
           <Text style={[styles.hintText, { color: theme.colors.accent }]}>
-            This screen points to localhost. On a phone, set EXPO_PUBLIC_WEB_APP_URL to your Vercel URL or LAN IP.
+            This screen points to localhost. Configure a reachable HTTPS web address under Platform → Runtime settings for phones.
           </Text>
         </View>
       ) : null}
@@ -166,6 +199,21 @@ export function WebDashboardScreen({ title, subtitle, path }: WebDashboardScreen
       </View>
     </SafeAreaView>
   )
+}
+
+function normalizeWebAppUrl(value: string): string | null {
+  try {
+    const parsed = new URL(value)
+    if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(parsed.hostname))) return null
+    if (parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) return null
+    return parsed.origin
+  } catch {
+    return null
+  }
+}
+
+function isAllowedWebAppUrl(value: string) {
+  return normalizeWebAppUrl(value) === value.replace(/\/$/, '')
 }
 
 const styles = StyleSheet.create({

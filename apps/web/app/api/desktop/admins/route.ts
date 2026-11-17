@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server'
 import { z } from 'zod'
 import { registerUserSchema } from '@smartretail/shared'
 import { createServiceRoleClient } from '../../../../lib/supabase/admin'
+import { requestOrigin } from '../../../../lib/requestOrigin'
+import { isRetivoxEmailInUse, RETIVOX_EMAIL_IN_USE_MESSAGE } from '../../../../lib/auth/accountEmail'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -102,11 +104,14 @@ export async function POST(request: Request) {
   const actorId = profile.id
 
   if (validation.data.action === 'invite') {
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL
-    if (!appUrl) return response({ error: 'Administrator invitations are not configured.' }, 503)
+    const appUrl = requestOrigin(new Headers(request.headers))
 
-    const { error } = await supabase.auth.admin.inviteUserByEmail(validation.data.email, {
-      redirectTo: `${appUrl.replace(/\/+$/, '')}/admin/login`,
+    if (await isRetivoxEmailInUse(supabase, validation.data.email)) {
+      return response({ error: RETIVOX_EMAIL_IN_USE_MESSAGE }, 409)
+    }
+
+    const { error } = await supabase.auth.admin.inviteUserByEmail(validation.data.email.trim().toLowerCase(), {
+      redirectTo: `${appUrl}/admin/login`,
       data: { global_role: 'admin', business_id: businessId },
     })
     if (error) return response({ error: error.message }, 400)
@@ -126,6 +131,9 @@ export async function POST(request: Request) {
 
   if (validation.data.action === 'create') {
     const { name, email, phone, password, branchIds } = validation.data
+    if (await isRetivoxEmailInUse(supabase, email)) {
+      return response({ error: RETIVOX_EMAIL_IN_USE_MESSAGE }, 409)
+    }
     if (new Set(branchIds).size !== branchIds.length) {
       return response({ error: 'Remove duplicate branch selections.' }, 400)
     }
@@ -164,7 +172,7 @@ export async function POST(request: Request) {
     }
 
     const { data: authResult, error: authCreateError } = await supabase.auth.admin.createUser({
-      email,
+      email: email.trim().toLowerCase(),
       password,
       email_confirm: true,
       user_metadata: { name, phone, global_role: 'admin' },
@@ -178,7 +186,7 @@ export async function POST(request: Request) {
       id: newUserId,
       business_id: businessId,
       name,
-      email,
+      email: email.trim().toLowerCase(),
       phone,
       global_role: 'admin',
       is_active: true,

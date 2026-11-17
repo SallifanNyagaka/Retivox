@@ -8,7 +8,11 @@ Owner admin creation/invites, branch-access changes, admin activation, and confi
 
 ## Windows setup
 
-Create a `.env` file next to `retivox_client.exe` with the Supabase project URL and publishable client key:
+Install the release with `install_windows.ps1` from the repository root. The installer updates the canonical `%LOCALAPPDATA%\Retivox` folder, preserves its `.env` and logs, and creates a Desktop shortcut whose working directory is the app folder. The Windows runner also anchors its working directory to the executable so Flutter can find its `data` bundle when started from another shortcut or shell.
+
+Install the release with `install_windows.ps1` from the repository root. It updates `%LOCALAPPDATA%\Retivox`, preserves the existing `.env` and logs, and creates a Desktop shortcut with the correct working directory. The Windows runner also anchors its working directory to the executable so it finds the Flutter `data` bundle when launched by another shortcut or shell.
+
+Create a `.env` file next to `Retivox.exe` with the Supabase project URL and publishable client key:
 
 ```dotenv
 SUPABASE_URL=https://your-project.supabase.co
@@ -18,7 +22,7 @@ RETIVOX_WEB_API_URL=https://your-deployed-retivox-web-app.example
 
 For local development, the app reads `.env` next to the executable. Flutter build-time `--dart-define` values and process environment variables are supported as fallbacks. `RETIVOX_WEB_API_URL` is the origin of the deployed Retivox Next.js app and is required for owner admin management and subscription display/STK payments. Deploy the new `apps/web/app/api/desktop` routes first; the web deployment also needs its existing server-side `SUPABASE_SERVICE_ROLE_KEY` and `NEXT_PUBLIC_APP_URL` configuration, plus server-side Daraja settings for STK payments. Never put a Supabase service-role key or Daraja credentials in the app.
 
-Apply the current Supabase schema, including `apps/web/lib/supabase/schema/019_stock_delivery_approval_workflow.sql`, `020_uom_system.sql`, `021_product_pricing_models.sql`, `023_uom_aware_stock_and_sales.sql`, `024_pricing_models_and_price_point_discounts.sql`, `034_supplier_delivery_edit_workflow.sql`, `035_finance_expenses_and_losses.sql`, `036_recurring_finance_expenses.sql`, `040_employee_inventory_loss_reports.sql`, `042_admin_inventory_loss_reports.sql`, `043_deleted_branch_dashboard_scope.sql`, `046_subscription_payment_requests.sql`, `047_platform_console_and_daraja.sql`, `049_platform_operations_console.sql`, `050_daraja_paybill_prompt_method.sql`, `052_cash_deposit_reconciliation.sql`, `053_supplier_directory_and_rankings.sql`, and `057_subscription_lifecycle.sql` for the finance and dashboard workflows. Apply `054_mobile_offline_transaction_timestamp.sql` and `058_offline_dashboard_transaction_sync.sql` before testing employee or owner/admin offline sale synchronization. Confirm the transfer, stock, and UOM migrations (including `013_dashboard_transfer_access_rpc.sql`, `014_stock_section_admin_capabilities.sql`, and `027_uom_aware_stock_transfers.sql`) are also applied.
+Apply the current Supabase schema, including `apps/web/lib/supabase/schema/019_stock_delivery_approval_workflow.sql`, `020_uom_system.sql`, `021_product_pricing_models.sql`, `023_uom_aware_stock_and_sales.sql`, `024_pricing_models_and_price_point_discounts.sql`, `034_supplier_delivery_edit_workflow.sql`, `035_finance_expenses_and_losses.sql`, `036_recurring_finance_expenses.sql`, `040_employee_inventory_loss_reports.sql`, `042_admin_inventory_loss_reports.sql`, `043_deleted_branch_dashboard_scope.sql`, `046_subscription_payment_requests.sql`, `047_platform_console_and_daraja.sql`, `049_platform_operations_console.sql`, `050_daraja_paybill_prompt_method.sql`, `052_cash_deposit_reconciliation.sql`, `053_supplier_directory_and_rankings.sql`, `057_subscription_lifecycle.sql`, `059_desktop_overview_summary.sql`, and `060_desktop_branch_details.sql` for the finance and dashboard workflows. Apply `054_mobile_offline_transaction_timestamp.sql` and `058_offline_dashboard_transaction_sync.sql` before testing employee or owner/admin offline sale synchronization. Confirm the transfer, stock, and UOM migrations (including `013_dashboard_transfer_access_rpc.sql`, `014_stock_section_admin_capabilities.sql`, and `027_uom_aware_stock_transfers.sql`) are also applied.
 
 ## Offline sales
 
@@ -33,8 +37,8 @@ Security-sensitive changes such as approvals and user/permission management requ
 The background task runs only in the current Windows user's interactive session. It uses the app's encrypted local queue and secure Supabase session, and a per-account SQLite lease prevents competing app processes from syncing the same queue concurrently. To register or remove the task for an installed app:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\Retivox\manage_background_sync.ps1" -ExecutablePath "$env:LOCALAPPDATA\Programs\Retivox\retivox_client.exe"
-powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Programs\Retivox\manage_background_sync.ps1" -Remove
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Retivox\manage_background_sync.ps1" -ExecutablePath "$env:LOCALAPPDATA\Retivox\retivox_client.exe"
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\Retivox\manage_background_sync.ps1" -Remove
 ```
 
 The script is at `apps/flutter/windows/manage_background_sync.ps1`. The owner admin/subscription APIs still require a deployed web app with the desktop API routes and the installed `.env` must point `RETIVOX_WEB_API_URL` to that deployment.

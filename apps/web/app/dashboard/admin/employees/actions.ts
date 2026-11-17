@@ -11,8 +11,9 @@ import { revalidatePath } from 'next/cache'
 import { createClient as createAdminClient } from '@supabase/supabase-js'
 import { z } from 'zod'
 import { GlobalRole, registerUserSchema } from '@smartretail/shared'
-import { assertBranchAccess } from '../../../../lib/auth/branchAccess'
+import { assertBranchAccess, getAccessibleBranchIds } from '../../../../lib/auth/branchAccess'
 import { requireRole } from '../../../../lib/auth/helpers'
+import { isRetivoxEmailInUse, RETIVOX_EMAIL_IN_USE_MESSAGE } from '../../../../lib/auth/accountEmail'
 import logger from '../../../../lib/logger'
 import { createClient } from '../../../../lib/supabase/server'
 
@@ -83,6 +84,11 @@ const setEmployeeBranchAccessSchema = z.object({
   isActive: z.boolean(),
 })
 
+const closeEmployeeAccountSchema = z.object({
+  userId: z.string().uuid(),
+  reason: z.string().trim().max(240).optional(),
+})
+
 /**
  * Safely reads a trimmed string value from FormData.
  */
@@ -148,6 +154,10 @@ export async function addAdminEmployee(
     const serviceClient = getServiceClient()
     let createdAuthUserId: string | null = null
 
+    if (await isRetivoxEmailInUse(serviceClient, validation.data.email)) {
+      return { error: RETIVOX_EMAIL_IN_USE_MESSAGE, success: false }
+    }
+
     const { data: branchData, error: branchError } = await supabase
       .from('branches')
       .select('id, name, is_active, deleted_at')
@@ -171,7 +181,7 @@ export async function addAdminEmployee(
 
     try {
       const { data: authData, error: authError } = await serviceClient.auth.admin.createUser({
-        email: validation.data.email,
+        email: validation.data.email.trim().toLowerCase(),
         password: validation.data.password,
         email_confirm: true,
         user_metadata: {
@@ -192,7 +202,7 @@ export async function addAdminEmployee(
         id: createdAuthUserId,
         business_id: businessId,
         name: validation.data.name,
-        email: validation.data.email,
+        email: validation.data.email.trim().toLowerCase(),
         phone: validation.data.phone,
         global_role: 'employee',
         is_active: true,
@@ -388,5 +398,81 @@ export async function setEmployeeBranchAccess(
   } catch (error: unknown) {
     logger.error('setEmployeeBranchAccess: unexpected error', { businessId, payload: validation.data, error })
     return { error: error instanceof Error ? error.message : 'Server error', success: false }
+  }
+}
+
+/**
+ * Closes an employee account only when the admin manages all of its active
+ * branch assignments. The database RPC repeats this authorization check.
+ */
+export async function closeAdminEmployeeAccount(
+  _prevState: AdminEmployeeFormState,
+  formData: FormData
+): Promise<AdminEmployeeFormState> {
+  const profile = await requireRole([GlobalRole.Admin])
+  const businessId = profile.business_id
+  if (!businessId) return { error: 'Business context missing', success: false }
+
+  const validation = closeEmployeeAccountSchema.safeParse({
+    userId: getString(formData, 'userId'),
+    reason: getString(formData, 'reason') || undefined,
+  })
+  if (!validation.success) {
+    return { error: validation.error.errors[0]?.message ?? 'Invalid close account request', success: false }
+  }
+
+  try {
+    const supabase = await createClient()
+    const serviceClient = getServiceClient()
+    const managerBranchIds = new Set(await getAccessibleBranchIds(profile.id, 'admin'))
+
+    const { data: employee, error: employeeError } = await serviceClient
+      .from('users')
+      .select('id, name, global_role')
+      .eq('business_id', businessId)
+      .eq('id', validation.data.userId)
+      .maybeSingle()
+    if (employeeError) throw employeeError
+    if (!employee || employee.global_role !== 'employee') {
+      return { error: 'Employee account not found', success: false }
+    }
+
+    const { data: assignments, error: assignmentError } = await serviceClient
+      .from('user_branch_roles')
+      .select('branch_id, is_active')
+      .eq('business_id', businessId)
+      .eq('user_id', employee.id)
+      .eq('role', 'employee')
+    if (assignmentError) throw assignmentError
+    const employeeAssignments = assignments ?? []
+    const managedAssignments = employeeAssignments.filter((row) => managerBranchIds.has(row.branch_id))
+    if (managedAssignments.length === 0) {
+      return { error: 'You can only close employees assigned to stores you manage.', success: false }
+    }
+    if (employeeAssignments.some((row) => row.is_active && !managerBranchIds.has(row.branch_id))) {
+      return { error: 'This employee also has active access to a store you do not manage. Ask the owner to close the account.', success: false }
+    }
+
+    await assertBranchAccess(profile.id, managedAssignments[0].branch_id, 'admin', 'close_employee_account')
+
+    // Remove Auth first so the account cannot refresh credentials while the
+    // profile is being finalized. If the database step fails, the retained
+    // profile keeps the email reserved and this action can be retried.
+    const { error: authDeleteError } = await serviceClient.auth.admin.deleteUser(employee.id)
+    if (authDeleteError && !authDeleteError.message.toLowerCase().includes('not found')) {
+      throw authDeleteError
+    }
+
+    const { error: closeError } = await supabase.rpc('manager_close_staff_account', {
+      p_user_id: employee.id,
+      p_reason: validation.data.reason ?? null,
+    })
+    if (closeError) throw closeError
+
+    revalidateEmployeeDashboards()
+    return { error: null, success: true, message: 'Employee account closed. Its email is now available for registration.' }
+  } catch (error: unknown) {
+    logger.error('closeAdminEmployeeAccount failed', { businessId, userId: validation.data.userId, error })
+    return { error: error instanceof Error ? error.message : 'Unable to close employee account', success: false }
   }
 }

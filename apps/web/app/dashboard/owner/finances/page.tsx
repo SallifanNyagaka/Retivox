@@ -9,6 +9,7 @@
 import { GlobalRole, formatCurrency } from '@smartretail/shared'
 import { Card, CardHeader } from '../../../../components/ui/Card'
 import { MetricCard } from '../../../../components/dashboard/MetricCard'
+import Link from 'next/link'
 import { requireRole } from '../../../../lib/auth/helpers'
 import logger from '../../../../lib/logger'
 import { createClient } from '../../../../lib/supabase/server'
@@ -23,6 +24,8 @@ import RecurringExpensePanel, {
   type RecurringExpenseInstance,
   type RecurringExpenseTemplate,
 } from './RecurringExpensePanel'
+import PaymentRefundPanel from './PaymentRefundPanel'
+import DarajaReconciliationPanel, { type PendingMobilePayment, type UnmatchedDarajaReceipt } from './DarajaReconciliationPanel'
 
 type JoinedOne<T> = T | T[] | null
 
@@ -44,6 +47,7 @@ type FinanceTransactionRow = {
   id: string
   total_amount: number | string
   discount_amount: number | string
+  is_credit_sale: boolean | null
   recorded_at: string
   branch_id: string | null
   branches: JoinedOne<{
@@ -70,6 +74,8 @@ type FinanceSummary = {
   stockIntakeCosts: number
   inventoryLosses: number
   netProfit: number
+  netProfitExcludingCredit: number
+  refunds: number
   margin: number
   netMargin: number
   transactionCount: number
@@ -155,7 +161,7 @@ type RawCashDepositRow = {
   deposit_reference: string
   note: string | null
   review_note: string | null
-  status: 'pending' | 'verified' | 'rejected'
+  status: 'pending' | 'pending_owner' | 'verified' | 'rejected'
   created_at: string
   branches: JoinedOne<{ name: string }>
 }
@@ -229,6 +235,11 @@ type FinancePageFilters = {
   endDateOnly: string
 }
 
+type FinanceRefundRow = {
+  amount: number | string
+  transactions: JoinedOne<{ branch_id: string | null }>
+}
+
 function normalizeJoinedOne<T>(value: JoinedOne<T>): T | null {
   if (!value) {
     return null
@@ -277,6 +288,8 @@ function emptySummary(): FinanceSummary {
     stockIntakeCosts: 0,
     inventoryLosses: 0,
     netProfit: 0,
+    netProfitExcludingCredit: 0,
+    refunds: 0,
     margin: 0,
     netMargin: 0,
     transactionCount: 0,
@@ -361,7 +374,8 @@ function buildSummary(
   rows: FinanceTransactionRow[],
   expenses: FinanceExpenseRow[],
   stockCosts: FinanceStockCostRow[],
-  losses: FinanceLossRow[]
+  losses: FinanceLossRow[],
+  refunds: FinanceRefundRow[]
 ): FinanceSummary {
   const byBranch = new Map<string, FinanceGroup>()
   const byProduct = new Map<string, FinanceGroup>()
@@ -371,6 +385,7 @@ function buildSummary(
   let revenue = 0
   let cost = 0
   let grossProfit = 0
+  let nonCreditGrossProfit = 0
 
   rows.forEach((transaction) => {
     const branch = normalizeJoinedOne(transaction.branches)
@@ -387,6 +402,7 @@ function buildSummary(
       revenue += lineRevenue
       cost += lineCost
       grossProfit += lineProfit
+      if (transaction.is_credit_sale !== true) nonCreditGrossProfit += lineProfit
 
       upsertGroup(byBranch, {
         id: branchId,
@@ -464,6 +480,9 @@ function buildSummary(
   }, 0)
 
   const netProfit = grossProfit - operatingExpenses - inventoryLosses
+  const refundsTotal = refunds.reduce((sum, refund) => sum + toMoneyNumber(refund.amount), 0)
+  const netProfitAfterRefunds = netProfit - refundsTotal
+  const netProfitExcludingCredit = nonCreditGrossProfit - operatingExpenses - inventoryLosses - refundsTotal
 
   return {
     revenue,
@@ -472,9 +491,11 @@ function buildSummary(
     operatingExpenses,
     stockIntakeCosts,
     inventoryLosses,
-    netProfit,
+    netProfit: netProfitAfterRefunds,
+    netProfitExcludingCredit,
+    refunds: refundsTotal,
     margin: revenue > 0 ? (grossProfit / revenue) * 100 : 0,
-    netMargin: revenue > 0 ? (netProfit / revenue) * 100 : 0,
+    netMargin: revenue > 0 ? (netProfitAfterRefunds / revenue) * 100 : 0,
     transactionCount: rows.length,
     bestStore: Array.from(byBranch.values()).sort((first, second) => second.profit - first.profit)[0] ?? null,
     byBranch: Array.from(byBranch.values()).sort((first, second) => second.profit - first.profit).slice(0, 10),
@@ -507,6 +528,7 @@ async function getFinanceSummary(businessId: string, filters: FinancePageFilters
         id,
         total_amount,
         discount_amount,
+        is_credit_sale,
         recorded_at,
         branch_id,
         branches(name),
@@ -573,7 +595,7 @@ async function getFinanceSummary(businessId: string, filters: FinancePageFilters
     lossesQuery = lossesQuery.eq('branch_id', filters.branchId)
   }
 
-  const [transactionsResponse, expensesResponse, stockCostsResponse, lossesResponse] = await Promise.all([
+  const [transactionsResponse, expensesResponse, stockCostsResponse, lossesResponse, refundsResponse] = await Promise.all([
     transactionsQuery,
     expensesQuery,
     supabase
@@ -602,12 +624,13 @@ async function getFinanceSummary(businessId: string, filters: FinancePageFilters
       .order('created_at', { ascending: false })
       .range(0, 199),
     lossesQuery,
+    supabase.from('payment_refund_requests').select('amount,transactions!inner(branch_id)').eq('business_id', businessId).eq('status', 'refunded').gte('updated_at', filters.startDate.toISOString()).lte('updated_at', filters.endDate.toISOString()).range(0, 999),
   ])
 
-  if (transactionsResponse.error || expensesResponse.error || stockCostsResponse.error || lossesResponse.error) {
+  if (transactionsResponse.error || expensesResponse.error || stockCostsResponse.error || lossesResponse.error || refundsResponse.error) {
     logger.error('Owner finances fetch failed', {
       businessId,
-      error: transactionsResponse.error ?? expensesResponse.error ?? stockCostsResponse.error ?? lossesResponse.error,
+      error: transactionsResponse.error ?? expensesResponse.error ?? stockCostsResponse.error ?? lossesResponse.error ?? refundsResponse.error,
     })
     return emptySummary()
   }
@@ -627,11 +650,17 @@ async function getFinanceSummary(businessId: string, filters: FinancePageFilters
     return delivery?.to_branch_id === filters.branchId
   })
 
+  const refunds = ((refundsResponse.data ?? []) as FinanceRefundRow[]).filter((refund) => {
+    const transaction = normalizeJoinedOne(refund.transactions)
+    return Boolean(transaction?.branch_id && activeBranchIds.includes(transaction.branch_id) && (!filters.branchId || transaction.branch_id === filters.branchId))
+  })
+
   return buildSummary(
     (transactionsResponse.data ?? []) as FinanceTransactionRow[],
     (expensesResponse.data ?? []) as FinanceExpenseRow[],
     stockCosts,
-    (lossesResponse.data ?? []) as FinanceLossRow[]
+    (lossesResponse.data ?? []) as FinanceLossRow[],
+    refunds
   )
 }
 
@@ -721,6 +750,7 @@ async function getBranchPaymentSummaries(
       eMoneyRecorded: 0,
       eMoneyVerified: 0,
       eMoneyPending: 0,
+      byMethod: {},
       pendingDepositAmount: 0,
       verifiedDepositAmount: 0,
       varianceAmount: 0,
@@ -763,6 +793,7 @@ async function getBranchPaymentSummaries(
     if (!summary) return
 
     const amount = toMoneyNumber(payment.amount)
+    summary.byMethod[payment.payment_method] = (summary.byMethod[payment.payment_method] ?? 0) + amount
 
     if (payment.payment_method === 'cash') {
       summary.cashRecorded += amount
@@ -805,8 +836,7 @@ async function getCashDeposits(
     )
     .eq('business_id', businessId)
     .in('branch_id', branchIds)
-    .gte('deposit_date', filters.startDateOnly)
-    .lte('deposit_date', filters.endDateOnly)
+    .or(`and(deposit_date.gte.${filters.startDateOnly},deposit_date.lte.${filters.endDateOnly}),status.in.(pending,pending_owner)`)
     .order('created_at', { ascending: false })
     .range(0, 99)
 
@@ -1269,11 +1299,34 @@ export default async function OwnerFinancesPage({
     getRecurringExpenseData(businessId, filters),
     getPendingEmployeeDamageReports(businessId),
   ])
-  const [basePaymentSummaries, cashDeposits] = await Promise.all([
+  const [basePaymentSummaries, cashDeposits, receivableResponse] = await Promise.all([
     getBranchPaymentSummaries(businessId, filters, formOptions.branches),
     getCashDeposits(businessId, filters, formOptions.branches),
+    (() => {
+      let query = supabase.from('receivable_account_balances').select('balance_due').eq('business_id', businessId).gt('balance_due', 0)
+      if (filters.branchId) query = query.eq('branch_id', filters.branchId)
+      return query
+    })(),
   ])
+  const [{ data: refundRequests }, { data: refundPayments }] = await Promise.all([
+    supabase.from('payment_refund_requests').select('id,payment_id,transaction_id,amount,reason,status,created_at,review_note,provider_submission_at,provider_submission_message').eq('business_id', businessId).order('created_at', { ascending: false }).limit(100),
+    supabase.from('payments').select('id,transaction_id,amount,refunded_amount,payment_method,status,provider,provider_transaction_id').eq('business_id', businessId).eq('status', 'verified').order('payment_at', { ascending: false }).limit(200),
+  ])
+  const [{ data: unmatchedDarajaReceipts, error: unmatchedReceiptsError }, { data: pendingMobilePayments, error: pendingMobilePaymentsError }] = await Promise.all([
+    supabase.from('unmatched_provider_payments')
+      .select('id,provider_transaction_id,reference_code,phone,amount,received_at')
+      .eq('business_id', businessId).eq('provider', 'daraja').eq('status', 'unmatched')
+      .order('received_at', { ascending: false }).limit(100),
+    supabase.from('payments')
+      .select('id,amount,payment_at,transactions!inner(branch_id,branches(name))')
+      .eq('business_id', businessId).eq('payment_method', 'mpesa_manual').eq('status', 'pending_verify')
+      .order('payment_at', { ascending: false }).limit(250),
+  ])
+  if (unmatchedReceiptsError || pendingMobilePaymentsError) {
+    logger.error('M-Pesa reconciliation queue failed to load', { businessId, error: unmatchedReceiptsError ?? pendingMobilePaymentsError })
+  }
   const currency = business?.currency ?? 'KES'
+  const totalLent = (receivableResponse.data ?? []).reduce((sum, account) => sum + Number(account.balance_due ?? 0), 0)
   const selectedBranch = formOptions.branches.find((branch) => branch.id === filters.branchId) ?? null
   const periodLabel = filters.period === 'week' ? 'this week' : filters.period === 'month' ? 'this month' : 'today'
   const paymentSummaries = basePaymentSummaries.map((summaryRow) => {
@@ -1282,7 +1335,7 @@ export default async function OwnerFinancesPage({
     return {
       ...summaryRow,
       pendingDepositAmount: branchDeposits
-        .filter((deposit) => deposit.status === 'pending')
+        .filter((deposit) => deposit.status === 'pending' || deposit.status === 'pending_owner')
         .reduce((sum, deposit) => sum + deposit.amount, 0),
       verifiedDepositAmount: branchDeposits
         .filter((deposit) => deposit.status === 'verified')
@@ -1317,6 +1370,7 @@ export default async function OwnerFinancesPage({
 
       <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
         <MetricCard label="Total profit" value={formatCurrency(summary.netProfit, currency)} icon={<MarginIcon />} valueColor={summary.netProfit >= 0 ? 'var(--color-success)' : 'var(--color-danger)'} />
+        <MetricCard label="Net profit excluding credit sales" value={formatCurrency(summary.netProfitExcludingCredit, currency)} icon={<MarginIcon />} valueColor={summary.netProfitExcludingCredit >= 0 ? 'var(--color-success)' : 'var(--color-danger)'} />
         <MetricCard
           label="Best store"
           value={summary.bestStore ? summary.bestStore.label : 'No sales yet'}
@@ -1325,6 +1379,8 @@ export default async function OwnerFinancesPage({
         />
         <MetricCard label="Revenue" value={formatCurrency(summary.revenue, currency)} icon={<MoneyIcon />} valueColor="var(--color-text-primary)" />
         <MetricCard label="Gross profit" value={formatCurrency(summary.grossProfit, currency)} icon={<MarginIcon />} valueColor={summary.grossProfit >= 0 ? 'var(--color-success)' : 'var(--color-danger)'} />
+        <MetricCard label="Refunds" value={formatCurrency(summary.refunds, currency)} icon={<MoneyIcon />} valueColor={summary.refunds > 0 ? 'var(--color-danger)' : 'var(--color-text-primary)'} />
+        <Link href="/dashboard/owner/receivables"><MetricCard label="Total lent (outstanding)" value={formatCurrency(totalLent, currency)} icon={<MoneyIcon />} valueColor="var(--color-accent)" /></Link>
       </div>
 
       <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
@@ -1356,6 +1412,18 @@ export default async function OwnerFinancesPage({
         deposits={cashDeposits}
         currency={currency}
         defaultDate={filters.endDateOnly}
+      />
+
+      <DarajaReconciliationPanel
+        receipts={(unmatchedDarajaReceipts ?? []) as UnmatchedDarajaReceipt[]}
+        payments={(pendingMobilePayments ?? []) as unknown as PendingMobilePayment[]}
+        currency={currency}
+      />
+
+      <PaymentRefundPanel
+        payments={(refundPayments ?? []) as { id: string; transaction_id: string; amount: number | string; refunded_amount: number | string; payment_method: string; status: string; provider: string | null; provider_transaction_id: string | null }[]}
+        requests={(refundRequests ?? []) as { id: string; payment_id: string; transaction_id: string; amount: number | string; reason: string; status: string; created_at: string; review_note: string | null; provider_submission_at: string | null; provider_submission_message: string | null }[]}
+        currency={currency}
       />
 
       <FinanceControls branches={formOptions.branches} lossProducts={formOptions.lossProducts} />

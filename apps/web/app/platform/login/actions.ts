@@ -4,7 +4,6 @@ import { timingSafeEqual } from 'node:crypto'
 import { redirect } from 'next/navigation'
 import { z } from 'zod'
 import {
-  bootstrapPlatformUserIfNeeded,
   createPlatformSession,
   hashPlatformPassword,
   isPlatformLoginRateLimited,
@@ -55,10 +54,7 @@ export async function loginPlatformUser(_prevState: PlatformLoginState, formData
       throw new Error(error.message)
     }
 
-    let user = platformUser
-    if (!user) {
-      user = await bootstrapPlatformUserIfNeeded(email, password)
-    }
+    const user = platformUser
 
     if (!user || user.is_active === false) {
       await recordLoginAttempt({

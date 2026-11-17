@@ -90,12 +90,12 @@ BEGIN
         BLOCK "040904e4"
         BEGIN
             VALUE "CompanyName", "com.retivox" "\0"
-            VALUE "FileDescription", "retivox_client" "\0"
+            VALUE "FileDescription", "Retivox" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "retivox_client" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 com.retivox. All rights reserved." "\0"
             VALUE "OriginalFilename", "retivox_client.exe" "\0"
-            VALUE "ProductName", "retivox_client" "\0"
+            VALUE "ProductName", "Retivox" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

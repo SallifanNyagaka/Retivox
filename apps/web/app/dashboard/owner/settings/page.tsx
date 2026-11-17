@@ -10,7 +10,9 @@ import { requireRole } from '../../../../lib/auth/helpers'
 import { createClient } from '../../../../lib/supabase/server'
 import { createServiceRoleClient } from '../../../../lib/supabase/admin'
 import logger from '../../../../lib/logger'
+import { effectiveSubscriptionStatus } from '../../../../lib/subscriptions/status'
 import { Card } from '../../../../components/ui/Card'
+import Link from 'next/link'
 import SettingsPageClient from './SettingsPageClient'
 import type { BusinessSettingsRow, LoginReviewRow, SubscriptionPaymentRequestRow, SubscriptionPlanOption, SubscriptionRow, UserProfileRow } from './types'
 
@@ -51,7 +53,7 @@ export default async function SettingsPage() {
         .single(),
       supabase
         .from('subscriptions')
-        .select('id, plan, status, branch_count, monthly_amount, currency, current_period_end, billing_interval, next_plan_key, next_billing_interval, next_period_start')
+        .select('id, plan, status, cancelled_at, branch_count, monthly_amount, currency, current_period_end, billing_interval, license_type, next_plan_key, next_billing_interval, next_period_start, auto_renew_enabled, auto_renew_status')
         .eq('business_id', businessId)
         .maybeSingle(),
       supabase.rpc('owner_my_subscription_payment_requests', {
@@ -62,7 +64,7 @@ export default async function SettingsPage() {
       }),
       serviceClient
         .from('platform_subscription_plans')
-        .select('id, plan_key, name, description, monthly_amount, annual_discount_percent, currency, branch_limit, sort_order')
+        .select('id, plan_key, name, description, monthly_amount, annual_discount_percent, yearly_amount, lifetime_amount, monthly_enabled, yearly_enabled, lifetime_enabled, trial_days, features, currency, branch_limit, sort_order')
         .eq('is_active', true)
         .order('sort_order', { ascending: true }),
     ])
@@ -92,7 +94,24 @@ export default async function SettingsPage() {
 
     business = businessResponse.data as BusinessSettingsRow
     ownerProfile = ownerResponse.data as UserProfileRow
-    subscription = (subscriptionResponse.data ?? null) as SubscriptionRow | null
+    const subscriptionData = (subscriptionResponse.data ?? null) as SubscriptionRow | null
+    subscription = subscriptionData
+      ? {
+          ...subscriptionData,
+          status: effectiveSubscriptionStatus(
+            subscriptionData.cancelled_at ? 'cancelled' : subscriptionData.plan === 'trial' ? 'trial' : subscriptionData.status,
+            subscriptionData.current_period_end,
+            Date.now(),
+            { isTrial: subscriptionData.plan === 'trial', cancelledAt: subscriptionData.cancelled_at },
+          ),
+        }
+      : null
+    if (business && subscription) {
+      business = {
+        ...business,
+        subscription_status: subscription.status,
+      }
+    }
     subscriptionPaymentRequests = (paymentRequestsResponse.data ?? []) as SubscriptionPaymentRequestRow[]
     loginReviews = (reviewsResponse.data ?? []) as LoginReviewRow[]
     subscriptionPlans = (plansResponse.data ?? []) as SubscriptionPlanOption[]
@@ -130,14 +149,29 @@ export default async function SettingsPage() {
   }
 
   return (
-    <SettingsPageClient
-      billingAsOf={new Date().toISOString()}
-      business={business}
-      ownerProfile={ownerProfile}
-      subscription={subscription}
-      subscriptionPlans={subscriptionPlans}
-      subscriptionPaymentRequests={subscriptionPaymentRequests}
-      loginReviews={loginReviews}
-    />
+    <div className="flex flex-col gap-4">
+      <Card padding="md">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 style={{ margin: 0, color: 'var(--color-text-primary)', fontSize: 15, fontWeight: 800 }}>Customer payment providers</h2>
+            <p style={{ margin: '4px 0 0', color: 'var(--color-text-muted)', fontSize: 13 }}>
+              Set up secure online checkout credentials for your business.
+            </p>
+          </div>
+          <Link href="/dashboard/owner/settings/payments" className="btn-primary" style={{ textDecoration: 'none', borderRadius: 9, padding: '9px 13px' }}>
+            Manage providers
+          </Link>
+        </div>
+      </Card>
+      <SettingsPageClient
+        billingAsOf={new Date().toISOString()}
+        business={business}
+        ownerProfile={ownerProfile}
+        subscription={subscription}
+        subscriptionPlans={subscriptionPlans}
+        subscriptionPaymentRequests={subscriptionPaymentRequests}
+        loginReviews={loginReviews}
+      />
+    </div>
   )
 }

@@ -7,6 +7,7 @@ import '../features/dashboard/dashboard_repository.dart';
 import '../features/sales/sale_repository.dart';
 import 'screens/login_screen.dart';
 import 'screens/role_home_screen.dart';
+import 'theme/retivox_theme.dart';
 
 class RetivoxApp extends StatefulWidget {
   const RetivoxApp({
@@ -65,27 +66,11 @@ class _RetivoxAppState extends State<RetivoxApp> {
       title: 'Retivox',
       debugShowCheckedModeBanner: false,
       themeMode: _darkMode ? ThemeMode.dark : ThemeMode.light,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF176B5B)),
-        useMaterial3: true,
-        inputDecorationTheme: const InputDecorationTheme(
-          border: OutlineInputBorder(),
-        ),
-      ),
-      darkTheme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF176B5B),
-          brightness: Brightness.dark,
-        ),
-        useMaterial3: true,
-        inputDecorationTheme: const InputDecorationTheme(
-          border: OutlineInputBorder(),
-        ),
-      ),
+      theme: RetivoxTheme.lightTheme,
+      darkTheme: RetivoxTheme.darkTheme,
       home: _user == null
           ? LoginScreen(
               repository: widget.authRepository,
-              onlineSignInConfigured: widget.isOnlineSignInConfigured,
               onAuthenticated: (user) => setState(() => _user = user),
             )
           : RoleHomeScreen(

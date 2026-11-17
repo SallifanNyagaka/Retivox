@@ -1,5 +1,5 @@
 /**
- * Reusable soft-delete confirmation button for dashboard danger zones.
+ * Reusable destructive confirmation button for dashboard danger zones.
  *
  * Uses server actions through useActionState, shows a confirmation dialog with
  * optional reason, closes itself on success, and refreshes the current route.
@@ -46,6 +46,7 @@ export default function DangerDeleteButton({ entityLabel, entityName, idField, i
   const isConfirmed = normalizedConfirmationName === normalizedEntityName
   const lowerEntityLabel = entityLabel.toLowerCase()
   const isBranchDelete = lowerEntityLabel === 'branch'
+  const isAccountClose = lowerEntityLabel.endsWith(' account')
 
   useEffect(() => {
     let resetTimer: ReturnType<typeof setTimeout> | null = null
@@ -97,7 +98,7 @@ export default function DangerDeleteButton({ entityLabel, entityName, idField, i
 
   return (
     <>
-      {isPending && <LoadingOverlay message={`Deleting ${lowerEntityLabel}...`} />}
+      {isPending && <LoadingOverlay message={`${isAccountClose ? 'Closing' : 'Deleting'} ${lowerEntityLabel}...`} />}
       {toastState && (
         <Toast
           message={toastState.message}
@@ -116,10 +117,10 @@ export default function DangerDeleteButton({ entityLabel, entityName, idField, i
           setOpen(true)
         }}
       >
-        Delete
+        {isAccountClose ? 'Close account' : 'Delete'}
       </button>
 
-      <Modal isOpen={open} title={`Delete ${lowerEntityLabel}`} onClose={closeModal}>
+      <Modal isOpen={open} title={`${isAccountClose ? 'Close' : 'Delete'} ${lowerEntityLabel}`} onClose={closeModal}>
         <form onSubmit={onSubmit} className="flex flex-col gap-4">
           <input type="hidden" name={idField} value={idValue} />
 
@@ -132,10 +133,14 @@ export default function DangerDeleteButton({ entityLabel, entityName, idField, i
             }}
           >
             <p style={{ margin: 0, fontSize: 14, fontWeight: 600, color: 'var(--color-danger)' }}>
-              This removes {entityName} from active operations.
+              {isAccountClose
+                ? `This closes ${entityName}'s Retivox account and revokes sign-in access.`
+                : `This removes ${entityName} from active operations.`}
             </p>
             <p style={{ marginTop: 6, marginBottom: 0, fontSize: 13, color: 'var(--color-danger)' }}>
-              {isBranchDelete
+              {isAccountClose
+                ? 'The account email becomes available for registration only after closure finishes successfully.'
+                : isBranchDelete
                 ? 'All active stock, employees, admins, damaged stock, and pending branch records will disappear with this branch.'
                 : `All active information added under this ${lowerEntityLabel} will be removed where it is safe to do so.`}
             </p>
@@ -145,7 +150,7 @@ export default function DangerDeleteButton({ entityLabel, entityName, idField, i
           </div>
 
           <label className="flex flex-col gap-2" style={{ fontSize: 13, color: 'var(--color-text-primary)' }}>
-            Type <strong>{entityName}</strong> to confirm
+            Type <strong>{entityName}</strong> to confirm {isAccountClose ? 'the account closure' : 'this delete'}
             <input
               name="confirmationName"
               type="text"
@@ -207,7 +212,9 @@ export default function DangerDeleteButton({ entityLabel, entityName, idField, i
               }}
               disabled={isPending || !isConfirmed}
             >
-              {isPending ? `Deleting ${lowerEntityLabel}...` : `Delete ${lowerEntityLabel}`}
+              {isPending
+                ? `${isAccountClose ? 'Closing' : 'Deleting'} ${lowerEntityLabel}...`
+                : `${isAccountClose ? 'Close' : 'Delete'} ${lowerEntityLabel}`}
             </button>
           </div>
         </form>

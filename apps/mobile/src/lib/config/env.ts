@@ -13,8 +13,6 @@ export const SUPABASE_URL =
 export const SUPABASE_ANON_KEY =
   process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ''
 
-export const WEB_APP_URL = process.env.EXPO_PUBLIC_WEB_APP_URL ?? process.env.NEXT_PUBLIC_APP_URL ?? ''
-
 export const isSupabaseConfigured = SUPABASE_URL.length > 0 && SUPABASE_ANON_KEY.length > 0
 
 /**

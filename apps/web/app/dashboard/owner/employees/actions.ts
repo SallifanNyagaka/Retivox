@@ -7,11 +7,14 @@
  */
 
 import { revalidatePath } from 'next/cache'
+import { headers } from 'next/headers'
 import { createClient as createAdminClient } from '@supabase/supabase-js'
 import { z } from 'zod'
 import { GlobalRole, registerUserSchema } from '@smartretail/shared'
 import { createClient } from '../../../../lib/supabase/server'
+import { requestOrigin } from '../../../../lib/requestOrigin'
 import { requireRole } from '../../../../lib/auth/helpers'
+import { findRetivoxEmailsInUse, isRetivoxEmailInUse, RETIVOX_EMAIL_IN_USE_MESSAGE } from '../../../../lib/auth/accountEmail'
 import logger from '../../../../lib/logger'
 import { getSpreadsheetValue, parseSpreadsheetFile } from '../../../../lib/spreadsheets/workbooks'
 import type { BranchRow, EmployeeUserRow, UserBranchRoleRow } from './types'
@@ -148,8 +151,12 @@ export async function addEmployee(_prevState: FormState, formData: FormData): Pr
       return { error: 'Selected branch was not found', success: false }
     }
 
+    if (await isRetivoxEmailInUse(serviceClient, validation.data.email)) {
+      return { error: RETIVOX_EMAIL_IN_USE_MESSAGE, success: false }
+    }
+
     const { data: authData, error: authError } = await serviceClient.auth.admin.createUser({
-      email,
+      email: validation.data.email.trim().toLowerCase(),
       password,
       email_confirm: true,
       user_metadata: {
@@ -170,7 +177,7 @@ export async function addEmployee(_prevState: FormState, formData: FormData): Pr
       id: createdAuthUserId,
       business_id: businessId,
       name,
-      email,
+      email: validation.data.email.trim().toLowerCase(),
       phone,
       global_role: 'employee',
       is_active: true,
@@ -257,9 +264,12 @@ export async function inviteEmployee(_prevState: FormState, formData: FormData):
 
   try {
     const serviceClient = getServiceClient()
-    const redirectTo = `${process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'}/employee/login`
+    if (await isRetivoxEmailInUse(serviceClient, validation.data.email)) {
+      return { error: RETIVOX_EMAIL_IN_USE_MESSAGE, success: false }
+    }
+    const redirectTo = `${requestOrigin(await headers())}/employee/login`
 
-    const { error: inviteError } = await serviceClient.auth.admin.inviteUserByEmail(email, {
+    const { error: inviteError } = await serviceClient.auth.admin.inviteUserByEmail(validation.data.email.trim().toLowerCase(), {
       redirectTo,
       data: {
         global_role: 'employee',
@@ -656,7 +666,7 @@ export async function importEmployees(_prevState: FormState, formData: FormData)
       return validation.data
     })
 
-    const uploadedEmails = parsedEmployees.map((employee) => employee.email.toLowerCase())
+    const uploadedEmails = parsedEmployees.map((employee) => employee.email.trim().toLowerCase())
     const duplicateEmail = uploadedEmails.find((email, index) => uploadedEmails.indexOf(email) !== index)
 
     if (duplicateEmail) {
@@ -680,6 +690,10 @@ export async function importEmployees(_prevState: FormState, formData: FormData)
     }
 
     const serviceClient = getServiceClient()
+    const globallyUsedEmails = await findRetivoxEmailsInUse(serviceClient, uploadedEmails)
+    if (globallyUsedEmails.length > 0) {
+      return { error: `${RETIVOX_EMAIL_IN_USE_MESSAGE} Conflicting email: ${globallyUsedEmails[0]}`, success: false }
+    }
     const createdAuthUsers: Array<{
       id: string
       name: string
@@ -693,7 +707,7 @@ export async function importEmployees(_prevState: FormState, formData: FormData)
       const results = await Promise.all(
         batch.map(async (employee) => {
           const { data: authData, error: authError } = await serviceClient.auth.admin.createUser({
-            email: employee.email,
+            email: employee.email.trim().toLowerCase(),
             password: employee.password,
             email_confirm: true,
             user_metadata: {
@@ -715,7 +729,7 @@ export async function importEmployees(_prevState: FormState, formData: FormData)
             user: {
               id: authData.user.id,
               name: employee.name,
-              email: employee.email,
+              email: employee.email.trim().toLowerCase(),
               phone: employee.phone,
               branchId: employee.branchId,
             },
@@ -855,16 +869,6 @@ export async function deleteEmployee(_prevState: FormState, formData: FormData):
       return { error: `${employee.name} is already deleted`, success: false }
     }
 
-    const { error: deleteError } = await supabase.rpc('owner_hard_delete_staff_user', {
-      p_user_id: employee.id,
-      p_reason: validation.data.reason ?? null,
-    })
-
-    if (deleteError) {
-      logger.error('deleteEmployee: hard delete RPC failed', { businessId, userId: employee.id, error: deleteError })
-      return { error: deleteError.message ?? 'Unable to delete employee', success: false }
-    }
-
     const serviceClient = getServiceClient()
     const { error: authDeleteError } = await serviceClient.auth.admin.deleteUser(employee.id)
 
@@ -873,11 +877,21 @@ export async function deleteEmployee(_prevState: FormState, formData: FormData):
       return { error: authDeleteError.message ?? 'Employee deleted from app data, but auth cleanup failed', success: false }
     }
 
+    const { error: deleteError } = await supabase.rpc('manager_close_staff_account', {
+      p_user_id: employee.id,
+      p_reason: validation.data.reason ?? null,
+    })
+
+    if (deleteError) {
+      logger.error('deleteEmployee: close account RPC failed', { businessId, userId: employee.id, error: deleteError })
+      return { error: deleteError.message ?? 'Auth access was closed, but the employee profile could not be removed. Retry the close action.', success: false }
+    }
+
     revalidatePath('/dashboard/owner/employees')
     revalidatePath('/dashboard/owner/branches')
     revalidatePath('/dashboard/admin/employees')
     logger.info('Employee hard-deleted', { businessId, userId: employee.id, actor: profile.id })
-    return { error: null, success: true, message: 'Employee deleted successfully.' }
+    return { error: null, success: true, message: 'Employee account closed. Its email is now available for registration.' }
   } catch (error: unknown) {
     logger.error('deleteEmployee: unexpected error', { businessId, error })
     return { error: error instanceof Error ? error.message : 'Server error', success: false }

@@ -4,15 +4,19 @@
  */
 
 import { revalidatePath } from 'next/cache'
+import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { GlobalRole } from '@smartretail/shared'
 import { requireRole } from '../../../../lib/auth/helpers'
 import { createClient } from '../../../../lib/supabase/server'
+import { createServiceRoleClient } from '../../../../lib/supabase/admin'
+import { getBusinessPesapalSetup, requestPesapalRefund } from '../../../../lib/payments/pesapal'
 import logger from '../../../../lib/logger'
 
 export type FinanceFormState = {
   success: boolean
   error?: string | null
+  message?: string
 }
 
 const expenseSchema = z.object({
@@ -83,6 +87,23 @@ const cashDepositReviewSchema = z.object({
   reviewNote: z.string().trim().max(180).optional(),
 })
 
+const paymentRefundSchema = z.object({
+  paymentId: z.string().uuid(),
+  amount: z.number().positive(),
+  reason: z.string().trim().min(5).max(240),
+})
+
+const refundReviewSchema = z.object({
+  refundRequestId: z.string().uuid(),
+  approved: z.boolean(),
+  note: z.string().trim().max(240).optional(),
+})
+
+const manualRefundSchema = z.object({
+  refundRequestId: z.string().uuid(),
+  reference: z.string().trim().max(100).optional(),
+})
+
 function getString(formData: FormData, key: string): string {
   const value = formData.get(key)
   return typeof value === 'string' ? value.trim() : ''
@@ -96,6 +117,114 @@ function revalidateFinanceRoutes() {
   revalidatePath('/dashboard/employee/damaged-stock')
   revalidatePath('/dashboard/employee/transactions/new')
   revalidatePath('/dashboard/employee/transactions')
+}
+
+export async function requestPaymentRefund(formData: FormData): Promise<FinanceFormState> {
+  const profile = await requireRole([GlobalRole.Owner, GlobalRole.Admin])
+  const parsed = paymentRefundSchema.safeParse({
+    paymentId: getString(formData, 'paymentId'),
+    amount: Number(getString(formData, 'amount')),
+    reason: getString(formData, 'reason'),
+  })
+  if (!parsed.success) return { success: false, error: parsed.error.errors[0]?.message ?? 'Invalid refund request' }
+  if (!profile.business_id) return { success: false, error: 'Business context missing' }
+  const supabase = await createClient()
+  const { error } = await supabase.rpc('request_payment_refund', {
+    p_payment_id: parsed.data.paymentId, p_amount: parsed.data.amount, p_reason: parsed.data.reason,
+  })
+  if (error) return { success: false, error: error.message }
+  revalidateFinanceRoutes()
+  return { success: true }
+}
+
+export async function reviewPaymentRefund(formData: FormData): Promise<FinanceFormState> {
+  const profile = await requireRole([GlobalRole.Owner, GlobalRole.Admin])
+  const parsed = refundReviewSchema.safeParse({
+    refundRequestId: getString(formData, 'refundRequestId'),
+    approved: getString(formData, 'approved') === 'true',
+    note: getString(formData, 'note') || undefined,
+  })
+  if (!parsed.success) return { success: false, error: parsed.error.errors[0]?.message ?? 'Invalid refund review' }
+  if (!profile.business_id) return { success: false, error: 'Business context missing' }
+  const supabase = await createClient()
+  const { error } = await supabase.rpc('review_payment_refund_request', {
+    p_refund_request_id: parsed.data.refundRequestId, p_approved: parsed.data.approved, p_note: parsed.data.note ?? null,
+  })
+  if (error) return { success: false, error: error.message }
+  revalidateFinanceRoutes()
+  return { success: true }
+}
+
+export async function recordManualPaymentRefund(formData: FormData): Promise<FinanceFormState> {
+  const profile = await requireRole([GlobalRole.Owner])
+  const parsed = manualRefundSchema.safeParse({
+    refundRequestId: getString(formData, 'refundRequestId'), reference: getString(formData, 'reference') || undefined,
+  })
+  if (!parsed.success) return { success: false, error: parsed.error.errors[0]?.message ?? 'Invalid refund completion' }
+  const service = createServiceRoleClient()
+  const { data: refund, error: lookupError } = await service.from('payment_refund_requests')
+    .select('id,business_id,payment_id,amount,reason,status,provider_submission_at,payments!inner(provider,provider_transaction_id,payment_method)')
+    .eq('id', parsed.data.refundRequestId).eq('business_id', profile.business_id ?? '').maybeSingle()
+  if (lookupError || !refund) return { success: false, error: lookupError?.message ?? 'Refund request was not found for this business.' }
+  const payment = Array.isArray(refund.payments) ? refund.payments[0] : refund.payments
+  if (refund.status === 'processing' && payment?.provider === 'pesapal' && (parsed.data.reference ?? '').trim().length < 3) {
+    return { success: false, error: 'Enter the actual Pesapal refund confirmation reference after checking that the customer received the funds.' }
+  }
+  if (payment?.provider === 'pesapal' && refund.status === 'approved') {
+    if (!payment.provider_transaction_id) return { success: false, error: 'The Pesapal confirmation code is missing; the refund was not submitted.' }
+    let setup: Awaited<ReturnType<typeof getBusinessPesapalSetup>>
+    try { setup = await getBusinessPesapalSetup(profile.business_id ?? '') } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Pesapal settings could not be loaded.' }
+    }
+    const { data: claimed, error: claimError } = await service.from('payment_refund_requests')
+      .update({ status: 'processing', provider_submission_message: 'Submitting refund request to Pesapal.' })
+      .eq('id', refund.id).eq('business_id', profile.business_id ?? '').eq('status', 'approved').select('id').maybeSingle()
+    if (claimError || !claimed) return { success: false, error: 'This refund has already been submitted or changed.' }
+    try {
+      const providerResult = await requestPesapalRefund(setup.config, {
+        confirmationCode: payment.provider_transaction_id, amount: Number(refund.amount),
+        username: profile.name || profile.email || 'Retivox business owner', remarks: refund.reason,
+      })
+      if (!providerResult.accepted) {
+        await service.from('payment_refund_requests').update({ status: 'approved', provider_submission_message: providerResult.message }).eq('id', refund.id).eq('status', 'processing')
+        revalidateFinanceRoutes()
+        return { success: false, error: providerResult.message }
+      }
+      await service.from('payment_refund_requests').update({ provider_submission_at: new Date().toISOString(), provider_submission_message: providerResult.message }).eq('id', refund.id).eq('status', 'processing')
+      revalidateFinanceRoutes()
+      return { success: true, message: `${providerResult.message} This does not mean the customer has received the refund yet.` }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Pesapal refund submission could not be confirmed.'
+      await service.from('payment_refund_requests').update({ provider_submission_message: `Submission result unknown: ${message}. Check Pesapal before retrying.` }).eq('id', refund.id).eq('status', 'processing')
+      revalidateFinanceRoutes()
+      return { success: false, error: `Pesapal response is uncertain. Check the merchant portal before retrying. ${message}` }
+    }
+  }
+  const supabase = await createClient()
+  const { error } = await supabase.rpc('record_manual_payment_refund', {
+    p_refund_request_id: parsed.data.refundRequestId, p_reference: parsed.data.reference ?? null,
+  })
+  if (error) return { success: false, error: error.message }
+  revalidateFinanceRoutes()
+  return { success: true }
+}
+
+export async function reconcileDarajaC2BPayment(_previous: FinanceFormState, formData: FormData): Promise<FinanceFormState> {
+  const profile = await requireRole([GlobalRole.Owner, GlobalRole.Admin])
+  const unmatchedPaymentId = getString(formData, 'unmatchedPaymentId')
+  const paymentId = getString(formData, 'paymentId')
+  if (!profile.business_id || !/^[0-9a-f-]{36}$/i.test(unmatchedPaymentId) || !/^[0-9a-f-]{36}$/i.test(paymentId)) {
+    return { success: false, error: 'Choose a valid provider receipt and pending sale payment.' }
+  }
+  const supabase = await createClient()
+  const { data, error } = await supabase.rpc('owner_reconcile_daraja_c2b_payment', {
+    p_unmatched_payment_id: unmatchedPaymentId,
+    p_payment_id: paymentId,
+  })
+  if (error) return { success: false, error: error.message }
+  if (data !== true) return { success: false, error: 'This receipt is no longer available for reconciliation.' }
+  revalidateFinanceRoutes()
+  return { success: true }
 }
 
 export async function recordFinanceExpense(_prevState: FinanceFormState, formData: FormData): Promise<FinanceFormState> {
@@ -319,7 +448,7 @@ export async function skipRecurringFinanceExpense(_prevState: FinanceFormState, 
 }
 
 export async function recordBranchCashDeposit(_prevState: FinanceFormState, formData: FormData): Promise<FinanceFormState> {
-  const profile = await requireRole([GlobalRole.Owner, GlobalRole.Admin])
+  const profile = await requireRole([GlobalRole.Owner, GlobalRole.Admin, GlobalRole.Employee])
   const validation = cashDepositSchema.safeParse({
     branchId: getString(formData, 'branchId'),
     depositDate: getString(formData, 'depositDate'),
@@ -341,12 +470,13 @@ export async function recordBranchCashDeposit(_prevState: FinanceFormState, form
 
   try {
     const supabase = await createClient()
-    const { error } = await supabase.rpc('record_branch_cash_deposit', {
+    const { error } = await supabase.rpc('record_branch_cash_deposit_v2', {
       p_branch_id: validation.data.branchId,
       p_deposit_date: validation.data.depositDate,
       p_amount: validation.data.amount,
       p_deposit_reference: validation.data.depositReference,
       p_note: validation.data.note ?? null,
+      p_local_id: randomUUID(),
     })
 
     if (error) {
@@ -365,7 +495,7 @@ export async function recordBranchCashDeposit(_prevState: FinanceFormState, form
 }
 
 export async function reviewBranchCashDeposit(_prevState: FinanceFormState, formData: FormData): Promise<FinanceFormState> {
-  const profile = await requireRole([GlobalRole.Owner])
+  const profile = await requireRole([GlobalRole.Owner, GlobalRole.Admin])
   const validation = cashDepositReviewSchema.safeParse({
     depositId: getString(formData, 'depositId'),
     action: getString(formData, 'action'),
@@ -385,10 +515,11 @@ export async function reviewBranchCashDeposit(_prevState: FinanceFormState, form
 
   try {
     const supabase = await createClient()
-    const { error } = await supabase.rpc('owner_review_branch_cash_deposit', {
+    const { error } = await supabase.rpc('review_branch_cash_deposit_v2', {
       p_deposit_id: validation.data.depositId,
       p_action: validation.data.action,
       p_review_note: validation.data.reviewNote ?? null,
+      p_local_id: randomUUID(),
     })
 
     if (error) {

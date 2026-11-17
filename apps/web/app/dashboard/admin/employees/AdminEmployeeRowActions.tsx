@@ -10,11 +10,12 @@ import Link from 'next/link'
 import { startTransition, useEffect, useRef, useState } from 'react'
 import { useActionState } from 'react'
 import { useRouter } from 'next/navigation'
+import DangerDeleteButton from '../../../../components/dashboard/DangerDeleteButton'
 import LoadingOverlay from '../../../../components/ui/LoadingOverlay'
 import Modal from '../../../../components/ui/Modal'
 import Toast from '../../../../components/ui/Toast'
 import { useToast } from '../../../../lib/hooks/useToast'
-import { setEmployeeBranchAccess, type AdminEmployeeFormState } from './actions'
+import { closeAdminEmployeeAccount, setEmployeeBranchAccess, type AdminEmployeeFormState } from './actions'
 
 /**
  * Row action employee payload.
@@ -128,6 +129,13 @@ export default function AdminEmployeeRowActions({ employee }: Props) {
         >
           {employee.accountIsActive ? actionLabel : 'Account inactive'}
         </button>
+        <DangerDeleteButton
+          entityLabel="employee account"
+          entityName={employee.name}
+          idField="userId"
+          idValue={employee.userId}
+          action={closeAdminEmployeeAccount}
+        />
       </div>
 
       <Modal isOpen={confirmOpen} title={actionLabel} onClose={() => setConfirmOpen(false)}>

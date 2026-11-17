@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../../core/auth/retivox_user.dart';
 import '../../features/dashboard/dashboard_repository.dart';
 
+enum ProductFormSaveResult { saved, queued }
+
 class _PricePointDraft {
   _PricePointDraft({
     required this.uomId,
@@ -53,6 +55,7 @@ class _ProductFormDialogState extends State<ProductFormDialog> {
   late final TextEditingController _subcategory;
   late final TextEditingController _brandFamily;
   late final TextEditingController _description;
+  late final TextEditingController _barcodes;
   late final TextEditingController _basePrice;
   late final TextEditingController _minPrice;
   late final TextEditingController _maxPrice;
@@ -70,8 +73,17 @@ class _ProductFormDialogState extends State<ProductFormDialog> {
   final Set<String> _purchaseUnitIds = {};
   final Set<String> _saleUnitIds = {};
   bool _saving = false;
+  bool _tracksExpiry = false;
+  int _activeStep = 0;
 
   bool get _isEditing => widget.product != null;
+
+  List<String> get _barcodeValues => _barcodes.text
+      .split(RegExp(r'[\r\n,]+'))
+      .map((value) => value.trim())
+      .where((value) => value.isNotEmpty)
+      .toSet()
+      .toList();
 
   @override
   void initState() {
@@ -92,6 +104,11 @@ class _ProductFormDialogState extends State<ProductFormDialog> {
     _description = TextEditingController(
       text: product?['description']?.toString() ?? '',
     );
+    _barcodes = TextEditingController(
+      text: (product?['barcodes'] as List? ?? const [])
+          .map((code) => code.toString())
+          .join('\n'),
+    );
     _basePrice = TextEditingController(
       text: pricing?['base_price']?.toString() ?? '',
     );
@@ -105,6 +122,7 @@ class _ProductFormDialogState extends State<ProductFormDialog> {
     _productKind = product?['product_kind']?.toString() == 'measured_counted'
         ? 'measured_counted'
         : 'fixed_package';
+    _tracksExpiry = product?['tracks_expiry'] == true;
     if (_isEditing) {
       final links = _rows(product?['product_uom_links']);
       final baseLink = links.where((link) => link['is_base_uom'] == true);
@@ -270,6 +288,7 @@ class _ProductFormDialogState extends State<ProductFormDialog> {
     _subcategory.dispose();
     _brandFamily.dispose();
     _description.dispose();
+    _barcodes.dispose();
     _basePrice.dispose();
     _minPrice.dispose();
     _maxPrice.dispose();
@@ -299,6 +318,9 @@ class _ProductFormDialogState extends State<ProductFormDialog> {
         .toList();
   }
 
+  static String _numberText(Object? value) =>
+      double.tryParse(value?.toString() ?? '')?.toString() ?? '—';
+
   double? _number(TextEditingController controller) =>
       double.tryParse(controller.text.trim());
 
@@ -306,6 +328,7 @@ class _ProductFormDialogState extends State<ProductFormDialog> {
     final name = TextEditingController();
     final abbreviation = TextEditingController();
     final factor = TextEditingController(text: '1');
+    var isBaseUnit = false;
     var saving = false;
     String? error;
     try {
@@ -346,6 +369,18 @@ class _ProductFormDialogState extends State<ProductFormDialog> {
                           'Example: one carton contains 12 base-unit items.',
                     ),
                   ),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    value: isBaseUnit,
+                    onChanged: saving
+                        ? null
+                        : (value) =>
+                              setDialogState(() => isBaseUnit = value == true),
+                    title: const Text('Mark as a base unit'),
+                    subtitle: const Text(
+                      'A base unit must convert to exactly 1 base unit.',
+                    ),
+                  ),
                   if (error != null)
                     Align(
                       alignment: Alignment.centerLeft,
@@ -374,7 +409,8 @@ class _ProductFormDialogState extends State<ProductFormDialog> {
                             conversion <= 0 ||
                             conversion >= 1000000 ||
                             (conversion * 10000).roundToDouble() !=
-                                conversion * 10000) {
+                                conversion * 10000 ||
+                            (isBaseUnit && conversion != 1)) {
                           setDialogState(
                             () => error = 'Use a positive conversion factor with at most four decimal places.',
                           );
@@ -391,6 +427,7 @@ class _ProductFormDialogState extends State<ProductFormDialog> {
                                 name: name.text,
                                 abbreviation: abbreviation.text,
                                 conversionFactor: conversion,
+                                isBaseUnit: isBaseUnit,
                               );
                           if (!dialogContext.mounted) return;
                           Navigator.pop(dialogContext, {
@@ -398,7 +435,7 @@ class _ProductFormDialogState extends State<ProductFormDialog> {
                             'name': name.text.trim(),
                             'abbreviation': abbreviation.text.trim(),
                             'conversion_factor': conversion,
-                            'is_base_unit': false,
+                            'is_base_unit': isBaseUnit,
                           });
                         } catch (exception) {
                           if (dialogContext.mounted) {
@@ -440,9 +477,15 @@ class _ProductFormDialogState extends State<ProductFormDialog> {
         }
         _salePriceController(id);
       });
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Unit of measure created.')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            id.startsWith('local-uom:')
+                ? 'UOM saved offline and queued to sync.'
+                : 'UOM created.',
+          ),
+        ),
+      );
     } finally {
       name.dispose();
       abbreviation.dispose();
@@ -451,7 +494,39 @@ class _ProductFormDialogState extends State<ProductFormDialog> {
   }
 
   Future<void> _save() async {
+    if (_required(_name.text, 'Product name') != null ||
+        _required(_sku.text, 'SKU') != null ||
+        _required(_category.text, 'Category') != null) {
+      setState(() => _activeStep = 0);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Complete the required product details first.'),
+        ),
+      );
+      return;
+    }
+    if (_baseUnitId == null ||
+        _purchaseUnitIds.isEmpty ||
+        _saleUnitIds.isEmpty ||
+        !_purchaseUnitIds.contains(_defaultPurchaseUnitId) ||
+        !_saleUnitIds.contains(_defaultSaleUnitId)) {
+      setState(() => _activeStep = 1);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Complete the base, purchase, and sale unit selections.',
+          ),
+        ),
+      );
+      return;
+    }
     if (!_formKey.currentState!.validate()) return;
+    if (_barcodeValues.length > 25 || _barcodeValues.any((code) => code.length > 128)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Add up to 25 barcode values, each no longer than 128 characters.')),
+      );
+      return;
+    }
     final basePrice = _number(_basePrice);
     final minPrice = _number(_minPrice);
     final maxPrice = _number(_maxPrice);
@@ -536,62 +611,87 @@ class _ProductFormDialogState extends State<ProductFormDialog> {
     setState(() => _saving = true);
     try {
       final product = widget.product;
+      var queued = false;
       if (product == null) {
-        await widget.repository.createProduct(
-          widget.user,
-          name: _name.text,
-          sku: _sku.text,
-          category: _category.text,
-          description: _description.text,
-          productKind: _productKind,
-          subcategory: _subcategory.text,
-          brandFamily: _brandFamily.text,
-          baseUnitId: _baseUnitId!,
-          purchaseUnitIds: _purchaseUnitIds.toList(),
-          saleUnitIds: selectedSaleUnitIds,
-          defaultPurchaseUnitId: _defaultPurchaseUnitId!,
-          defaultSaleUnitId: _defaultSaleUnitId!,
-          salePrices: salePrices,
-          pricePoints: pricePoints,
-          pricingBranchIds: _pricingBranchScope == 'branch'
-              ? _pricingBranchIds.toList()
-              : const [],
-          pricingMethod: _pricingMethod,
-          roundingRule: _roundingRule,
-          basePrice: basePrice,
-          minPrice: minPrice,
-          maxPrice: maxPrice,
-        );
+        final resultId = await widget.repository
+            .createProduct(
+              widget.user,
+              name: _name.text,
+              sku: _sku.text,
+              category: _category.text,
+              description: _description.text,
+              productKind: _productKind,
+              subcategory: _subcategory.text,
+              brandFamily: _brandFamily.text,
+              baseUnitId: _baseUnitId!,
+              purchaseUnitIds: _purchaseUnitIds.toList(),
+              saleUnitIds: selectedSaleUnitIds,
+              defaultPurchaseUnitId: _defaultPurchaseUnitId!,
+              defaultSaleUnitId: _defaultSaleUnitId!,
+              salePrices: salePrices,
+              pricePoints: pricePoints,
+              pricingBranchIds: _pricingBranchScope == 'branch'
+                  ? _pricingBranchIds.toList()
+                  : const [],
+              pricingMethod: _pricingMethod,
+              roundingRule: _roundingRule,
+              basePrice: basePrice,
+              minPrice: minPrice,
+              maxPrice: maxPrice,
+              tracksExpiry: _tracksExpiry,
+              barcodes: _barcodeValues,
+            )
+            .timeout(
+              const Duration(seconds: 45),
+              onTimeout: () => throw const DashboardRepositoryException(
+                'The save request timed out. Check the product list before retrying.',
+              ),
+            );
+        queued = resultId.startsWith('pending:');
       } else {
-        await widget.repository.updateProduct(
-          widget.user,
-          productId: product['id'].toString(),
-          name: _name.text,
-          sku: _sku.text,
-          category: _category.text,
-          unit: _unit.text,
-          description: _description.text,
-          productKind: _productKind,
-          subcategory: _subcategory.text,
-          brandFamily: _brandFamily.text,
-          basePrice: basePrice,
-          minPrice: minPrice,
-          maxPrice: maxPrice,
-          baseUnitId: _baseUnitId!,
-          purchaseUnitIds: _purchaseUnitIds.toList(),
-          saleUnitIds: selectedSaleUnitIds,
-          defaultPurchaseUnitId: _defaultPurchaseUnitId!,
-          defaultSaleUnitId: _defaultSaleUnitId!,
-          salePrices: salePrices,
-          pricePoints: pricePoints,
-          pricingBranchIds: _pricingBranchScope == 'branch'
-              ? _pricingBranchIds.toList()
-              : const [],
-          pricingMethod: _pricingMethod,
-          roundingRule: _roundingRule,
+        final resultId = await widget.repository
+            .updateProduct(
+              widget.user,
+              productId: product['id'].toString(),
+              name: _name.text,
+              sku: _sku.text,
+              category: _category.text,
+              unit: _unit.text,
+              description: _description.text,
+              productKind: _productKind,
+              subcategory: _subcategory.text,
+              brandFamily: _brandFamily.text,
+              basePrice: basePrice,
+              minPrice: minPrice,
+              maxPrice: maxPrice,
+              baseUnitId: _baseUnitId!,
+              purchaseUnitIds: _purchaseUnitIds.toList(),
+              saleUnitIds: selectedSaleUnitIds,
+              defaultPurchaseUnitId: _defaultPurchaseUnitId!,
+              defaultSaleUnitId: _defaultSaleUnitId!,
+              salePrices: salePrices,
+              pricePoints: pricePoints,
+              pricingBranchIds: _pricingBranchScope == 'branch'
+                  ? _pricingBranchIds.toList()
+                  : const [],
+              pricingMethod: _pricingMethod,
+              roundingRule: _roundingRule,
+              tracksExpiry: _tracksExpiry,
+              barcodes: _barcodeValues,
+            )
+            .timeout(
+              const Duration(seconds: 45),
+              onTimeout: () => throw const DashboardRepositoryException(
+                'The save request timed out. Check the product list before retrying.',
+              ),
+            );
+        queued = resultId.startsWith('pending:');
+      }
+      if (mounted) {
+        await _closeWithResult(
+          queued ? ProductFormSaveResult.queued : ProductFormSaveResult.saved,
         );
       }
-      if (mounted) Navigator.of(context).pop(true);
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -632,6 +732,46 @@ class _ProductFormDialogState extends State<ProductFormDialog> {
         : _saleUnitIds.first;
     if (unitId == null) return;
     setState(() => _pricePoints.add(_PricePointDraft(uomId: unitId)));
+  }
+
+  Future<void> _cancelForm() async {
+    if (_saving) {
+      final closeAnyway = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Close while saving?'),
+          content: const Text(
+            'The server request may still finish after this form closes. Check the product list before trying again.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(
+                dialogContext,
+                rootNavigator: true,
+              ).maybePop(false),
+              child: const Text('Keep editing'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(
+                dialogContext,
+                rootNavigator: true,
+              ).maybePop(true),
+              child: const Text('Close form'),
+            ),
+          ],
+        ),
+      );
+      if (closeAnyway != true || !mounted) return;
+    }
+    await Navigator.of(
+      context,
+      rootNavigator: true,
+    ).maybePop<ProductFormSaveResult>(null);
+  }
+
+  Future<void> _closeWithResult(ProductFormSaveResult result) async {
+    if (!mounted) return;
+    await Navigator.of(context, rootNavigator: true).maybePop(result);
   }
 
   void _toggleUnit(
@@ -710,608 +850,769 @@ class _ProductFormDialogState extends State<ProductFormDialog> {
     return AlertDialog(
       title: Text(_isEditing ? 'Edit product' : 'Add product'),
       content: SizedBox(
-        width: 540,
+        width: 900,
         child: Form(
           key: _formKey,
           child: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                TextFormField(
-                  controller: _name,
-                  decoration: const InputDecoration(labelText: 'Product name'),
-                  validator: (value) => _required(value, 'Product name'),
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextFormField(
-                        controller: _sku,
-                        decoration: const InputDecoration(labelText: 'SKU'),
-                        validator: (value) => _required(value, 'SKU'),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: TextFormField(
-                        controller: _category,
-                        decoration: InputDecoration(labelText: 'Category'),
-                        validator: (value) => _required(value, 'Category'),
-                      ),
-                    ),
+                SegmentedButton<int>(
+                  segments: const [
+                    ButtonSegment(value: 0, label: Text('Details')),
+                    ButtonSegment(value: 1, label: Text('Units')),
+                    ButtonSegment(value: 2, label: Text('Pricing')),
                   ],
+                  selected: {_activeStep},
+                  onSelectionChanged: _saving
+                      ? null
+                      : (selected) =>
+                            setState(() => _activeStep = selected.first),
                 ),
-                const SizedBox(height: 10),
-                DropdownButtonFormField<String>(
-                  initialValue: _productKind,
-                  decoration: const InputDecoration(labelText: 'Product type'),
-                  items: const [
-                    DropdownMenuItem(
-                      value: 'fixed_package',
-                      child: Text('Fixed package'),
+                const SizedBox(height: 16),
+                if (_activeStep == 0) ...[
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'Product details',
+                      style: Theme.of(context).textTheme.titleMedium,
                     ),
-                    DropdownMenuItem(
-                      value: 'measured_counted',
-                      child: Text('Measured / counted'),
-                    ),
-                  ],
-                  onChanged: (value) {
-                    if (value != null) setState(() => _productKind = value);
-                  },
-                ),
-                const SizedBox(height: 10),
-                DropdownButtonFormField<String>(
-                  initialValue: _baseUnitId,
-                  decoration: const InputDecoration(
-                    labelText: 'Base unit',
-                    helperText: 'The base unit must have conversion factor 1.',
                   ),
-                  items: widget.units
-                      .where(
-                        (unit) =>
-                            double.tryParse(
-                              unit['conversion_factor']?.toString() ?? '',
-                            ) ==
-                            1,
-                      )
-                      .map(
-                        (unit) => DropdownMenuItem(
-                          value: unit['id']?.toString(),
-                          child: Text(
-                            '${unit['name'] ?? 'Unit'}'
-                            ' (${unit['abbreviation'] ?? ''})'
-                            ' · 1 = ${unit['conversion_factor'] ?? 1} base',
+                  const SizedBox(height: 8),
+                  Text(
+                    'Identify the item and how it is counted. These details help staff find the right product at checkout.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  TextFormField(
+                    controller: _name,
+                    decoration: const InputDecoration(
+                      labelText: 'Product name',
+                      helperText:
+                          'Use the name staff and customers will recognize.',
+                    ),
+                    validator: (value) => _required(value, 'Product name'),
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextFormField(
+                          controller: _sku,
+                          decoration: const InputDecoration(
+                            labelText: 'SKU',
+                            helperText:
+                                'Unique code used to identify this product.',
+                          ),
+                          validator: (value) => _required(value, 'SKU'),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: TextFormField(
+                          controller: _category,
+                          decoration: const InputDecoration(
+                            labelText: 'Category',
+                            helperText: 'For example: Food or Detergents.',
+                          ),
+                          validator: (value) => _required(value, 'Category'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  DropdownButtonFormField<String>(
+                    initialValue: _productKind,
+                    decoration: const InputDecoration(
+                      labelText: 'Product type',
+                      helperText:
+                          'Choose measured for items sold by weight or count.',
+                    ),
+                    items: const [
+                      DropdownMenuItem(
+                        value: 'fixed_package',
+                        child: Text('Fixed package'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'measured_counted',
+                        child: Text('Measured / counted'),
+                      ),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) setState(() => _productKind = value);
+                    },
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextFormField(
+                          controller: _subcategory,
+                          decoration: const InputDecoration(
+                            labelText: 'Subcategory (optional)',
+                            helperText: 'A more specific group, such as Powder Detergent.',
                           ),
                         ),
-                      )
-                      .toList(),
-                  onChanged: (value) {
-                    if (value == null) return;
-                    final unit = widget.units.firstWhere(
-                      (candidate) => candidate['id']?.toString() == value,
-                    );
-                    setState(() {
-                      _baseUnitId = value;
-                      _unit.text =
-                          unit['abbreviation']?.toString() ??
-                          unit['name']?.toString() ??
-                          '';
-                      _purchaseUnitIds.add(value);
-                      _saleUnitIds.add(value);
-                      _defaultPurchaseUnitId ??= value;
-                      _defaultSaleUnitId ??= value;
-                    });
-                  },
-                  validator: (value) => value == null
-                      ? 'Select an active unit with conversion factor 1.'
-                      : null,
-                ),
-                const SizedBox(height: 14),
-                _unitChoices(
-                  'Available purchase units',
-                  _purchaseUnitIds,
-                  'purchase',
-                  isSaleUnit: false,
-                ),
-                if (_isEditing)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 6),
-                    child: Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(
-                        'Unit assignment changes affect future stock and sales. '
-                        'Existing transactions and inactive pricing models are retained.',
-                        style: Theme.of(context).textTheme.bodySmall,
                       ),
-                    ),
-                  ),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: TextButton.icon(
-                    onPressed: _saving ? null : _createUnit,
-                    icon: const Icon(Icons.add),
-                    label: const Text('Add unit or pack'),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                DropdownButtonFormField<String>(
-                  initialValue:
-                      widget.units.any(
-                        (unit) =>
-                            unit['id']?.toString() == _defaultPurchaseUnitId,
-                      )
-                      ? _defaultPurchaseUnitId
-                      : null,
-                  decoration: const InputDecoration(
-                    labelText: 'Default purchase unit',
-                  ),
-                  items: widget.units
-                      .where(
-                        (unit) =>
-                            _purchaseUnitIds.contains(unit['id']?.toString()),
-                      )
-                      .map(
-                        (unit) => DropdownMenuItem(
-                          value: unit['id']?.toString(),
-                          child: Text(
-                            '${unit['name'] ?? 'Unit'}'
-                            ' (${unit['abbreviation'] ?? ''})',
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: TextFormField(
+                          controller: _brandFamily,
+                          decoration: const InputDecoration(
+                            labelText: 'Brand / family (optional)',
+                            helperText: 'Brand name or product family.',
                           ),
                         ),
-                      )
-                      .toList(),
-                  onChanged: (value) =>
-                      setState(() => _defaultPurchaseUnitId = value),
-                  validator: (value) =>
-                      value == null ? 'Select a default purchase unit.' : null,
-                ),
-                const SizedBox(height: 14),
-                _unitChoices(
-                  'Available sale units',
-                  _saleUnitIds,
-                  'sale',
-                  isSaleUnit: true,
-                ),
-                const SizedBox(height: 12),
-                DropdownButtonFormField<String>(
-                  initialValue:
-                      widget.units.any(
-                        (unit) => unit['id']?.toString() == _defaultSaleUnitId,
-                      )
-                      ? _defaultSaleUnitId
-                      : null,
-                  decoration: const InputDecoration(
-                    labelText: 'Default sale unit',
+                      ),
+                    ],
                   ),
-                  items: widget.units
-                      .where(
-                        (unit) => _saleUnitIds.contains(unit['id']?.toString()),
-                      )
-                      .map(
-                        (unit) => DropdownMenuItem(
-                          value: unit['id']?.toString(),
-                          child: Text(
-                            '${unit['name'] ?? 'Unit'}'
-                            ' (${unit['abbreviation'] ?? ''})',
+                  const SizedBox(height: 10),
+                  TextFormField(
+                    controller: _description,
+                    maxLines: 3,
+                    decoration: const InputDecoration(
+                      labelText: 'Description (optional)',
+                      helperText: 'Extra details that help staff distinguish this item.',
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextFormField(
+                    controller: _barcodes,
+                    maxLines: 2,
+                    decoration: const InputDecoration(
+                      labelText: 'Barcode values (optional)',
+                      helperText: 'One per line. Existing codes remain linked when editing.',
+                    ),
+                  ),
+                  SwitchListTile.adaptive(
+                    contentPadding: EdgeInsets.zero,
+                    value: _tracksExpiry,
+                    onChanged: _saving
+                        ? null
+                        : (value) => setState(() => _tracksExpiry = value),
+                    title: const Text('Track expiry by batch'),
+                    subtitle: const Text(
+                      'Require an expiry date each time this product is received.',
+                    ),
+                  ),
+                ],
+                if (_activeStep == 1) ...[
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'Units of measure',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'The base unit is the smallest stock unit. Purchase and sale units describe the packs you receive and sell.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 10),
+                  DropdownButtonFormField<String>(
+                    initialValue: _baseUnitId,
+                    decoration: const InputDecoration(
+                      labelText: 'Base unit',
+                      helperText:
+                          'The base unit must have conversion factor 1.',
+                    ),
+                    items: widget.units
+                        .where(
+                          (unit) =>
+                              double.tryParse(
+                                unit['conversion_factor']?.toString() ?? '',
+                              ) ==
+                              1,
+                        )
+                        .map(
+                          (unit) => DropdownMenuItem(
+                            value: unit['id']?.toString(),
+                            child: Text(
+                              '${unit['name'] ?? 'Unit'}'
+                              ' (${unit['abbreviation'] ?? ''})'
+                              ' · 1 = ${unit['conversion_factor'] ?? 1} base',
+                            ),
                           ),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: (value) =>
-                      setState(() => _defaultSaleUnitId = value),
-                  validator: (value) =>
-                      value == null ? 'Select a default sale unit.' : null,
-                ),
-                if (!_isEditing && !unitsAvailable)
-                  const Padding(
-                    padding: EdgeInsets.only(top: 8),
-                    child: Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(
-                        'Add a unit or pack above to start product setup. '
-                        'Create a unit with conversion factor 1 to define a base unit.',
-                      ),
-                    ),
-                  ),
-                const SizedBox(height: 12),
-                DropdownButtonFormField<String>(
-                  initialValue: _pricingMethod,
-                  decoration: const InputDecoration(
-                    labelText: 'Pricing method',
-                    helperText: 'Fixed price for one price; assisted or manual for quantity points.',
-                  ),
-                  items: const [
-                    DropdownMenuItem(
-                      value: 'fixed_price',
-                      child: Text('Fixed price'),
-                    ),
-                    DropdownMenuItem(
-                      value: 'assisted_pack',
-                      child: Text('System assisted'),
-                    ),
-                    DropdownMenuItem(
-                      value: 'manual_quantity',
-                      child: Text('Manual quantity prices'),
-                    ),
-                  ],
-                  onChanged: (value) {
-                    if (value != null) {
-                      setState(() => _pricingMethod = value);
-                    }
-                  },
-                ),
-                if (_pricingMethod == 'assisted_pack')
-                  Padding(
-                    padding: const EdgeInsets.only(top: 8),
-                    child: DropdownButtonFormField<String>(
-                      initialValue: _roundingRule,
-                      decoration: const InputDecoration(
-                        labelText: 'Assisted price rounding',
-                      ),
-                      items: const [
-                        DropdownMenuItem(
-                          value: 'none',
-                          child: Text('No rounding'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'nearest_5',
-                          child: Text('Nearest 5'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'up_5',
-                          child: Text('Round up to 5'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'down_5',
-                          child: Text('Round down to 5'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'nearest_10',
-                          child: Text('Nearest 10'),
-                        ),
-                      ],
-                      onChanged: (value) {
-                        if (value != null) {
-                          setState(() => _roundingRule = value);
-                        }
-                      },
-                    ),
-                  ),
-                const SizedBox(height: 8),
-                DropdownButtonFormField<String>(
-                  initialValue: _pricingBranchScope,
-                  decoration: const InputDecoration(
-                    labelText: 'Pricing applies to',
-                  ),
-                  items: const [
-                    DropdownMenuItem(value: 'all', child: Text('All branches')),
-                    DropdownMenuItem(
-                      value: 'branch',
-                      child: Text('Selected branches only'),
-                    ),
-                  ],
-                  onChanged: (value) {
-                    if (value != null) {
+                        )
+                        .toList(),
+                    onChanged: (value) {
+                      if (value == null) return;
+                      final unit = widget.units.firstWhere(
+                        (candidate) => candidate['id']?.toString() == value,
+                      );
                       setState(() {
-                        _pricingBranchScope = value;
-                        if (value == 'all') _pricingBranchIds.clear();
+                        _baseUnitId = value;
+                        _unit.text =
+                            unit['abbreviation']?.toString() ??
+                            unit['name']?.toString() ??
+                            '';
+                        _purchaseUnitIds.add(value);
+                        _saleUnitIds.add(value);
+                        _defaultPurchaseUnitId ??= value;
+                        _defaultSaleUnitId ??= value;
                       });
-                    }
-                  },
-                ),
-                if (_pricingBranchScope == 'branch')
-                  Padding(
-                    padding: const EdgeInsets.only(top: 8),
-                    child: Container(
+                    },
+                    validator: (value) => value == null
+                        ? 'Select an active unit with conversion factor 1.'
+                        : null,
+                  ),
+                  const SizedBox(height: 14),
+                  _unitChoices(
+                    'Available purchase units',
+                    _purchaseUnitIds,
+                    'purchase',
+                    isSaleUnit: false,
+                  ),
+                  if (_isEditing)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          'Unit assignment changes affect future stock and sales. '
+                          'Existing transactions and inactive pricing models are retained.',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ),
+                    ),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton.icon(
+                      onPressed: _saving ? null : _createUnit,
+                      icon: const Icon(Icons.add),
+                      label: const Text('Add UOM'),
+                    ),
+                  ),
+                  Card(
+                    margin: const EdgeInsets.only(top: 4, bottom: 8),
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Text(
+                            'Current UOMs',
+                            style: Theme.of(context).textTheme.titleSmall,
+                          ),
+                          const SizedBox(height: 8),
+                          if (widget.units.isEmpty)
+                            const Text(
+                              'No units are available yet. Add a UOM to continue.',
+                            )
+                          else
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: widget.units.map((unit) {
+                                final factor = _numberText(
+                                  unit['conversion_factor'],
+                                );
+                                final pending = unit['is_pending_sync'] == true;
+                                return Chip(
+                                  avatar: Icon(
+                                    unit['is_base_unit'] == true
+                                        ? Icons.inventory_2_outlined
+                                        : Icons.straighten,
+                                    size: 16,
+                                  ),
+                                  label: Text(
+                                    '${unit['name'] ?? 'Unit'} (${unit['abbreviation'] ?? ''}) · $factor base${pending ? ' · Pending sync' : ''}',
+                                  ),
+                                );
+                              }).toList(),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    initialValue:
+                        widget.units.any(
+                          (unit) =>
+                              unit['id']?.toString() == _defaultPurchaseUnitId,
+                        )
+                        ? _defaultPurchaseUnitId
+                        : null,
+                    decoration: const InputDecoration(
+                      labelText: 'Default purchase unit',
+                    ),
+                    items: widget.units
+                        .where(
+                          (unit) =>
+                              _purchaseUnitIds.contains(unit['id']?.toString()),
+                        )
+                        .map(
+                          (unit) => DropdownMenuItem(
+                            value: unit['id']?.toString(),
+                            child: Text(
+                              '${unit['name'] ?? 'Unit'}'
+                              ' (${unit['abbreviation'] ?? ''})',
+                            ),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (value) =>
+                        setState(() => _defaultPurchaseUnitId = value),
+                    validator: (value) => value == null
+                        ? 'Select a default purchase unit.'
+                        : null,
+                  ),
+                  const SizedBox(height: 14),
+                  _unitChoices(
+                    'Available sale units',
+                    _saleUnitIds,
+                    'sale',
+                    isSaleUnit: true,
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    initialValue:
+                        widget.units.any(
+                          (unit) =>
+                              unit['id']?.toString() == _defaultSaleUnitId,
+                        )
+                        ? _defaultSaleUnitId
+                        : null,
+                    decoration: const InputDecoration(
+                      labelText: 'Default sale unit',
+                    ),
+                    items: widget.units
+                        .where(
+                          (unit) =>
+                              _saleUnitIds.contains(unit['id']?.toString()),
+                        )
+                        .map(
+                          (unit) => DropdownMenuItem(
+                            value: unit['id']?.toString(),
+                            child: Text(
+                              '${unit['name'] ?? 'Unit'}'
+                              ' (${unit['abbreviation'] ?? ''})',
+                            ),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (value) =>
+                        setState(() => _defaultSaleUnitId = value),
+                    validator: (value) =>
+                        value == null ? 'Select a default sale unit.' : null,
+                  ),
+                  if (!_isEditing && !unitsAvailable)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 8),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          'Add a unit or pack above to start product setup. '
+                          'Create a unit with conversion factor 1 to define a base unit.',
+                        ),
+                      ),
+                    ),
+                ],
+                if (_activeStep == 2) ...[
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'Pricing',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Set the default price range and choose whether prices are the same everywhere or limited to selected branches.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    initialValue: _pricingMethod,
+                    decoration: const InputDecoration(
+                      labelText: 'Pricing method',
+                      helperText: 'Fixed price for one price; assisted or manual for quantity points.',
+                    ),
+                    items: const [
+                      DropdownMenuItem(
+                        value: 'fixed_price',
+                        child: Text('Fixed price'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'assisted_pack',
+                        child: Text('System assisted'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'manual_quantity',
+                        child: Text('Manual quantity prices'),
+                      ),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) {
+                        setState(() => _pricingMethod = value);
+                      }
+                    },
+                  ),
+                  if (_pricingMethod == 'assisted_pack')
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: DropdownButtonFormField<String>(
+                        initialValue: _roundingRule,
+                        decoration: const InputDecoration(
+                          labelText: 'Assisted price rounding',
+                        ),
+                        items: const [
+                          DropdownMenuItem(
+                            value: 'none',
+                            child: Text('No rounding'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'nearest_5',
+                            child: Text('Nearest 5'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'up_5',
+                            child: Text('Round up to 5'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'down_5',
+                            child: Text('Round down to 5'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'nearest_10',
+                            child: Text('Nearest 10'),
+                          ),
+                        ],
+                        onChanged: (value) {
+                          if (value != null) {
+                            setState(() => _roundingRule = value);
+                          }
+                        },
+                      ),
+                    ),
+                  const SizedBox(height: 8),
+                  DropdownButtonFormField<String>(
+                    initialValue: _pricingBranchScope,
+                    decoration: const InputDecoration(
+                      labelText: 'Pricing applies to',
+                    ),
+                    items: const [
+                      DropdownMenuItem(
+                        value: 'all',
+                        child: Text('All branches'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'branch',
+                        child: Text('Selected branches only'),
+                      ),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) {
+                        setState(() {
+                          _pricingBranchScope = value;
+                          if (value == 'all') _pricingBranchIds.clear();
+                        });
+                      }
+                    },
+                  ),
+                  if (_pricingBranchScope == 'branch')
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Container(
+                        width: double.infinity,
+                        constraints: const BoxConstraints(maxHeight: 160),
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          border: Border.all(
+                            color: Theme.of(context).dividerColor,
+                          ),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: widget.branches.isEmpty
+                            ? const Text(
+                                'No active branches are available for branch-specific pricing.',
+                              )
+                            : ListView(
+                                shrinkWrap: true,
+                                children: widget.branches.map((branch) {
+                                  final id = branch['id']?.toString() ?? '';
+                                  return CheckboxListTile(
+                                    dense: true,
+                                    contentPadding: EdgeInsets.zero,
+                                    title: Text(
+                                      branch['name']?.toString() ?? 'Branch',
+                                    ),
+                                    value: _pricingBranchIds.contains(id),
+                                    onChanged: _saving
+                                        ? null
+                                        : (selected) {
+                                            setState(() {
+                                              if (selected == true) {
+                                                _pricingBranchIds.add(id);
+                                              } else {
+                                                _pricingBranchIds.remove(id);
+                                              }
+                                            });
+                                          },
+                                  );
+                                }).toList(),
+                              ),
+                      ),
+                    ),
+                  if (_pricingMethod != 'fixed_price') ...[
+                    const SizedBox(height: 12),
+                    Container(
                       width: double.infinity,
-                      constraints: const BoxConstraints(maxHeight: 160),
-                      padding: const EdgeInsets.all(8),
+                      padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
                         border: Border.all(
                           color: Theme.of(context).dividerColor,
                         ),
                         borderRadius: BorderRadius.circular(8),
                       ),
-                      child: widget.branches.isEmpty
-                          ? const Text(
-                              'No active branches are available for branch-specific pricing.',
-                            )
-                          : ListView(
-                              shrinkWrap: true,
-                              children: widget.branches.map((branch) {
-                                final id = branch['id']?.toString() ?? '';
-                                return CheckboxListTile(
-                                  dense: true,
-                                  contentPadding: EdgeInsets.zero,
-                                  title: Text(
-                                    branch['name']?.toString() ?? 'Branch',
-                                  ),
-                                  value: _pricingBranchIds.contains(id),
-                                  onChanged: _saving
-                                      ? null
-                                      : (selected) {
-                                          setState(() {
-                                            if (selected == true) {
-                                              _pricingBranchIds.add(id);
-                                            } else {
-                                              _pricingBranchIds.remove(id);
-                                            }
-                                          });
-                                        },
-                                );
-                              }).toList(),
-                            ),
-                    ),
-                  ),
-                if (_pricingMethod != 'fixed_price') ...[
-                  const SizedBox(height: 12),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      border: Border.all(color: Theme.of(context).dividerColor),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                _pricingMethod == 'assisted_pack'
-                                    ? 'Pack prices for system assistance'
-                                    : 'Manual quantity prices',
-                                style: Theme.of(context).textTheme.titleSmall,
-                              ),
-                            ),
-                            TextButton.icon(
-                              onPressed: _saving || _pricePoints.length >= 100
-                                  ? null
-                                  : _addPricePoint,
-                              icon: const Icon(Icons.add),
-                              label: Text(
-                                _pricingMethod == 'assisted_pack'
-                                    ? 'Add pack'
-                                    : 'Add price',
-                              ),
-                            ),
-                          ],
-                        ),
-                        Text(
-                          _pricingMethod == 'assisted_pack'
-                              ? 'Intermediate quantities use the nearest lower pack rate.'
-                              : 'Only the exact approved quantities can be sold.',
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                        for (
-                          var index = 0;
-                          index < _pricePoints.length;
-                          index++
-                        ) ...[
-                          const SizedBox(height: 10),
-                          DropdownButtonFormField<String>(
-                            initialValue:
-                                _saleUnitIds.contains(_pricePoints[index].uomId)
-                                ? _pricePoints[index].uomId
-                                : null,
-                            decoration: const InputDecoration(
-                              labelText: 'Sale unit',
-                            ),
-                            items: widget.units
-                                .where(
-                                  (unit) => _saleUnitIds.contains(
-                                    unit['id']?.toString(),
-                                  ),
-                                )
-                                .map(
-                                  (unit) => DropdownMenuItem(
-                                    value: unit['id']?.toString(),
-                                    child: Text(
-                                      '${unit['name'] ?? 'Unit'}'
-                                      ' (${unit['abbreviation'] ?? ''})',
-                                    ),
-                                  ),
-                                )
-                                .toList(),
-                            onChanged: (value) {
-                              if (value != null) {
-                                setState(
-                                  () => _pricePoints[index].uomId = value,
-                                );
-                              }
-                            },
-                            validator: (value) => value == null
-                                ? 'Select an available sale unit.'
-                                : null,
-                          ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
                           Row(
                             children: [
                               Expanded(
-                                child: TextFormField(
-                                  controller: _pricePoints[index].quantity,
-                                  keyboardType:
-                                      const TextInputType.numberWithOptions(
-                                        decimal: true,
-                                      ),
-                                  decoration: const InputDecoration(
-                                    labelText: 'Quantity',
-                                  ),
-                                  validator: (value) =>
-                                      _positive(value, 'Quantity'),
+                                child: Text(
+                                  _pricingMethod == 'assisted_pack'
+                                      ? 'Pack prices for system assistance'
+                                      : 'Manual quantity prices',
+                                  style: Theme.of(context).textTheme.titleSmall,
                                 ),
                               ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: TextFormField(
-                                  controller: _pricePoints[index].price,
-                                  keyboardType:
-                                      const TextInputType.numberWithOptions(
-                                        decimal: true,
-                                      ),
-                                  decoration: const InputDecoration(
-                                    labelText: 'Price',
-                                  ),
-                                  validator: (value) =>
-                                      _nonnegative(value, 'Price'),
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: TextFormField(
-                                  controller: _pricePoints[index].maxDiscount,
-                                  keyboardType:
-                                      const TextInputType.numberWithOptions(
-                                        decimal: true,
-                                      ),
-                                  decoration: const InputDecoration(
-                                    labelText: 'Max discount',
-                                  ),
-                                  validator: (value) =>
-                                      _nonnegative(value, 'Maximum discount'),
-                                ),
-                              ),
-                              IconButton(
-                                tooltip: 'Remove price point',
-                                onPressed: _saving
+                              TextButton.icon(
+                                onPressed: _saving || _pricePoints.length >= 100
                                     ? null
-                                    : () {
-                                        final point = _pricePoints.removeAt(
-                                          index,
-                                        );
-                                        point.dispose();
-                                        setState(() {});
-                                      },
-                                icon: const Icon(Icons.delete_outline),
+                                    : _addPricePoint,
+                                icon: const Icon(Icons.add),
+                                label: Text(
+                                  _pricingMethod == 'assisted_pack'
+                                      ? 'Add pack'
+                                      : 'Add price',
+                                ),
                               ),
                             ],
                           ),
+                          Text(
+                            _pricingMethod == 'assisted_pack'
+                                ? 'Intermediate quantities use the nearest lower pack rate.'
+                                : 'Only the exact approved quantities can be sold.',
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                          for (
+                            var index = 0;
+                            index < _pricePoints.length;
+                            index++
+                          ) ...[
+                            const SizedBox(height: 10),
+                            DropdownButtonFormField<String>(
+                              initialValue:
+                                  _saleUnitIds.contains(
+                                    _pricePoints[index].uomId,
+                                  )
+                                  ? _pricePoints[index].uomId
+                                  : null,
+                              decoration: const InputDecoration(
+                                labelText: 'Sale unit',
+                              ),
+                              items: widget.units
+                                  .where(
+                                    (unit) => _saleUnitIds.contains(
+                                      unit['id']?.toString(),
+                                    ),
+                                  )
+                                  .map(
+                                    (unit) => DropdownMenuItem(
+                                      value: unit['id']?.toString(),
+                                      child: Text(
+                                        '${unit['name'] ?? 'Unit'}'
+                                        ' (${unit['abbreviation'] ?? ''})',
+                                      ),
+                                    ),
+                                  )
+                                  .toList(),
+                              onChanged: (value) {
+                                if (value != null) {
+                                  setState(
+                                    () => _pricePoints[index].uomId = value,
+                                  );
+                                }
+                              },
+                              validator: (value) => value == null
+                                  ? 'Select an available sale unit.'
+                                  : null,
+                            ),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: TextFormField(
+                                    controller: _pricePoints[index].quantity,
+                                    keyboardType:
+                                        const TextInputType.numberWithOptions(
+                                          decimal: true,
+                                        ),
+                                    decoration: const InputDecoration(
+                                      labelText: 'Quantity',
+                                    ),
+                                    validator: (value) =>
+                                        _positive(value, 'Quantity'),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: TextFormField(
+                                    controller: _pricePoints[index].price,
+                                    keyboardType:
+                                        const TextInputType.numberWithOptions(
+                                          decimal: true,
+                                        ),
+                                    decoration: const InputDecoration(
+                                      labelText: 'Price',
+                                    ),
+                                    validator: (value) =>
+                                        _nonnegative(value, 'Price'),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: TextFormField(
+                                    controller: _pricePoints[index].maxDiscount,
+                                    keyboardType:
+                                        const TextInputType.numberWithOptions(
+                                          decimal: true,
+                                        ),
+                                    decoration: const InputDecoration(
+                                      labelText: 'Max discount',
+                                    ),
+                                    validator: (value) =>
+                                        _nonnegative(value, 'Maximum discount'),
+                                  ),
+                                ),
+                                IconButton(
+                                  tooltip: 'Remove price point',
+                                  onPressed: _saving
+                                      ? null
+                                      : () {
+                                          final point = _pricePoints.removeAt(
+                                            index,
+                                          );
+                                          point.dispose();
+                                          setState(() {});
+                                        },
+                                  icon: const Icon(Icons.delete_outline),
+                                ),
+                              ],
+                            ),
+                          ],
                         ],
-                      ],
+                      ),
                     ),
+                  ],
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextFormField(
+                          controller: _basePrice,
+                          keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true,
+                          ),
+                          decoration: InputDecoration(
+                            labelText: _isEditing
+                                ? 'Base price'
+                                : 'Default sale unit price',
+                          ),
+                          validator: (value) => _positive(value, 'Base price'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: TextFormField(
+                          controller: _minPrice,
+                          keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true,
+                          ),
+                          decoration: const InputDecoration(
+                            labelText: 'Minimum price',
+                          ),
+                          validator: (value) =>
+                              _positive(value, 'Minimum price'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: TextFormField(
+                          controller: _maxPrice,
+                          keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true,
+                          ),
+                          decoration: const InputDecoration(
+                            labelText: 'Maximum price',
+                          ),
+                          validator: (value) =>
+                              _positive(value, 'Maximum price'),
+                        ),
+                      ),
+                    ],
                   ),
-                ],
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextFormField(
-                        controller: _basePrice,
+                  if (!_isEditing &&
+                      _saleUnitIds.any(
+                        (unitId) => unitId != _defaultSaleUnitId,
+                      )) ...[
+                    const SizedBox(height: 14),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'Price for each additional sale unit',
+                        style: Theme.of(context).textTheme.titleSmall,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    for (final unit in widget.units.where(
+                      (unit) =>
+                          _saleUnitIds.contains(unit['id']?.toString()) &&
+                          unit['id']?.toString() != _defaultSaleUnitId,
+                    )) ...[
+                      const SizedBox(height: 6),
+                      TextFormField(
+                        controller: _salePriceController(unit['id'].toString()),
                         keyboardType: const TextInputType.numberWithOptions(
                           decimal: true,
                         ),
                         decoration: InputDecoration(
-                          labelText: _isEditing
-                              ? 'Base price'
-                              : 'Default sale unit price',
+                          labelText:
+                              'Price per ${unit['name'] ?? 'unit'} (${unit['abbreviation'] ?? ''})',
                         ),
-                        validator: (value) => _positive(value, 'Base price'),
+                        validator: (value) =>
+                            _positive(value, '${unit['name'] ?? 'Unit'} price'),
                       ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: TextFormField(
-                        controller: _minPrice,
-                        keyboardType: const TextInputType.numberWithOptions(
-                          decimal: true,
-                        ),
-                        decoration: const InputDecoration(
-                          labelText: 'Minimum price',
-                        ),
-                        validator: (value) => _positive(value, 'Minimum price'),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: TextFormField(
-                        controller: _maxPrice,
-                        keyboardType: const TextInputType.numberWithOptions(
-                          decimal: true,
-                        ),
-                        decoration: const InputDecoration(
-                          labelText: 'Maximum price',
-                        ),
-                        validator: (value) => _positive(value, 'Maximum price'),
-                      ),
-                    ),
-                  ],
-                ),
-                if (!_isEditing &&
-                    _saleUnitIds.any(
-                      (unitId) => unitId != _defaultSaleUnitId,
-                    )) ...[
-                  const SizedBox(height: 14),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(
-                      'Price for each additional sale unit',
-                      style: Theme.of(context).textTheme.titleSmall,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  for (final unit in widget.units.where(
-                    (unit) =>
-                        _saleUnitIds.contains(unit['id']?.toString()) &&
-                        unit['id']?.toString() != _defaultSaleUnitId,
-                  )) ...[
-                    const SizedBox(height: 6),
-                    TextFormField(
-                      controller: _salePriceController(unit['id'].toString()),
-                      keyboardType: const TextInputType.numberWithOptions(
-                        decimal: true,
-                      ),
-                      decoration: InputDecoration(
-                        labelText:
-                            'Price per ${unit['name'] ?? 'unit'} (${unit['abbreviation'] ?? ''})',
-                      ),
-                      validator: (value) =>
-                          _positive(value, '${unit['name'] ?? 'Unit'} price'),
-                    ),
+                    ],
                   ],
                 ],
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextFormField(
-                        controller: _subcategory,
-                        decoration: const InputDecoration(
-                          labelText: 'Subcategory (optional)',
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: TextFormField(
-                        controller: _brandFamily,
-                        decoration: const InputDecoration(
-                          labelText: 'Brand (optional)',
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                TextFormField(
-                  controller: _description,
-                  maxLines: 3,
-                  decoration: const InputDecoration(
-                    labelText: 'Description (optional)',
-                  ),
-                ),
               ],
             ),
           ),
         ),
       ),
       actions: [
-        TextButton(
-          onPressed: _saving ? null : () => Navigator.of(context).pop(false),
-          child: const Text('Cancel'),
-        ),
+        TextButton(onPressed: _cancelForm, child: const Text('Cancel')),
+        if (_activeStep > 0)
+          OutlinedButton(
+            onPressed: _saving ? null : () => setState(() => _activeStep--),
+            child: const Text('Back'),
+          ),
+        if (_activeStep < 2)
+          FilledButton(
+            onPressed:
+                _saving || (_activeStep == 1 && !_isEditing && !unitsAvailable)
+                ? null
+                : () => setState(() => _activeStep++),
+            child: const Text('Continue'),
+          ),
         FilledButton(
-          onPressed: _saving || (!_isEditing && !unitsAvailable) ? null : _save,
+          onPressed:
+              _saving || _activeStep != 2 || (!_isEditing && !unitsAvailable)
+              ? null
+              : _save,
           child: _saving
               ? const SizedBox(
                   width: 18,

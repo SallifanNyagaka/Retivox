@@ -20,7 +20,6 @@ export const metadata: Metadata = {
   keywords: ['retail', 'POS', 'inventory', 'multi-branch', 'Kenya', 'Africa'],
   authors: [{ name: 'Retivox' }],
   creator: 'Retivox',
-  metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'),
   manifest: '/manifest.webmanifest',
   applicationName: 'Retivox',
   appleWebApp: {

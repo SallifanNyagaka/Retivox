@@ -102,7 +102,7 @@ export async function getOwnerMetrics(businessId: string) {
     const activeBranchIds = await getActiveBranchIds(businessId)
 
     if (activeBranchIds.length === 0) {
-      return { totalRevenue: 0, verifiedSales: 0, unverifiedSales: 0, txCount: 0, pendingApprovals: 0 }
+      return { totalRevenue: 0, verifiedSales: 0, unverifiedSales: 0, txCount: 0, pendingApprovals: 0, paymentMethodsToday: {} as Record<string, number> }
     }
 
     const { data: revenueData } = await supabase
@@ -149,16 +149,32 @@ export async function getOwnerMetrics(businessId: string) {
       .eq('status', 'pending_approval')
       .in('branch_product_prices.branch_id', activeBranchIds)
 
+    const { data: paymentsToday } = await supabase
+      .from('payments')
+      .select('payment_method, amount, status, transactions!inner(branch_id, status)')
+      .eq('business_id', businessId)
+      .in('transactions.branch_id', activeBranchIds)
+      .gte('payment_at', todayStart)
+      .neq('status', 'rejected')
+
+    const paymentMethodsToday: Record<string, number> = {}
+    for (const payment of paymentsToday ?? []) {
+      const transaction = Array.isArray(payment.transactions) ? payment.transactions[0] : payment.transactions
+      if (!transaction || ['voided', 'rejected'].includes(transaction.status)) continue
+      paymentMethodsToday[payment.payment_method] = (paymentMethodsToday[payment.payment_method] ?? 0) + Number(payment.amount)
+    }
+
     return {
       totalRevenue,
       verifiedSales,
       unverifiedSales,
       txCount: txCount ?? 0,
       pendingApprovals: (pendingPayments ?? 0) + (pendingPrices ?? 0),
+      paymentMethodsToday,
     }
   } catch (error) {
     logger.error('Failed to fetch owner metrics', { businessId, error })
-    return { totalRevenue: 0, verifiedSales: 0, unverifiedSales: 0, txCount: 0, pendingApprovals: 0 }
+    return { totalRevenue: 0, verifiedSales: 0, unverifiedSales: 0, txCount: 0, pendingApprovals: 0, paymentMethodsToday: {} as Record<string, number> }
   }
 }
 

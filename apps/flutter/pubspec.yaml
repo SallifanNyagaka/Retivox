@@ -7,6 +7,8 @@ environment:
   sdk: ^3.13.7
 
 dependencies:
+  hive: ^2.2.3
+  hive_flutter: ^1.1.0
   connectivity_plus: ^7.3.2
   cryptography: ^2.9.0
   drift: ^2.35.3
@@ -14,7 +16,10 @@ dependencies:
   flutter:
     sdk: flutter
   flutter_secure_storage: ^11.2.0
+  http: ^1.6.0
   intl: ^0.20.3
+  pdf: ^3.11.3
+  printing: ^5.15.1
   supabase_flutter: ^2.18.3
   uuid: ^4.6.0
 

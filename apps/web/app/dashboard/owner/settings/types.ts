@@ -35,23 +35,34 @@ export type SubscriptionRow = {
   id: string
   plan: string
   status: string
+  cancelled_at: string | null
   branch_count: number
   monthly_amount: number
   currency: string
   current_period_end: string | null
-  billing_interval: 'monthly' | 'yearly'
+  billing_interval: 'monthly' | 'yearly' | 'lifetime'
+  license_type: 'subscription' | 'lifetime'
   next_plan_key: string | null
   next_billing_interval: 'monthly' | 'yearly' | null
   next_period_start: string | null
+  auto_renew_enabled: boolean
+  auto_renew_status: 'disabled' | 'pending_enrollment' | 'active' | 'cancel_requested' | 'cancelled' | 'payment_failed' | 'reauthorization_required'
 }
 
 export type SubscriptionPlanOption = {
   id: string
-  plan_key: 'trial' | 'starter' | 'growth' | 'enterprise'
+  plan_key: string
   name: string
   description: string
   monthly_amount: number
   annual_discount_percent: number
+  yearly_amount: number
+  lifetime_amount: number | null
+  monthly_enabled: boolean
+  yearly_enabled: boolean
+  lifetime_enabled: boolean
+  trial_days: number
+  features: Record<string, unknown>
   currency: string
   branch_limit: number | null
   sort_order: number
@@ -65,8 +76,8 @@ export type SubscriptionPaymentRequestRow = {
   amount: number
   currency: string
   plan_key: string | null
-  billing_interval: 'monthly' | 'yearly'
-  payment_method: 'mpesa_stk' | 'mpesa_manual' | 'bank_transfer' | 'cash_deposit' | 'other'
+  billing_interval: 'monthly' | 'yearly' | 'lifetime'
+  payment_method: 'mpesa_stk' | 'mpesa_manual' | 'bank_transfer' | 'cash_deposit' | 'other' | 'pesapal'
   reference_code: string
   payer_phone: string | null
   status: 'pending' | 'verified' | 'rejected'
@@ -104,4 +115,5 @@ export type FormState = {
   error: string | null
   message?: string | null
   success: boolean
+  checkoutUrl?: string
 }

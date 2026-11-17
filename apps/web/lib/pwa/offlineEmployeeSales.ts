@@ -12,10 +12,15 @@ export type OfflineEmployeeSaleItem = {
 export type OfflineEmployeeSaleInput = {
   userId: string
   items: OfflineEmployeeSaleItem[]
-  paymentMethod: 'mpesa_manual' | 'cash'
+  paymentMethod: 'mpesa_manual' | 'cash' | 'card' | 'bank_transfer' | 'other'
+  amountPaid: number | null
+  amountTendered: number | null
+  isCredit: boolean
   discountAmount: number
   customerName: string | null
   customerPhone: string | null
+  customerEmail: string | null
+  dueDate: string | null
   mpesaRefCode: string | null
   recordedAt: string
 }
@@ -140,14 +145,18 @@ export async function syncOfflineEmployeeSales(userId: string): Promise<OfflineS
   for (const sale of pendingSales) {
     await saveSale({ ...sale, status: 'syncing', lastError: null })
 
-    const response = await supabase.rpc('employee_record_transaction_offline', {
+    const response = await supabase.rpc('employee_record_transaction_offline_v2', {
       p_items: sale.items,
       p_payment_method: sale.paymentMethod,
+      p_amount_paid: sale.amountPaid ?? null,
+      p_amount_tendered: sale.amountTendered ?? null,
+      p_customer_email: sale.customerEmail ?? null,
+      p_due_date: sale.dueDate ?? null,
+      p_is_credit: sale.isCredit ?? false,
       p_discount_amount: sale.discountAmount,
       p_customer_name: sale.customerName,
       p_customer_phone: sale.customerPhone,
-      p_mpesa_ref_code: sale.mpesaRefCode,
-      p_cash_deposit_code: null,
+      p_reference_code: sale.mpesaRefCode,
       p_recorded_at: sale.recordedAt,
       p_local_id: sale.id,
     })

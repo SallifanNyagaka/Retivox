@@ -8,13 +8,17 @@
 
 import { revalidatePath } from 'next/cache'
 import { redirect } from 'next/navigation'
+import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
+import { headers } from 'next/headers'
 import { createBusinessSchema, GlobalRole } from '@smartretail/shared'
 import { requireRole } from '../../../../lib/auth/helpers'
 import { createClient } from '../../../../lib/supabase/server'
 import { createServiceRoleClient } from '../../../../lib/supabase/admin'
 import logger from '../../../../lib/logger'
 import { getDarajaPromptConfiguration, initiateDarajaStkPush, normalizeKenyanPhone } from '../../../../lib/payments/daraja'
+import { startPlatformSubscriptionPesapalCheckout } from '../../../../lib/payments/pesapal'
+import { requestOrigin } from '../../../../lib/requestOrigin'
 import type { BusinessSettingsRow, FormState, UserProfileRow } from './types'
 
 /**
@@ -43,17 +47,27 @@ const loginReviewSchema = z.object({
 })
 
 const subscriptionPaymentSchema = z.object({
-  planKey: z.enum(['starter', 'growth', 'enterprise']),
-  billingInterval: z.enum(['monthly', 'yearly']),
+  planKey: z.string().regex(/^[a-z][a-z0-9_]{1,39}$/),
+  billingInterval: z.enum(['monthly', 'yearly', 'lifetime']),
   paymentMethod: z.enum(['mpesa_manual', 'bank_transfer', 'cash_deposit', 'other']),
   referenceCode: z.string().min(3, 'Payment reference must be at least 3 characters').max(80, 'Payment reference is too long'),
   payerPhone: z.string().max(32, 'Phone number is too long').optional(),
+  promotionCode: z.string().max(40, 'Promotion code is too long').optional(),
 })
 
 const darajaPaymentSchema = z.object({
   phone: z.string().min(9, 'Enter the M-Pesa phone number').max(20, 'Phone number is too long'),
-  planKey: z.enum(['starter', 'growth', 'enterprise']),
+  planKey: z.string().regex(/^[a-z][a-z0-9_]{1,39}$/),
   billingInterval: z.enum(['monthly', 'yearly']),
+  promotionCode: z.string().max(40, 'Promotion code is too long').optional(),
+})
+
+const pesapalSubscriptionSchema = z.object({
+  planKey: z.string().regex(/^[a-z][a-z0-9_]{1,39}$/),
+  billingInterval: z.enum(['monthly', 'yearly', 'lifetime']),
+  phone: z.string().max(20, 'Phone number is too long').optional(),
+  promotionCode: z.string().max(40, 'Promotion code is too long').optional(),
+  autoRenew: z.boolean().optional(),
 })
 
 /**
@@ -293,6 +307,7 @@ export async function submitSubscriptionPayment(_prevState: FormState, formData:
     paymentMethod: getString(formData, 'paymentMethod') || 'mpesa_manual',
     referenceCode: getString(formData, 'referenceCode'),
     payerPhone: getString(formData, 'payerPhone') || undefined,
+    promotionCode: getString(formData, 'promotionCode') || undefined,
   })
 
   if (!validation.success) {
@@ -309,7 +324,7 @@ export async function submitSubscriptionPayment(_prevState: FormState, formData:
 
   try {
     const supabase = await createClient()
-    const { error } = await supabase.rpc('owner_submit_subscription_payment_v2', {
+    const { data: requestId, error } = await supabase.rpc('owner_submit_subscription_payment_v2', {
       p_plan_key: validation.data.planKey,
       p_billing_interval: validation.data.billingInterval,
       p_reference_code: validation.data.referenceCode,
@@ -322,9 +337,24 @@ export async function submitSubscriptionPayment(_prevState: FormState, formData:
       return { success: false, error: error.message ?? 'Unable to submit payment reference' }
     }
 
+    if (requestId && validation.data.promotionCode) {
+      const { error: promotionError } = await supabase.rpc('owner_apply_subscription_promotion', {
+        p_payment_request_id: requestId,
+        p_code: validation.data.promotionCode,
+      })
+      if (promotionError) {
+        await createServiceRoleClient().from('subscription_payment_requests').update({
+          status: 'rejected', review_note: `Promotion rejected before payment: ${promotionError.message}`.slice(0, 240),
+          provider_result_description: 'Payment was not verified because the promotion code could not be applied.',
+          reviewed_at: new Date().toISOString(),
+        }).eq('id', requestId).eq('business_id', businessId).eq('status', 'pending')
+        return { success: false, error: promotionError.message }
+      }
+    }
+
     revalidatePath('/dashboard/owner/settings')
     logger.info('Subscription payment request submitted', { businessId, userId: profile.id })
-    return { success: true, error: null }
+    return { success: true, error: null, message: requestId ? 'Payment request submitted for review' : 'Subscription credit covered this plan change; license updated' }
   } catch (error: unknown) {
     logger.error('submitSubscriptionPayment: unexpected error', { businessId, userId: profile.id, error })
     return { success: false, error: error instanceof Error ? error.message : 'Server error' }
@@ -339,6 +369,7 @@ export async function initiateSubscriptionStkPush(_prevState: FormState, formDat
     phone: getString(formData, 'phone'),
     planKey: getString(formData, 'planKey'),
     billingInterval: getString(formData, 'billingInterval'),
+    promotionCode: getString(formData, 'promotionCode') || undefined,
   })
 
   if (!validation.success) {
@@ -362,89 +393,63 @@ export async function initiateSubscriptionStkPush(_prevState: FormState, formDat
   }
 
   const serviceClient = createServiceRoleClient()
+  const supabase = await createClient()
   let paymentRequestId: string | null = null
+  let stkInitiated = false
 
   try {
-    const [existingSubscriptionResponse, planResponse] = await Promise.all([
-      serviceClient
-      .from('subscriptions')
-      .select('id')
-      .eq('business_id', businessId)
-      .maybeSingle(),
-      serviceClient
-        .from('platform_subscription_plans')
-        .select('plan_key, monthly_amount, annual_discount_percent, currency, is_active')
-        .eq('plan_key', validation.data.planKey)
-        .eq('is_active', true)
-        .maybeSingle(),
-    ])
-
-    if (existingSubscriptionResponse.error || planResponse.error || !planResponse.data) {
-      const error = existingSubscriptionResponse.error ?? planResponse.error
-      logger.error('initiateSubscriptionStkPush: billing lookup failed', { businessId, error })
-      return { success: false, error: error?.message ?? 'The selected plan is no longer available' }
-    }
-
-    const subscriptionResponse = existingSubscriptionResponse.data
-      ? existingSubscriptionResponse
-      : await serviceClient.from('subscriptions').insert({
-          business_id: businessId,
-          plan: 'trial',
-          status: 'active',
-          branch_count: 1,
-          monthly_amount: 0,
-          currency: planResponse.data.currency,
-          current_period_start: new Date().toISOString(),
-          current_period_end: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-        }).select('id').single()
-
-    const subscriptionData = subscriptionResponse.data
-    const subscriptionError = subscriptionResponse.error
-
-    if (subscriptionError || !subscriptionData) {
-      logger.error('initiateSubscriptionStkPush: subscription upsert failed', { businessId, error: subscriptionError })
-      return { success: false, error: subscriptionError?.message ?? 'Unable to prepare subscription payment' }
-    }
-
-    const plan = planResponse.data
-    const amount = validation.data.billingInterval === 'yearly'
-      ? Math.round(Number(plan.monthly_amount) * 12 * (1 - Number(plan.annual_discount_percent) / 100) * 100) / 100
-      : Number(plan.monthly_amount)
-    if (!Number.isInteger(amount) || amount <= 0) {
-      return { success: false, error: 'M-Pesa STK Push requires a whole-number amount. Use manual payment for this plan price.' }
-    }
-
     const promptConfig = await getDarajaPromptConfiguration()
-    const currency = String(plan.currency ?? 'KES')
-    const referenceCode = `STK-${Date.now()}`
+    const referenceCode = `STK-${randomUUID()}`
+    const { data: requestId, error: requestError } = await supabase.rpc('owner_submit_subscription_payment_v2', {
+      p_plan_key: validation.data.planKey,
+      p_billing_interval: validation.data.billingInterval,
+      p_reference_code: referenceCode,
+      p_payment_method: 'mpesa_stk',
+      p_payer_phone: normalizedPhone,
+    })
+    if (requestError) throw new Error(requestError.message)
+    if (!requestId) {
+      revalidatePath('/dashboard/owner/settings')
+      return { success: true, error: null, message: 'Your eligible subscription credit covered this change. The license is active.' }
+    }
+    paymentRequestId = String(requestId)
 
-    const { data: paymentData, error: paymentError } = await serviceClient
-      .from('subscription_payment_requests')
-      .insert({
-        business_id: businessId,
-        subscription_id: subscriptionData.id,
-        submitted_by: profile.id,
-        amount,
-        currency,
-        payment_method: 'mpesa_stk',
-        plan_key: validation.data.planKey,
-        billing_interval: validation.data.billingInterval,
-        reference_code: referenceCode,
-        payer_phone: normalizedPhone,
-        status: 'pending',
-        provider: 'daraja',
-          plan_monthly_amount: Number(plan.monthly_amount),
-        provider_result_description: `STK Push queued for ${validation.data.planKey} ${validation.data.billingInterval} plan; PayBill ${promptConfig.shortcode}, account ${promptConfig.accountReference}`,
+    if (validation.data.promotionCode) {
+      const { error: promotionError } = await supabase.rpc('owner_apply_subscription_promotion', {
+        p_payment_request_id: paymentRequestId,
+        p_code: validation.data.promotionCode,
       })
-      .select('id')
-      .single()
-
-    if (paymentError || !paymentData) {
-      logger.error('initiateSubscriptionStkPush: payment request insert failed', { businessId, error: paymentError })
-      return { success: false, error: paymentError?.message ?? 'Unable to create payment request' }
+      if (promotionError) {
+        await serviceClient.from('subscription_payment_requests').update({
+          status: 'rejected', review_note: `Promotion rejected before payment: ${promotionError.message}`.slice(0, 240),
+          provider_result_description: 'Payment was not verified because the promotion code could not be applied.',
+          reviewed_at: new Date().toISOString(),
+        }).eq('id', paymentRequestId).eq('business_id', businessId).eq('status', 'pending')
+        throw new Error(promotionError.message)
+      }
     }
 
-    paymentRequestId = paymentData.id
+    const { data: paymentRequest, error: paymentLookupError } = await serviceClient
+      .from('subscription_payment_requests')
+      .select('amount,currency,status')
+      .eq('id', paymentRequestId)
+      .eq('business_id', businessId)
+      .single()
+    if (paymentLookupError || !paymentRequest) throw new Error('Unable to load the verified server price for this payment')
+    if (paymentRequest.status === 'verified' || Number(paymentRequest.amount) <= 0) {
+      revalidatePath('/dashboard/owner/settings')
+      return { success: true, error: null, message: 'Your promotion or subscription credit covered the full amount. The license is active.' }
+    }
+    const amount = Number(paymentRequest.amount)
+    if (!Number.isInteger(amount) || amount <= 0) {
+      await serviceClient.from('subscription_payment_requests').update({
+        status: 'rejected',
+        provider_result_description: 'M-Pesa STK requires a whole-number amount; no payment prompt was sent.',
+        review_note: 'Use a manual payment method for this price.',
+        reviewed_at: new Date().toISOString(),
+      }).eq('id', paymentRequestId)
+      return { success: false, error: 'M-Pesa STK Push requires a whole-number amount. Use a manual payment method for this price.' }
+    }
 
     const response = await initiateDarajaStkPush({
       phone: normalizedPhone,
@@ -456,6 +461,7 @@ export async function initiateSubscriptionStkPush(_prevState: FormState, formDat
     if (!response.CheckoutRequestID) {
       throw new Error(response.ResponseDescription ?? 'Daraja did not return a checkout request id')
     }
+    stkInitiated = true
 
     const { error: updateError } = await serviceClient
       .from('subscription_payment_requests')
@@ -478,7 +484,7 @@ export async function initiateSubscriptionStkPush(_prevState: FormState, formDat
       message: 'M-Pesa prompt sent. Complete it on your phone.',
     }
   } catch (error: unknown) {
-    if (paymentRequestId) {
+    if (paymentRequestId && !stkInitiated) {
       await serviceClient
         .from('subscription_payment_requests')
         .update({
@@ -493,6 +499,56 @@ export async function initiateSubscriptionStkPush(_prevState: FormState, formDat
     logger.error('initiateSubscriptionStkPush: failed', { businessId, userId: profile.id, error })
     return { success: false, error: error instanceof Error ? error.message : 'Unable to send M-Pesa prompt' }
   }
+}
+
+export async function initiateSubscriptionPesapalCheckout(_prevState: FormState, formData: FormData): Promise<FormState> {
+  const validation = pesapalSubscriptionSchema.safeParse({
+    planKey: getString(formData, 'planKey'), billingInterval: getString(formData, 'billingInterval'),
+    phone: getString(formData, 'phone') || undefined, promotionCode: getString(formData, 'promotionCode') || undefined,
+    autoRenew: getString(formData, 'autoRenew') === 'true',
+  })
+  if (!validation.success) return { success: false, error: validation.error.errors[0]?.message ?? 'Invalid subscription checkout details' }
+  const profile = await requireRole([GlobalRole.Owner])
+  if (!profile.business_id) return { success: false, error: 'Business context missing' }
+  if (!validation.data.phone && !profile.email) return { success: false, error: 'Add an account email or enter a phone number to use hosted checkout.' }
+  try {
+    const result = await startPlatformSubscriptionPesapalCheckout({
+      planKey: validation.data.planKey, billingInterval: validation.data.billingInterval,
+      phone: validation.data.phone || undefined, promotionCode: validation.data.promotionCode || undefined,
+      autoRenew: validation.data.autoRenew,
+      origin: requestOrigin(await headers()),
+    })
+    revalidatePath('/dashboard/owner/settings')
+    if (result.covered) return { success: true, error: null, message: 'Your promotion or subscription credit covered this change. The license is active.' }
+    return { success: true, error: null, message: 'Opening Pesapal secure checkout.', checkoutUrl: result.redirectUrl }
+  } catch (error) {
+    logger.error('initiateSubscriptionPesapalCheckout failed', { businessId: profile.business_id, userId: profile.id, error })
+    return { success: false, error: error instanceof Error ? error.message : 'Unable to start Pesapal subscription checkout' }
+  }
+}
+
+export async function requestPesapalAutoRenewCancellation(_prevState: FormState, _formData: FormData): Promise<FormState> {
+  const profile = await requireRole([GlobalRole.Owner])
+  if (!profile.business_id) return { success: false, error: 'Business context missing' }
+  const supabase = await createClient()
+  const { data, error } = await supabase.rpc('platform_owner_request_pesapal_auto_renew_cancel', {
+    p_business_id: profile.business_id, p_actor_id: profile.id,
+  })
+  if (error || data !== true) return { success: false, error: error?.message ?? 'No active Pesapal renewal schedule was found.' }
+  revalidatePath('/dashboard/owner/settings')
+  return { success: true, error: null, message: 'Cancel the schedule using the Pesapal subscription email or account portal. After Pesapal confirms cancellation, return here and confirm it.' }
+}
+
+export async function confirmPesapalAutoRenewCancellation(_prevState: FormState, _formData: FormData): Promise<FormState> {
+  const profile = await requireRole([GlobalRole.Owner])
+  if (!profile.business_id) return { success: false, error: 'Business context missing' }
+  const supabase = await createClient()
+  const { data, error } = await supabase.rpc('platform_owner_mark_pesapal_auto_renew_cancelled', {
+    p_business_id: profile.business_id, p_actor_id: profile.id,
+  })
+  if (error || data !== true) return { success: false, error: error?.message ?? 'Request cancellation in Pesapal before confirming it here.' }
+  revalidatePath('/dashboard/owner/settings')
+  return { success: true, error: null, message: 'Retivox will no longer apply Pesapal recurring charges to this license.' }
 }
 
 /**

@@ -30,6 +30,7 @@ export type BranchPaymentSummary = {
   eMoneyRecorded: number
   eMoneyVerified: number
   eMoneyPending: number
+  byMethod: Record<string, number>
   pendingDepositAmount: number
   verifiedDepositAmount: number
   varianceAmount: number
@@ -47,7 +48,7 @@ export type CashDepositRow = {
   depositReference: string
   note: string | null
   reviewNote: string | null
-  status: 'pending' | 'verified' | 'rejected'
+  status: 'pending' | 'pending_owner' | 'verified' | 'rejected'
   createdAt: string
 }
 
@@ -101,7 +102,7 @@ export default function CashDepositReconciliationPanel({
     () => summaries.find((summary) => summary.branchId === branchId) ?? null,
     [branchId, summaries]
   )
-  const pendingDeposits = deposits.filter((deposit) => deposit.status === 'pending')
+  const pendingDeposits = deposits.filter((deposit) => deposit.status === 'pending' || deposit.status === 'pending_owner')
 
   useEffect(() => {
     if (previousDepositPending.current && !depositPending) {
@@ -172,7 +173,7 @@ export default function CashDepositReconciliationPanel({
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
               <thead>
                 <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                  {['Branch', 'Cash recorded', 'Cash verified', 'Cash pending', 'M-Pesa/e-money', 'Deposits', 'Variance'].map((heading) => (
+                  {['Branch', 'Cash recorded', 'Cash verified', 'Cash pending', 'M-Pesa/e-money', 'Other methods', 'Deposits', 'Variance'].map((heading) => (
                     <th key={heading} style={{ padding: 12, textAlign: 'left', color: 'var(--color-text-muted)' }}>{heading}</th>
                   ))}
                 </tr>
@@ -191,6 +192,12 @@ export default function CashDepositReconciliationPanel({
                       <span style={{ display: 'block', marginTop: 3, color: 'var(--color-text-muted)', fontSize: 12 }}>
                         {formatCurrency(summary.eMoneyVerified, currency)} verified, {formatCurrency(summary.eMoneyPending, currency)} pending
                       </span>
+                    </td>
+                    <td style={{ padding: 12, color: 'var(--color-text-primary)' }}>
+                      {Object.entries(summary.byMethod).filter(([method]) => method !== 'cash' && method !== 'mpesa_manual').map(([method, amount]) => (
+                        <span key={method} style={{ display: 'block' }}>{method.replace(/_/g, ' ')}: {formatCurrency(amount, currency)}</span>
+                      ))}
+                      {Object.entries(summary.byMethod).every(([method]) => method === 'cash' || method === 'mpesa_manual') ? '—' : null}
                     </td>
                     <td style={{ padding: 12, color: 'var(--color-text-primary)' }}>
                       {formatCurrency(summary.verifiedDepositAmount, currency)} verified
@@ -258,7 +265,7 @@ export default function CashDepositReconciliationPanel({
         </Card>
 
         <Card padding="md">
-          <CardHeader title="Pending cash reviews" />
+          <CardHeader title="Cash deposits awaiting owner review" />
           {pendingDeposits.length === 0 ? (
             <p style={{ margin: 0, color: 'var(--color-text-muted)', fontSize: 14 }}>
               No cash deposits need review.
@@ -283,6 +290,9 @@ export default function CashDepositReconciliationPanel({
                       </p>
                       {deposit.note && (
                         <p style={{ margin: '6px 0 0', color: 'var(--color-text-muted)', fontSize: 12 }}>{deposit.note}</p>
+                      )}
+                      {deposit.status === 'pending_owner' && (
+                        <p style={{ margin: '6px 0 0', color: 'var(--color-warning)', fontSize: 12, fontWeight: 700 }}>Administrator review complete · owner final approval required</p>
                       )}
                     </div>
                     <div style={{ textAlign: 'right' }}>

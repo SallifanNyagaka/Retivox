@@ -179,7 +179,7 @@ export default function EmployeeRowActions({ employee, branches }: Props) {
           {employee.is_active ? 'Deactivate' : 'Activate'}
         </button>
         <DangerDeleteButton
-          entityLabel="Employee"
+          entityLabel="Employee account"
           entityName={employee.name}
           idField="userId"
           idValue={employee.id}

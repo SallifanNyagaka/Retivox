@@ -70,6 +70,8 @@ type LineItemDraft = {
   quantity: string
 }
 
+type SplitPaymentMethod = 'cash' | 'mpesa_manual' | 'mpesa_stk' | 'pesapal'
+
 /**
  * Props for the record transaction form.
  */
@@ -111,6 +113,16 @@ function formatMoney(amount: number, currency: string) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(amount)
+}
+
+async function isRetivoxBackendReachable() {
+  if (typeof navigator === 'undefined' || !navigator.onLine) return false
+  try {
+    const { error } = await createClient().from('businesses').select('id').limit(1)
+    return !error
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -322,6 +334,11 @@ const inputStyle = {
   backgroundColor: 'var(--color-background)',
 } as const
 
+const splitLabelStyle = {
+  fontSize: 12,
+  color: 'var(--color-text-primary)',
+} as const
+
 function getInitialLineItems(idSuffix = ''): LineItemDraft[] {
   return [
     {
@@ -356,12 +373,21 @@ export default function RecordEmployeeTransactionForm({
   const [scannerSetupOpen, setScannerSetupOpen] = useState(false)
   const [barcodeInput, setBarcodeInput] = useState('')
   const [barcodeMessage, setBarcodeMessage] = useState('')
-  const [paymentMethod, setPaymentMethod] = useState<'mpesa_manual' | 'cash'>('mpesa_manual')
+  const [paymentMethod, setPaymentMethod] = useState<'mpesa_manual' | 'mpesa_stk' | 'pesapal' | 'cash' | 'card' | 'bank_transfer' | 'other'>('mpesa_manual')
+  const [splitPaymentMode, setSplitPaymentMode] = useState(false)
+  const [splitPayments, setSplitPayments] = useState<Array<{ id: string; paymentMethod: SplitPaymentMethod; amount: string; amountTendered: string; referenceCode: string }>>([])
+  const [isCredit, setIsCredit] = useState(false)
+  const [amountPaid, setAmountPaid] = useState('')
+  const [amountTendered, setAmountTendered] = useState('')
+  const [customerEmail, setCustomerEmail] = useState('')
+  const [dueDate, setDueDate] = useState('')
   const [discountAmount, setDiscountAmount] = useState('0')
   const [customerName, setCustomerName] = useState('')
   const [customerPhone, setCustomerPhone] = useState('')
   const [mpesaRefCode, setMpesaRefCode] = useState('')
+  const [paymentPhone, setPaymentPhone] = useState('')
   const [isOfflineSubmitting, setIsOfflineSubmitting] = useState(false)
+  const [isBackendOnline, setIsBackendOnline] = useState(false)
   const [offlineDeductedByOption, setOfflineDeductedByOption] = useState<Map<string, number>>(() => new Map())
   const [state, action, isPending] = useActionState<EmployeeTransactionFormState, FormData>(recordTransactionAction, {
     success: false,
@@ -371,6 +397,30 @@ export default function RecordEmployeeTransactionForm({
   const hasAdvancedPricing = products.some(
     (product) => product.pricingMethod !== 'fixed_price' || product.pricingOptions.length > 0,
   )
+
+  useEffect(() => {
+    let active = true
+    const refreshConnection = async () => {
+      const online = await isRetivoxBackendReachable()
+      if (active) {
+        setIsBackendOnline(online)
+        if (!online) {
+          setPaymentMethod((current) => ['cash', 'mpesa_manual'].includes(current) ? current : 'cash')
+        }
+      }
+    }
+    const handleNetworkChange = () => { void refreshConnection() }
+    void refreshConnection()
+    const timer = window.setInterval(() => { void refreshConnection() }, 15000)
+    window.addEventListener('online', handleNetworkChange)
+    window.addEventListener('offline', handleNetworkChange)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+      window.removeEventListener('online', handleNetworkChange)
+      window.removeEventListener('offline', handleNetworkChange)
+    }
+  }, [])
   const lineSummaries: LineDraftSummary[] = rows.map((row) => {
     const product = products.find((availableProduct) => availableProduct.optionId === row.optionId) ?? null
     const selectedUom = product?.uomOptions.find((uom) => uom.id === row.uomId) ?? getDefaultSaleUOM(product)
@@ -422,6 +472,8 @@ export default function RecordEmployeeTransactionForm({
   const discountTooHigh = Number.isFinite(discountValue) && discountValue > maxAllowedDiscount
   const safeDiscountValue = discountInvalid ? 0 : discountValue
   const totalPreview = Math.max(0, subtotalPreview - safeDiscountValue)
+  const splitPaidTotal = splitPayments.reduce((sum, payment) => sum + (Number(payment.amount) || 0), 0)
+  const effectivePaidNow = splitPaymentMode ? splitPaidTotal : Number(amountPaid || (isCredit ? 0 : totalPreview))
   const hasValidLine = lineSummaries.some((summary) => summary.product && summary.selectedUom && summary.quantity > 0)
   const canSubmit =
     !isPending &&
@@ -441,6 +493,11 @@ export default function RecordEmployeeTransactionForm({
 
     if (previousPending.current && !isPending) {
       if (state.success) {
+        if (state.checkoutUrl) {
+          window.location.assign(state.checkoutUrl)
+          previousPending.current = isPending
+          return
+        }
         toast.success(state.message ?? 'Transaction recorded successfully')
         redirectTimer = setTimeout(() => {
           if (stayOnSuccess) {
@@ -449,6 +506,9 @@ export default function RecordEmployeeTransactionForm({
             setCustomerName('')
             setCustomerPhone('')
             setMpesaRefCode('')
+            setPaymentPhone('')
+            setSplitPayments([])
+            setSplitPaymentMode(false)
           } else {
             router.push(redirectPath)
           }
@@ -465,7 +525,7 @@ export default function RecordEmployeeTransactionForm({
         clearTimeout(redirectTimer)
       }
     }
-  }, [isPending, products, redirectPath, router, state.error, state.message, state.success, stayOnSuccess, toast])
+  }, [isPending, products, redirectPath, router, state.checkoutUrl, state.error, state.message, state.success, stayOnSuccess, toast])
 
   useEffect(() => {
     const refreshAfterSync = () => router.refresh()
@@ -546,8 +606,23 @@ export default function RecordEmployeeTransactionForm({
   /**
    * Submits the transaction to the server action.
    */
-  const onSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+
+    const backendOnline = await isRetivoxBackendReachable()
+    setIsBackendOnline(backendOnline)
+    if (!backendOnline && splitPaymentMode) {
+      toast.error('Split tender needs a live connection. Offline sales remain available with one cash or mobile manual payment.')
+      return
+    }
+    if (!backendOnline && paymentMethod !== 'cash' && paymentMethod !== 'mpesa_manual') {
+      toast.error('This payment method needs a live internet connection. Use cash or mobile manual while offline.')
+      return
+    }
+    if (!backendOnline && !offlineQueueEnabled) {
+      toast.error('Retivox is not reachable. Reconnect before recording this sale.')
+      return
+    }
 
     if (invalidPriceSummary) {
       toast.error(`${invalidPriceSummary.product?.name ?? 'This product'} does not have an approved price for ${invalidPriceSummary.row.quantity} ${invalidPriceSummary.selectedUom?.name ?? 'units'}`)
@@ -586,7 +661,12 @@ export default function RecordEmployeeTransactionForm({
         recoveryItemId: product?.stockSource === 'recovery' ? product.recoveryItemId : null,
       }))
 
-    if (offlineQueueEnabled && !navigator.onLine) {
+    if (!backendOnline && offlineQueueEnabled) {
+      if (paymentMethod !== 'cash' && paymentMethod !== 'mpesa_manual') {
+        toast.error('Online payment prompts cannot be queued as offline payments.')
+        return
+      }
+      const offlinePaymentMethod: 'cash' | 'mpesa_manual' = paymentMethod
       setIsOfflineSubmitting(true)
 
       void (async () => {
@@ -602,10 +682,15 @@ export default function RecordEmployeeTransactionForm({
           await queueOfflineEmployeeSale({
             userId,
             items: saleItems,
-            paymentMethod,
+            paymentMethod: offlinePaymentMethod,
+            amountPaid: isCredit ? Number(amountPaid || 0) : null,
+            amountTendered: paymentMethod === 'cash' ? Number(amountTendered || (isCredit ? amountPaid : totalPreview)) : null,
+            isCredit,
             discountAmount: safeDiscountValue,
             customerName: customerName.trim() || null,
             customerPhone: customerPhone.trim() || null,
+            customerEmail: customerEmail.trim() || null,
+            dueDate: dueDate || null,
             mpesaRefCode: mpesaRefCode.trim() || null,
             recordedAt: new Date().toISOString(),
           })
@@ -624,6 +709,8 @@ export default function RecordEmployeeTransactionForm({
           setCustomerName('')
           setCustomerPhone('')
           setMpesaRefCode('')
+          setAmountPaid('')
+          setAmountTendered('')
           toast.success('Sale saved on this device. It will sync automatically when you are online.')
         } catch {
           toast.error('Unable to save this sale offline. Check your device storage and try again.')
@@ -643,10 +730,22 @@ export default function RecordEmployeeTransactionForm({
       JSON.stringify(saleItems)
     )
     formData.set('paymentMethod', paymentMethod)
+    formData.set('amountPaid', isCredit ? amountPaid || '0' : String(totalPreview))
+    formData.set('amountTendered', paymentMethod === 'cash' ? amountTendered || (isCredit ? amountPaid : String(totalPreview)) : '')
+    formData.set('isCredit', String(isCredit))
     formData.set('discountAmount', discountAmount)
     formData.set('customerName', customerName)
     formData.set('customerPhone', customerPhone)
+    formData.set('customerEmail', customerEmail)
+    formData.set('dueDate', dueDate)
     formData.set('mpesaRefCode', mpesaRefCode)
+    formData.set('paymentPhone', paymentPhone)
+    formData.set('splitPaymentsJson', splitPaymentMode ? JSON.stringify(splitPayments.map((payment) => ({
+      paymentMethod: payment.paymentMethod,
+      amount: payment.amount,
+      amountTendered: payment.amountTendered,
+      referenceCode: payment.referenceCode,
+    }))) : '')
 
     startTransition(() => {
       action(formData)
@@ -996,13 +1095,42 @@ export default function RecordEmployeeTransactionForm({
         </div>
 
         {/* Customer and discount fields */}
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <label className="flex items-center gap-2" style={{ fontSize: 13, color: 'var(--color-text-primary)' }}>
+          <input type="checkbox" checked={splitPaymentMode} onChange={(event) => {
+            const enabled = event.target.checked
+            setSplitPaymentMode(enabled)
+            if (enabled) {
+              const splitInitialMethod: SplitPaymentMethod = paymentMethod === 'card' || paymentMethod === 'bank_transfer' ? 'pesapal' : paymentMethod === 'other' ? 'cash' : paymentMethod
+              setSplitPayments([{ id: `tender-${Date.now()}`, paymentMethod: splitInitialMethod, amount: isCredit ? amountPaid : String(totalPreview), amountTendered: isCredit ? amountPaid : String(totalPreview), referenceCode: mpesaRefCode }])
+            }
+          }} />
+          Split this sale across cash, mobile manual, M-Pesa prompt, or Pesapal checkout
+        </label>
+
+        {splitPaymentMode ? (
+          <section className="flex flex-col gap-3 rounded-xl border" style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)', padding: 14 }}>
+            <div className="flex flex-wrap items-center justify-between gap-2"><strong style={{ color: 'var(--color-text-primary)', fontSize: 14 }}>Payment split</strong><span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>Cash and Mobile manual work offline. Provider checkouts need an active connection.</span></div>
+            {splitPayments.map((payment, index) => <div key={payment.id} className="grid grid-cols-1 gap-2 rounded-lg border p-3 md:grid-cols-[1fr_1fr_1fr_1fr_auto]" style={{ borderColor: 'var(--color-border)', background: 'var(--color-background)' }}>
+              <label className="flex flex-col gap-1" style={splitLabelStyle}>Method<select value={payment.paymentMethod} onChange={(event) => setSplitPayments((current) => current.map((row) => row.id === payment.id ? { ...row, paymentMethod: event.target.value as SplitPaymentMethod } : row))} style={inputStyle}><option value="cash">Cash</option><option value="mpesa_manual">Mobile manual</option><option value="mpesa_stk" disabled={!isBackendOnline}>M-Pesa prompt{!isBackendOnline ? ' (online only)' : ''}</option><option value="pesapal" disabled={!isBackendOnline}>Card / bank via Pesapal{!isBackendOnline ? ' (online only)' : ''}</option></select></label>
+              <label className="flex flex-col gap-1" style={splitLabelStyle}>Amount applied<input type="number" min="0.01" step="0.01" value={payment.amount} onChange={(event) => setSplitPayments((current) => current.map((row) => row.id === payment.id ? { ...row, amount: event.target.value, amountTendered: row.paymentMethod === 'cash' && !row.amountTendered ? event.target.value : row.amountTendered } : row))} style={inputStyle} /></label>
+              {payment.paymentMethod === 'cash' ? <label className="flex flex-col gap-1" style={splitLabelStyle}>Cash received<input type="number" min={Number(payment.amount) || 0} step="0.01" value={payment.amountTendered} onChange={(event) => setSplitPayments((current) => current.map((row) => row.id === payment.id ? { ...row, amountTendered: event.target.value } : row))} style={inputStyle} /></label> : payment.paymentMethod === 'mpesa_manual' ? <label className="flex flex-col gap-1" style={splitLabelStyle}>Mobile reference<input value={payment.referenceCode} onChange={(event) => setSplitPayments((current) => current.map((row) => row.id === payment.id ? { ...row, referenceCode: event.target.value.toUpperCase() } : row))} required minLength={5} style={inputStyle} /></label> : <div className="self-end pb-2" style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>{payment.paymentMethod === 'mpesa_stk' ? 'Prompt sent to customer phone below' : 'Customer completes a secure hosted checkout'}</div>}
+              {payment.paymentMethod === 'cash' ? <div className="self-end pb-2" style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>Change {formatMoney(Math.max(0, Number(payment.amountTendered || payment.amount) - Number(payment.amount || 0)), currency)}</div> : payment.paymentMethod === 'mpesa_manual' ? <div className="self-end pb-2" style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>Reference required</div> : <div className="self-end pb-2" style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>Provider confirms the exact split amount</div>}
+              <button type="button" className="btn-outline" aria-label={`Remove payment ${index + 1}`} disabled={splitPayments.length === 1 && !isCredit} onClick={() => setSplitPayments((current) => current.filter((row) => row.id !== payment.id))} style={{ alignSelf: 'end', borderRadius: 8, padding: '8px 10px' }}>Remove</button>
+            </div>)}
+            {splitPayments.some((payment) => payment.paymentMethod === 'mpesa_stk') && <label className="flex flex-col gap-1" style={splitLabelStyle}>Customer phone for M-Pesa prompt<input type="tel" inputMode="tel" value={paymentPhone} onChange={(event) => setPaymentPhone(event.target.value)} required pattern="^(?:\\+?254|0)?[17]\\d{8}$" placeholder="0712345678" style={inputStyle} /></label>}
+            <div className="flex flex-wrap items-center justify-between gap-2"><button type="button" className="btn-outline" disabled={splitPayments.length >= 8} onClick={() => setSplitPayments((current) => [...current, { id: `tender-${Date.now()}-${current.length}`, paymentMethod: 'cash', amount: '', amountTendered: '', referenceCode: '' }])} style={{ borderRadius: 8, padding: '8px 12px' }}>Add payment method</button><span style={{ color: 'var(--color-text-primary)', fontSize: 13, fontWeight: 750 }}>Applied {formatMoney(splitPaidTotal, currency)} · Outstanding {formatMoney(Math.max(0, totalPreview - splitPaidTotal), currency)}</span></div>
+            {!isCredit && splitPaidTotal !== totalPreview && <p style={{ margin: 0, color: 'var(--color-warning)', fontSize: 12 }}>A non-credit sale must be paid in full. Adjust the tender amounts or record a credit sale.</p>}
+            {!isBackendOnline && <p style={{ margin: 0, color: 'var(--color-danger)', fontSize: 12 }}>Split payments require an active Retivox connection. Use a single tender while offline.</p>}
+          </section>
+        ) : null}
+
+        {(!splitPaymentMode || isCredit || splitPayments.some((payment) => payment.paymentMethod === 'pesapal')) && <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <label className="flex flex-col gap-2 text-left" style={{ fontSize: 13, color: 'var(--color-text-primary)' }}>
-            Customer name optional
+            Customer name {isCredit ? 'required for credit' : 'optional'}
             <input value={customerName} onChange={(event) => setCustomerName(event.target.value)} style={inputStyle} />
           </label>
           <label className="flex flex-col gap-2 text-left" style={{ fontSize: 13, color: 'var(--color-text-primary)' }}>
-            Customer phone optional
+            Customer phone {isCredit ? 'required for credit' : 'optional'}
             <input
               type="tel"
               inputMode="tel"
@@ -1016,6 +1144,10 @@ export default function RecordEmployeeTransactionForm({
               placeholder="0712345678"
               style={inputStyle}
             />
+          </label>
+          <label className="flex flex-col gap-2 text-left" style={{ fontSize: 13, color: 'var(--color-text-primary)' }}>
+            Customer email (optional)
+            <input type="email" value={customerEmail} onChange={(event) => setCustomerEmail(event.target.value)} style={inputStyle} />
           </label>
           <label className="flex flex-col gap-2 text-left" style={{ fontSize: 13, color: 'var(--color-text-primary)' }}>
             Discount amount
@@ -1032,22 +1164,71 @@ export default function RecordEmployeeTransactionForm({
               Max allowed discount: {formatMoney(maxAllowedDiscount, currency)}
             </span>
           </label>
-          <label className="flex flex-col gap-2 text-left" style={{ fontSize: 13, color: 'var(--color-text-primary)' }}>
-            Payment method
-            <select value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value as 'mpesa_manual' | 'cash')} style={inputStyle}>
-              <option value="mpesa_manual">M-Pesa manual</option>
+          {!splitPaymentMode && <label className="flex flex-col gap-2 text-left" style={{ fontSize: 13, color: 'var(--color-text-primary)' }}>
+            Payment method for amount received
+            <select value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value as typeof paymentMethod)} style={inputStyle}>
+              <option value="mpesa_manual">Mobile manual</option>
+              <option value="mpesa_stk" disabled={!isBackendOnline}>M-Pesa prompt{!isBackendOnline ? ' (online only)' : ''}</option>
+              <option value="pesapal" disabled={!isBackendOnline}>Card, bank or hosted checkout{!isBackendOnline ? ' (online only)' : ''}</option>
               <option value="cash">Cash</option>
             </select>
-          </label>
-        </div>
+          </label>}
+        </div>}
+
+        <label className="flex items-center gap-2" style={{ fontSize: 13, color: 'var(--color-text-primary)' }}>
+          <input type="checkbox" checked={isCredit} onChange={(event) => setIsCredit(event.target.checked)} />
+          Record this as a credit sale
+        </label>
+
+        {isCredit ? (
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label className="flex flex-col gap-2 text-left" style={{ fontSize: 13, color: 'var(--color-text-primary)' }}>
+              Amount paid now
+              {splitPaymentMode ? <span style={{ ...inputStyle, display: 'block', paddingTop: 10 }}>{formatMoney(splitPaidTotal, currency)}</span> : <input type="number" min="0" max={totalPreview} step="0.01" value={amountPaid} onChange={(event) => setAmountPaid(event.target.value)} style={inputStyle} />}
+              <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>Outstanding balance: {formatMoney(Math.max(0, totalPreview - effectivePaidNow), currency)}</span>
+            </label>
+            <label className="flex flex-col gap-2 text-left" style={{ fontSize: 13, color: 'var(--color-text-primary)' }}>
+              Expected payment date
+              <input type="date" min={new Date().toISOString().slice(0, 10)} value={dueDate} onChange={(event) => setDueDate(event.target.value)} style={inputStyle} />
+            </label>
+          </div>
+        ) : null}
+
+        {!splitPaymentMode && paymentMethod === 'cash' ? (
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label className="flex flex-col gap-2 text-left" style={{ fontSize: 13, color: 'var(--color-text-primary)' }}>
+              Cash received
+              <input type="number" min={isCredit ? Number(amountPaid || 0) : totalPreview} step="0.01" value={amountTendered} onChange={(event) => setAmountTendered(event.target.value)} placeholder={String(isCredit ? amountPaid || 0 : totalPreview)} style={inputStyle} />
+            </label>
+            <div style={{ alignSelf: 'end', color: 'var(--color-text-muted)', fontSize: 13, padding: 12 }}>
+              Change to give: {formatMoney(Math.max(0, Number(amountTendered || (isCredit ? amountPaid : totalPreview)) - (isCredit ? Number(amountPaid || 0) : totalPreview)), currency)}
+            </div>
+          </div>
+        ) : null}
 
         {/* Payment reference fields */}
-        {paymentMethod === 'mpesa_manual' ? (
+        {!splitPaymentMode && paymentMethod === 'mpesa_stk' ? (
           <label className="flex flex-col gap-2 text-left" style={{ fontSize: 13, color: 'var(--color-text-primary)' }}>
-            M-Pesa reference code
-            <input value={mpesaRefCode} onChange={(event) => setMpesaRefCode(event.target.value)} required style={inputStyle} />
+            Customer phone for M-Pesa prompt
+            <input type="tel" inputMode="tel" autoComplete="tel" value={paymentPhone} onChange={(event) => setPaymentPhone(event.target.value)} placeholder="0712345678" required pattern="^(?:\\+?254|0)?[17]\\d{8}$" title="Enter a Kenyan mobile number such as 0712345678" style={inputStyle} />
+            <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>The sale remains pending until Safaricom confirms the exact amount and phone number.</span>
           </label>
-        ) : (
+        ) : null}
+
+        {!splitPaymentMode && paymentMethod === 'pesapal' ? (
+          <p style={{ margin: 0, borderRadius: 10, padding: 12, background: 'var(--color-surface)', color: 'var(--color-text-muted)', fontSize: 12, lineHeight: 1.55 }}>
+            The customer will complete payment on Pesapal&apos;s hosted page. Enter a customer phone number or email above; Retivox verifies the payment directly with Pesapal before confirming the sale.
+          </p>
+        ) : null}
+
+        {!splitPaymentMode && paymentMethod !== 'cash' && paymentMethod !== 'mpesa_stk' && paymentMethod !== 'pesapal' && (paymentMethod !== 'mpesa_manual' || !isCredit || Number(amountPaid) > 0) ? (
+          <label className="flex flex-col gap-2 text-left" style={{ fontSize: 13, color: 'var(--color-text-primary)' }}>
+            {paymentMethod === 'mpesa_manual' ? 'Mobile payment reference code' : 'Payment reference (optional)'}
+            <input value={mpesaRefCode} onChange={(event) => setMpesaRefCode(event.target.value)} required={paymentMethod === 'mpesa_manual'} style={inputStyle} />
+          </label>
+        ) : null}
+
+        {!splitPaymentMode && paymentMethod !== 'cash' && paymentMethod !== 'mpesa_manual' && paymentMethod !== 'mpesa_stk' && paymentMethod !== 'pesapal' ? (
           <div
             className="rounded-xl border text-left"
             style={{
@@ -1058,9 +1239,9 @@ export default function RecordEmployeeTransactionForm({
               padding: 14,
             }}
           >
-            Cash sales are recorded now. The bank/M-Pesa agent deposit reference will be entered later during end-of-day cash reconciliation.
+            {paymentMethod === 'card' ? 'Card payments are manually recorded; payment terminal integration can be added later.' : paymentMethod === 'bank_transfer' ? 'Bank transfers are manually recorded; bank API integration can be added later.' : 'This payment is manually recorded without a provider reference.'}
           </div>
-        )}
+        ) : null}
 
         {state.error && (
           <div
