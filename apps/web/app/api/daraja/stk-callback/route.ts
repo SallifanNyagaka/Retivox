@@ -57,6 +57,33 @@ function sanitizeCallbackPayload(payload: DarajaCallbackPayload): DarajaCallback
   }
 }
 
+async function persistCallbackDiagnostic(
+  serviceClient: ReturnType<typeof createServiceRoleClient>,
+  payload: DarajaCallbackPayload,
+  checkoutRequestId: string,
+  resultCode: number,
+  outcome: string,
+  detail?: string,
+) {
+  const sanitizedPayload = sanitizeCallbackPayload(payload) as Record<string, unknown>
+  const { error } = await serviceClient.from('provider_webhook_events').upsert({
+    provider: 'daraja',
+    event_id: `platform-stk:${checkoutRequestId}:${resultCode}`,
+    result: outcome,
+    processed_at: outcome === 'platform_callback_received' ? null : new Date().toISOString(),
+    provider_payload: {
+      ...sanitizedPayload,
+      retivox_diagnostic: {
+        outcome,
+        detail: detail?.slice(0, 500) ?? null,
+      },
+    },
+  }, { onConflict: 'provider,event_id' })
+
+  // Diagnostics should never prevent a verified callback from being settled.
+  if (error) console.error('Unable to persist platform Daraja callback diagnostic', error.message)
+}
+
 export async function POST(request: Request) {
   const contentLength = Number(request.headers.get('content-length') ?? 0)
   if (contentLength > 32768) {
@@ -85,6 +112,7 @@ export async function POST(request: Request) {
 
   try {
     const serviceClient = createServiceRoleClient()
+    await persistCallbackDiagnostic(serviceClient, payload, checkoutRequestId, resultCode, 'platform_callback_received')
     const { data: payment, error: lookupError } = await serviceClient
       .from('subscription_payment_requests')
       .select('id, amount, payer_phone, status, payment_method, provider, provider_merchant_request_id')
@@ -98,6 +126,7 @@ export async function POST(request: Request) {
     }
 
     if (!payment) {
+      await persistCallbackDiagnostic(serviceClient, payload, checkoutRequestId, resultCode, 'platform_payment_unmatched')
       return NextResponse.json({ ResultCode: 1, ResultDesc: 'Payment request not found' }, { status: 404 })
     }
 
@@ -105,10 +134,12 @@ export async function POST(request: Request) {
     // checkout ID. Accept those pending requests while still rejecting other
     // tenders, then repair the marker so the settlement RPC can match them.
     if (payment.payment_method !== 'mpesa_stk' || (payment.provider && payment.provider !== 'daraja')) {
+      await persistCallbackDiagnostic(serviceClient, payload, checkoutRequestId, resultCode, 'platform_payment_type_mismatch')
       return NextResponse.json({ ResultCode: 1, ResultDesc: 'Payment request is not a Daraja STK checkout' }, { status: 409 })
     }
 
     if (payment.status !== 'pending') {
+      await persistCallbackDiagnostic(serviceClient, payload, checkoutRequestId, resultCode, 'platform_already_processed')
       return NextResponse.json({ ResultCode: 0, ResultDesc: 'Already processed' })
     }
 
@@ -116,11 +147,27 @@ export async function POST(request: Request) {
       payment.provider_merchant_request_id &&
       payment.provider_merchant_request_id !== callback?.MerchantRequestID
     ) {
+      await persistCallbackDiagnostic(serviceClient, payload, checkoutRequestId, resultCode, 'platform_merchant_request_mismatch')
       return NextResponse.json({ ResultCode: 1, ResultDesc: 'Merchant request mismatch' }, { status: 400 })
     }
 
-    const verifiedResultCode = await verifyDarajaStkCheckout(checkoutRequestId)
+    let verifiedResultCode: number
+    try {
+      verifiedResultCode = await verifyDarajaStkCheckout(checkoutRequestId)
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Unknown Daraja status-query error'
+      await persistCallbackDiagnostic(serviceClient, payload, checkoutRequestId, resultCode, 'platform_status_query_error', detail)
+      return NextResponse.json({ ResultCode: 1, ResultDesc: 'Payment verification temporarily unavailable' }, { status: 503 })
+    }
     if (verifiedResultCode !== resultCode) {
+      await persistCallbackDiagnostic(
+        serviceClient,
+        payload,
+        checkoutRequestId,
+        resultCode,
+        'platform_result_code_mismatch',
+        `Callback result ${resultCode}; Daraja status query result ${verifiedResultCode}.`,
+      )
       return NextResponse.json({ ResultCode: 1, ResultDesc: 'Provider result mismatch' }, { status: 409 })
     }
 
@@ -136,10 +183,12 @@ export async function POST(request: Request) {
       try {
         normalizedPhone = normalizeKenyanPhoneNumber(phoneNumber ?? '')
       } catch {
+        await persistCallbackDiagnostic(serviceClient, payload, checkoutRequestId, resultCode, 'platform_invalid_payment_phone')
         return NextResponse.json({ ResultCode: 1, ResultDesc: 'Invalid payment phone' }, { status: 400 })
       }
 
       if (!receiptNumber || !Number.isFinite(paidAmount) || paidAmount !== Number(payment.amount) || normalizedPhone !== payment.payer_phone) {
+        await persistCallbackDiagnostic(serviceClient, payload, checkoutRequestId, resultCode, 'platform_payment_details_mismatch')
         return NextResponse.json({ ResultCode: 1, ResultDesc: 'Payment details mismatch' }, { status: 400 })
       }
     }
@@ -165,14 +214,18 @@ export async function POST(request: Request) {
     })
 
     if (error) {
+      await persistCallbackDiagnostic(serviceClient, payload, checkoutRequestId, resultCode, 'platform_settlement_rpc_error', error.message)
       throw error
     }
     if (processed !== true) {
+      await persistCallbackDiagnostic(serviceClient, payload, checkoutRequestId, resultCode, 'platform_settlement_rejected')
       return NextResponse.json({ ResultCode: 1, ResultDesc: 'Payment could not be verified' }, { status: 409 })
     }
 
+    await persistCallbackDiagnostic(serviceClient, payload, checkoutRequestId, resultCode, 'platform_settled')
     return NextResponse.json({ ResultCode: 0, ResultDesc: 'Accepted' })
-  } catch {
+  } catch (error) {
+    console.error('Platform Daraja STK callback processing failed', error instanceof Error ? error.message : 'Unknown error')
     return NextResponse.json({ ResultCode: 1, ResultDesc: 'Payment verification temporarily unavailable' }, { status: 503 })
   }
 }
