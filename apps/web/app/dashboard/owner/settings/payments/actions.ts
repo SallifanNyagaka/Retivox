@@ -105,6 +105,7 @@ const providerSettingsSchema = z.object({
   provider: z.enum(['daraja', 'pesapal']),
   environment: z.enum(['sandbox', 'production']),
   businessShortcode: z.string().trim().max(40).optional(),
+  tillNumber: z.string().trim().max(40).optional(),
   accountReference: z.string().trim().max(40).optional(),
   transactionType: z.enum(['CustomerPayBillOnline', 'CustomerBuyGoodsOnline']).optional(),
   callbackUrl: z.string().trim().url().max(500),
@@ -129,6 +130,7 @@ export async function savePaymentProviderSettings(
     provider: value(formData, 'provider'),
     environment: value(formData, 'environment'),
     businessShortcode: value(formData, 'businessShortcode'),
+    tillNumber: value(formData, 'tillNumber'),
     accountReference: value(formData, 'accountReference'),
     transactionType: value(formData, 'transactionType'),
     callbackUrl: value(formData, 'callbackUrl'),
@@ -139,8 +141,8 @@ export async function savePaymentProviderSettings(
   if (!parsed.success) return { success: false, error: parsed.error.issues[0]?.message ?? 'Check the provider settings.' }
 
   const settings = parsed.data
-  if (settings.provider === 'daraja' && (!settings.businessShortcode || !settings.transactionType)) {
-    return { success: false, error: 'Daraja needs a shortcode and transaction type.' }
+  if (settings.provider === 'daraja' && (!settings.businessShortcode || !settings.transactionType || (settings.transactionType === 'CustomerBuyGoodsOnline' && !settings.tillNumber))) {
+    return { success: false, error: 'Daraja needs a Store/API shortcode and transaction type. Buy Goods also needs its customer-facing Till.' }
   }
 
   const serviceClient = createServiceRoleClient()
@@ -148,12 +150,13 @@ export async function savePaymentProviderSettings(
     ? await serviceClient.from('business_payment_provider_settings').select('id,environment,callback_url')
       .eq('business_id', profile.business_id).eq('provider', 'pesapal').maybeSingle()
     : { data: null }
-  const { error } = await serviceClient.rpc('owner_save_payment_provider_settings', {
+  const { error } = await serviceClient.rpc('owner_save_payment_provider_settings_v2', {
     p_business_id: profile.business_id,
     p_updated_by: profile.id,
     p_provider: settings.provider,
     p_environment: settings.environment,
     p_business_shortcode: settings.businessShortcode || null,
+    p_till_number: settings.tillNumber || null,
     p_account_reference: settings.accountReference || 'RETIVOX',
     p_transaction_type: settings.transactionType || 'CustomerPayBillOnline',
     p_callback_url: settings.callbackUrl,

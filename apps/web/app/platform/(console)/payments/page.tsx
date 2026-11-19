@@ -12,6 +12,7 @@ type PaymentSettingsRow = {
   id: string
   environment: 'sandbox' | 'production'
   business_shortcode: string
+  till_number: string | null
   account_reference: string
   transaction_type: string
   callback_url: string
@@ -58,7 +59,7 @@ export default async function PlatformPaymentsPage() {
   const pesapalSettings = Array.isArray(pesapalResponse.data) ? pesapalResponse.data[0] as { environment: string; callback_url: string; credentials_set: boolean; ipn_id: string | null; updated_at: string } | undefined : undefined
   const { data, error } = await serviceClient
     .from('platform_payment_settings')
-    .select('id, environment, business_shortcode, account_reference, transaction_type, callback_url, is_active, updated_at')
+    .select('id, environment, business_shortcode, till_number, account_reference, transaction_type, callback_url, is_active, updated_at')
     .eq('provider', 'daraja')
     .eq('is_active', true)
     .order('updated_at', { ascending: false })
@@ -198,8 +199,12 @@ export default async function PlatformPaymentsPage() {
                 </select>
               </label>
               <label style={labelStyle}>
-                Business shortcode / Paybill / Till
+                Store / API shortcode (BusinessShortCode)
                 <input name="businessShortcode" defaultValue={settings?.business_shortcode ?? ''} required style={inputStyle} />
+              </label>
+              <label style={labelStyle}>
+                Customer-facing Buy Goods Till (PartyB)
+                <input name="tillNumber" defaultValue={settings?.till_number ?? ''} inputMode="numeric" style={inputStyle} />
               </label>
               <label style={labelStyle}>
                 Account reference
@@ -245,7 +250,8 @@ export default async function PlatformPaymentsPage() {
           <div className="flex flex-col gap-3" style={{ color: 'var(--color-text-muted)', fontSize: 13 }}>
             <Info label="STK readiness" value={configStatus.isConfigured ? `Ready (${configStatus.source})` : `Missing ${configStatus.missing.join(', ')}`} />
             <Info label="Environment" value={settings?.environment ?? 'sandbox'} />
-            <Info label="Shortcode" value={settings?.business_shortcode ?? 'Not set'} />
+            <Info label="Store/API shortcode" value={settings?.business_shortcode ?? 'Not set'} />
+            <Info label="Customer-facing Till" value={settings?.till_number ?? 'Same as shortcode / not configured'} />
             <Info label="Account reference" value={settings?.account_reference ?? 'RETIVOX'} />
             <Info label="Callback URL" value={settings?.callback_url ?? 'Not set'} />
             <Info label="Consumer key" value={configStatus.consumerKeySet ? 'Saved in Vault' : 'Not set'} />
@@ -256,10 +262,10 @@ export default async function PlatformPaymentsPage() {
       </div>
 
       <Card padding="md">
-        <CardHeader title="PayBill prompt flow" action={<Badge variant="info">Step by step</Badge>} />
+        <CardHeader title="M-Pesa prompt flow" action={<Badge variant="info">Step by step</Badge>} />
         <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
           {[
-            ['1', 'Save PayBill', 'Set shortcode, account reference, callback URL, and Daraja credentials.'],
+            ['1', 'Save M-Pesa account', 'Set Store/API shortcode, optional Buy Goods Till, account reference, callback URL, and Daraja credentials.'],
             ['2', 'Owner enters phone', 'The owner types a Kenyan phone number in subscription settings.'],
             ['3', 'Token + password', 'Retivox gets OAuth token and builds the Daraja timestamp password.'],
             ['4', 'STK request', 'Daraja receives BusinessShortCode, PartyB, AccountReference, and amount.'],

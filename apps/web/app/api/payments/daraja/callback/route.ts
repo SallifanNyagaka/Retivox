@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { getBusinessDarajaSetup } from '../../../../../lib/payments/businessDaraja'
-import { normalizeKenyanPhoneNumber, verifyDarajaStkCheckoutWithConfig } from '../../../../../lib/payments/daraja'
+import { getDarajaCallbackDisposition, normalizeKenyanPhoneNumber, shouldDeferSuccessfulDarajaCallback, shouldQueryDarajaStatusForCallback, verifyDarajaStkCheckoutWithConfig } from '../../../../../lib/payments/daraja'
 import logger from '../../../../../lib/logger'
 import { createServiceRoleClient } from '../../../../../lib/supabase/admin'
 
@@ -69,11 +69,19 @@ export async function POST(request: Request) {
       return NextResponse.json({ ResultCode: 0, ResultDesc: 'Unmatched callback retained for review' })
     }
     if (payment.payment_method !== 'mpesa_stk') return NextResponse.json({ ResultCode: 1, ResultDesc: 'Payment is not a Daraja checkout' }, { status: 409 })
-    if (payment.status === 'verified') return NextResponse.json({ ResultCode: 0, ResultDesc: 'Already processed' })
+    const disposition = getDarajaCallbackDisposition(payment.status, resultCode)
+    if (disposition === 'already_processed') return NextResponse.json({ ResultCode: 0, ResultDesc: 'Already processed' })
 
-    const setup = await getBusinessDarajaSetup(payment.business_id)
-    const verifiedCode = await verifyDarajaStkCheckoutWithConfig(checkoutRequestId, setup.config)
-    if (verifiedCode !== resultCode) return NextResponse.json({ ResultCode: 1, ResultDesc: 'Provider status could not be verified' }, { status: 409 })
+    // Safaricom callback failures are final for the correlated checkout. Only
+    // successful callbacks need the extra status query; 4999 is query-pending,
+    // so it must not supersede a final success callback.
+    if (disposition === 'verified' && shouldQueryDarajaStatusForCallback(resultCode)) {
+      const setup = await getBusinessDarajaSetup(payment.business_id)
+      const verifiedCode = await verifyDarajaStkCheckoutWithConfig(checkoutRequestId, setup.config)
+      if (shouldDeferSuccessfulDarajaCallback(verifiedCode)) {
+        return NextResponse.json({ ResultCode: 1, ResultDesc: 'Provider status could not be verified' }, { status: 409 })
+      }
+    }
 
     const receiptValue = value(payload, 'MpesaReceiptNumber')
     const amountValue = value(payload, 'Amount')

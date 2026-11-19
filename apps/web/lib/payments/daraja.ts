@@ -27,6 +27,7 @@ type DarajaStkQueryResponse = {
 export type DarajaPromptConfiguration = {
   environment: 'sandbox' | 'production'
   shortcode: string
+  tillNumber: string | null
   transactionType: string
   accountReference: string
   callbackUrl: string
@@ -38,6 +39,7 @@ export type DarajaConfig = {
   consumerKey: string
   consumerSecret: string
   shortcode: string
+  tillNumber: string | null
   passkey: string
   callbackUrl: string
   environment: 'sandbox' | 'production'
@@ -49,6 +51,7 @@ export type DarajaConfig = {
 type PlatformPaymentSettingsRow = {
   environment: 'sandbox' | 'production'
   business_shortcode: string
+  till_number: string | null
   account_reference: string
   transaction_type: string
   callback_url: string
@@ -66,7 +69,7 @@ type DarajaConfigResolution = {
 async function getPlatformDarajaSettings(): Promise<PlatformPaymentSettingsRow | null> {
   try {
     const serviceClient = createServiceRoleClient()
-    const { data, error } = await serviceClient.rpc('platform_get_daraja_settings')
+    const { data, error } = await serviceClient.rpc('platform_get_daraja_settings_v2')
 
     if (error) {
       return null
@@ -90,7 +93,7 @@ async function resolveDarajaConfig(): Promise<DarajaConfigResolution> {
   const requiredFields: Array<[string, string | undefined | null]> = [
     ['consumer key', resolvedConsumerKey],
     ['consumer secret', resolvedConsumerSecret],
-    ['PayBill shortcode', resolvedShortcode],
+    ['Store/API shortcode', resolvedShortcode],
     ['Lipa na M-Pesa passkey', resolvedPasskey],
     ['callback URL', resolvedCallbackUrl],
   ]
@@ -108,16 +111,24 @@ async function resolveDarajaConfig(): Promise<DarajaConfigResolution> {
     }
   }
 
+  const transactionType = settings?.transaction_type || 'CustomerPayBillOnline'
+  const tillNumber = settings?.till_number?.trim() || null
+  if (transactionType === 'CustomerBuyGoodsOnline' && !tillNumber) {
+    missing.push('Buy Goods Till number')
+    return { config: null, missing, source }
+  }
+
   return {
     config: {
       consumerKey: resolvedConsumerKey as string,
       consumerSecret: resolvedConsumerSecret as string,
       shortcode: resolvedShortcode as string,
+      tillNumber,
       passkey: resolvedPasskey as string,
       callbackUrl: resolvedCallbackUrl as string,
       environment: configuredEnvironment,
       baseUrl: configuredEnvironment === 'production' ? 'https://api.safaricom.co.ke' : 'https://sandbox.safaricom.co.ke',
-      transactionType: settings?.transaction_type || 'CustomerPayBillOnline',
+      transactionType,
       accountReference: settings?.account_reference || 'RETIVOX',
     },
     missing: [],
@@ -151,6 +162,7 @@ export async function getDarajaPromptConfiguration() {
   return {
     environment: resolution.config.environment,
     shortcode: resolution.config.shortcode,
+    tillNumber: resolution.config.tillNumber,
     transactionType: resolution.config.transactionType,
     accountReference: resolution.config.accountReference,
     callbackUrl: resolution.config.callbackUrl,
@@ -259,7 +271,7 @@ export async function initiateDarajaStkPush(input: {
 
 export async function getBusinessDarajaConfig(businessId: string, ownerId: string): Promise<DarajaConfig> {
   const serviceClient = createServiceRoleClient()
-  const { data, error } = await serviceClient.rpc('owner_get_payment_provider_config', {
+  const { data, error } = await serviceClient.rpc('owner_get_payment_provider_config_v2', {
     p_business_id: businessId,
     p_actor_id: ownerId,
     p_provider: 'daraja',
@@ -277,6 +289,7 @@ export async function getBusinessDarajaConfig(businessId: string, ownerId: strin
     consumerSecret: row.consumer_secret,
     passkey: row.passkey,
     shortcode: row.business_shortcode,
+    tillNumber: row.till_number?.trim() || null,
     callbackUrl: callback.toString(),
     environment: row.environment,
     baseUrl: row.environment === 'production' ? 'https://api.safaricom.co.ke' : 'https://sandbox.safaricom.co.ke',
@@ -296,7 +309,7 @@ export async function initiateDarajaStkPushWithConfig(input: {
   if (!Number.isInteger(amount) || amount <= 0) throw new Error('Enter a valid whole-number payment amount.')
   const accessToken = await getAccessToken(config)
   const timestamp = getTimestamp()
-  const password = Buffer.from(`${config.shortcode}${config.passkey}${timestamp}`).toString('base64')
+  const requestBody = buildDarajaStkRequestBody(input, config, timestamp)
 
   const response = await fetch(`${config.baseUrl}/mpesa/stkpush/v1/processrequest`, {
     method: 'POST',
@@ -304,19 +317,7 @@ export async function initiateDarajaStkPushWithConfig(input: {
       Authorization: `Bearer ${accessToken}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      BusinessShortCode: config.shortcode,
-      Password: password,
-      Timestamp: timestamp,
-      TransactionType: config.environment === 'sandbox' ? 'CustomerPayBillOnline' : config.transactionType,
-      Amount: amount,
-      PartyA: phone,
-      PartyB: config.shortcode,
-      PhoneNumber: phone,
-      CallBackURL: config.callbackUrl,
-      AccountReference: (input.accountReference || config.accountReference).slice(0, 12),
-      TransactionDesc: input.transactionDescription.slice(0, 64),
-    }),
+    body: JSON.stringify({ ...requestBody, Amount: amount, PartyA: phone, PhoneNumber: phone }),
     cache: 'no-store',
     signal: AbortSignal.timeout(15000),
   })
@@ -328,6 +329,46 @@ export async function initiateDarajaStkPushWithConfig(input: {
   }
 
   return payload
+}
+
+export function buildDarajaStkRequestBody(
+  input: { accountReference?: string; transactionDescription: string },
+  config: DarajaConfig,
+  timestamp: string,
+) {
+  const transactionType = config.environment === 'sandbox' ? 'CustomerPayBillOnline' : config.transactionType
+  const partyB = transactionType === 'CustomerBuyGoodsOnline'
+    ? config.tillNumber?.trim()
+    : config.shortcode
+  if (!partyB) throw new Error('Configure the customer-facing Buy Goods Till before sending STK prompts.')
+  return {
+    BusinessShortCode: config.shortcode,
+    Password: Buffer.from(`${config.shortcode}${config.passkey}${timestamp}`).toString('base64'),
+    Timestamp: timestamp,
+    TransactionType: transactionType,
+    PartyB: partyB,
+    CallBackURL: config.callbackUrl,
+    AccountReference: (input.accountReference || config.accountReference).slice(0, 12),
+    TransactionDesc: input.transactionDescription.slice(0, 64),
+  }
+}
+
+/** 4999 is a non-final Daraja status-query result; it must not defeat a callback. */
+export function shouldDeferSuccessfulDarajaCallback(statusQueryResultCode: number) {
+  return statusQueryResultCode !== 0 && statusQueryResultCode !== 4999
+}
+
+export function shouldQueryDarajaStatusForCallback(callbackResultCode: number) {
+  return callbackResultCode === 0
+}
+
+export function isDarajaPaymentTerminal(status: string) {
+  return status === 'verified' || status === 'rejected' || status === 'voided'
+}
+
+export function getDarajaCallbackDisposition(paymentStatus: string, callbackResultCode: number) {
+  if (isDarajaPaymentTerminal(paymentStatus)) return 'already_processed' as const
+  return callbackResultCode === 0 ? 'verified' as const : 'failed' as const
 }
 
 export async function verifyDarajaStkCheckout(checkoutRequestId: string): Promise<number> {

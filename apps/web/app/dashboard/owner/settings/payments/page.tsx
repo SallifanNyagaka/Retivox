@@ -16,6 +16,7 @@ type ProviderSettings = {
   provider: 'daraja' | 'pesapal'
   environment: 'sandbox' | 'production'
   business_shortcode: string | null
+  till_number: string | null
   account_reference: string
   transaction_type: string
   callback_url: string
@@ -35,7 +36,7 @@ export default async function OwnerPaymentSettingsPage() {
   if (!profile.business_id) throw new Error('Owner profile is missing its business.')
   const serviceClient = createServiceRoleClient()
   const [{ data, error }, setupConfig, setupRequests, pesapalIpnResponse, requestHeaders] = await Promise.all([
-    serviceClient.rpc('owner_my_payment_provider_settings', {
+    serviceClient.rpc('owner_my_payment_provider_settings_v2', {
       p_business_id: profile.business_id,
       p_actor_id: profile.id,
     }),

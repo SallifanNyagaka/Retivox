@@ -21,6 +21,7 @@ const saveSchema = z.object({
   provider: z.enum(['daraja', 'pesapal']),
   environment: z.enum(['sandbox', 'production']),
   businessShortcode: z.string().trim().max(40).optional(),
+  tillNumber: z.string().trim().max(40).optional(),
   accountReference: z.string().trim().max(40).optional(),
   transactionType: z.enum(['CustomerPayBillOnline', 'CustomerBuyGoodsOnline']).optional(),
   callbackUrl: z.string().trim().url().max(500),
@@ -84,7 +85,7 @@ export async function GET(request: Request) {
   const { service, profile } = authorized
 
   const [{ data, error }, { data: pesapal, error: pesapalError }] = await Promise.all([
-    service.rpc('owner_my_payment_provider_settings', {
+    service.rpc('owner_my_payment_provider_settings_v2', {
       p_business_id: profile.business_id,
       p_actor_id: profile.id,
     }),
@@ -137,8 +138,8 @@ export async function POST(request: Request) {
     const parsed = saveSchema.safeParse(body)
     if (!parsed.success) return json({ error: parsed.error.issues[0]?.message ?? 'Check the payment provider values.' }, 400)
     const settings = parsed.data
-    if (settings.provider === 'daraja' && (!settings.businessShortcode || !settings.transactionType)) {
-      return json({ error: 'Daraja requires a PayBill/Till shortcode and transaction type.' }, 400)
+    if (settings.provider === 'daraja' && (!settings.businessShortcode || !settings.transactionType || (settings.transactionType === 'CustomerBuyGoodsOnline' && !settings.tillNumber))) {
+      return json({ error: 'Daraja requires a Store/API shortcode and transaction type. Buy Goods also requires its customer-facing Till.' }, 400)
     }
     try {
       const callback = new URL(settings.callbackUrl)
@@ -156,12 +157,13 @@ export async function POST(request: Request) {
       : { data: null, error: null }
     if (previousPesapal.error) return json({ error: 'Could not verify current Pesapal settings.' }, 500)
 
-    const { error } = await service.rpc('owner_save_payment_provider_settings', {
+    const { error } = await service.rpc('owner_save_payment_provider_settings_v2', {
       p_business_id: profile.business_id,
       p_updated_by: profile.id,
       p_provider: settings.provider,
       p_environment: settings.environment,
       p_business_shortcode: settings.businessShortcode || null,
+      p_till_number: settings.tillNumber || null,
       p_account_reference: settings.accountReference || 'RETIVOX',
       p_transaction_type: settings.transactionType || 'CustomerPayBillOnline',
       p_callback_url: settings.callbackUrl,

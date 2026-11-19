@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { normalizeKenyanPhoneNumber, verifyDarajaStkCheckout } from '../../../../lib/payments/daraja'
+import { getDarajaCallbackDisposition, normalizeKenyanPhoneNumber, shouldDeferSuccessfulDarajaCallback, shouldQueryDarajaStatusForCallback, verifyDarajaStkCheckout } from '../../../../lib/payments/daraja'
 import { createServiceRoleClient } from '../../../../lib/supabase/admin'
 
 type DarajaCallbackPayload = {
@@ -138,7 +138,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ ResultCode: 1, ResultDesc: 'Payment request is not a Daraja STK checkout' }, { status: 409 })
     }
 
-    if (payment.status !== 'pending') {
+    const disposition = getDarajaCallbackDisposition(payment.status, resultCode)
+    if (disposition === 'already_processed' || payment.status !== 'pending') {
       await persistCallbackDiagnostic(serviceClient, payload, checkoutRequestId, resultCode, 'platform_already_processed')
       return NextResponse.json({ ResultCode: 0, ResultDesc: 'Already processed' })
     }
@@ -151,24 +152,28 @@ export async function POST(request: Request) {
       return NextResponse.json({ ResultCode: 1, ResultDesc: 'Merchant request mismatch' }, { status: 400 })
     }
 
-    let verifiedResultCode: number
-    try {
-      verifiedResultCode = await verifyDarajaStkCheckout(checkoutRequestId)
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : 'Unknown Daraja status-query error'
-      await persistCallbackDiagnostic(serviceClient, payload, checkoutRequestId, resultCode, 'platform_status_query_error', detail)
-      return NextResponse.json({ ResultCode: 1, ResultDesc: 'Payment verification temporarily unavailable' }, { status: 503 })
-    }
-    if (verifiedResultCode !== resultCode) {
-      await persistCallbackDiagnostic(
-        serviceClient,
-        payload,
-        checkoutRequestId,
-        resultCode,
-        'platform_result_code_mismatch',
-        `Callback result ${resultCode}; Daraja status query result ${verifiedResultCode}.`,
-      )
-      return NextResponse.json({ ResultCode: 1, ResultDesc: 'Provider result mismatch' }, { status: 409 })
+    // A nonzero callback is Safaricom's final failure for this exact checkout.
+    // Do not let a lagging status query (for example 4999) keep it pending.
+    if (disposition === 'verified' && shouldQueryDarajaStatusForCallback(resultCode)) {
+      let verifiedResultCode: number
+      try {
+        verifiedResultCode = await verifyDarajaStkCheckout(checkoutRequestId)
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : 'Unknown Daraja status-query error'
+        await persistCallbackDiagnostic(serviceClient, payload, checkoutRequestId, resultCode, 'platform_status_query_error', detail)
+        return NextResponse.json({ ResultCode: 1, ResultDesc: 'Payment verification temporarily unavailable' }, { status: 503 })
+      }
+      if (shouldDeferSuccessfulDarajaCallback(verifiedResultCode)) {
+        await persistCallbackDiagnostic(
+          serviceClient,
+          payload,
+          checkoutRequestId,
+          resultCode,
+          'platform_result_code_mismatch',
+          `Callback result ${resultCode}; Daraja status query result ${verifiedResultCode}.`,
+        )
+        return NextResponse.json({ ResultCode: 1, ResultDesc: 'Provider result mismatch' }, { status: 409 })
+      }
     }
 
     const receiptValue = getMetadataValue(payload, 'MpesaReceiptNumber')

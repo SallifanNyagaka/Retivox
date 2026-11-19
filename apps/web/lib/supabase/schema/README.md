@@ -118,4 +118,5 @@ login-review content. Live checks confirm the 27 tables without policies grant n
 - 120_sale_idempotency_and_retry_safety.sql — binds online sale retries to stable request IDs and immutable payloads, makes offline/PWA retry finalization idempotent, and retains database stock locks as the final availability check.
 - 121_cash_sales_without_reference_on_offline_sync.sql — repairs the offline dashboard wrapper's cash argument while retaining idempotent sale retries. Applied to the live Supabase project on 2026-11-18.
 - 122_remove_legacy_cash_reference_requirement.sql — removes the obsolete cash deposit/reference validation from the legacy dashboard transaction RPC and passes NULL directly through online/offline sale wrappers; M-Pesa reference validation remains intact. Applied to the live Supabase project on 2026-11-18.
+- 123_daraja_buy_goods_till_separation.sql — separates Store/API shortcode from the customer-facing Buy Goods Till for platform and merchant STK settings, preserves existing Vault credentials, and makes final business callback failures terminal/idempotent.
 

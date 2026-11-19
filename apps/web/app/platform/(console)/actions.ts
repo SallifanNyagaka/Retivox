@@ -731,6 +731,7 @@ export async function updatePlatformPaymentSettings(formData: FormData): Promise
   const user = await requireDeveloper()
   const environment = getString(formData, 'environment') || 'sandbox'
   const businessShortcode = getString(formData, 'businessShortcode')
+  const tillNumber = getString(formData, 'tillNumber')
   const accountReference = getString(formData, 'accountReference') || 'RETIVOX'
   const transactionType = getString(formData, 'transactionType') || 'CustomerPayBillOnline'
   const callbackUrl = getString(formData, 'callbackUrl')
@@ -738,14 +739,15 @@ export async function updatePlatformPaymentSettings(formData: FormData): Promise
   const consumerSecret = getString(formData, 'consumerSecret')
   const passkey = getString(formData, 'passkey')
 
-  if (!businessShortcode || !callbackUrl) {
-    throw new Error('M-Pesa shortcode and callback URL are required')
+  if (!businessShortcode || !callbackUrl || (transactionType === 'CustomerBuyGoodsOnline' && !tillNumber)) {
+    throw new Error('Store/API shortcode, Buy Goods Till (for Buy Goods), and callback URL are required')
   }
 
   const serviceClient = createServiceRoleClient()
-  const { data: settingId, error } = await serviceClient.rpc('platform_save_daraja_settings', {
+  const { data: settingId, error } = await serviceClient.rpc('platform_save_daraja_settings_v2', {
     p_environment: environment,
     p_business_shortcode: businessShortcode,
+    p_till_number: tillNumber || null,
     p_account_reference: accountReference,
     p_transaction_type: transactionType,
     p_callback_url: callbackUrl,
@@ -767,7 +769,7 @@ export async function updatePlatformPaymentSettings(formData: FormData): Promise
     platform_user_id: user.id,
     entity_type: 'platform_payment_settings',
     action: 'updated',
-    new_value: { setting_id: settingId, provider: 'daraja', environment, business_shortcode: businessShortcode, account_reference: accountReference },
+    new_value: { setting_id: settingId, provider: 'daraja', environment, business_shortcode: businessShortcode, till_number: tillNumber || null, account_reference: accountReference },
   })
 
   revalidatePath('/platform/payments')

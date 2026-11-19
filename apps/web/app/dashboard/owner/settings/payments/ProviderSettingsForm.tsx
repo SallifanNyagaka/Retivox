@@ -12,6 +12,7 @@ type ProviderSettings = {
   provider: ProviderName
   environment: 'sandbox' | 'production'
   business_shortcode: string | null
+  till_number: string | null
   account_reference: string
   transaction_type: string
   callback_url: string
@@ -73,7 +74,7 @@ export default function ProviderSettingsForm({
           </label>
           {isDaraja ? (
             <label style={labelStyle}>
-              PayBill or Till shortcode
+              Store / API shortcode (BusinessShortCode, also used in the STK password)
               <input name="businessShortcode" defaultValue={settings?.business_shortcode ?? ''} required style={inputStyle} />
             </label>
           ) : (
@@ -82,6 +83,12 @@ export default function ProviderSettingsForm({
               <input name="accountReference" defaultValue={settings?.account_reference ?? 'RETIVOX'} style={inputStyle} />
             </label>
           )}
+          {isDaraja ? (
+            <label style={labelStyle}>
+              Customer-facing Buy Goods Till (PartyB)
+              <input name="tillNumber" defaultValue={settings?.till_number ?? ''} inputMode="numeric" style={inputStyle} />
+            </label>
+          ) : null}
           {isDaraja ? (
             <label style={labelStyle}>
               Account reference
@@ -123,7 +130,7 @@ export default function ProviderSettingsForm({
         ) : null}
 
         <p style={{ margin: 0, color: 'var(--color-text-muted)', fontSize: 12, lineHeight: 1.55 }}>
-          Credentials are encrypted in Supabase Vault and never sent back to this form. Leave saved credential fields blank to keep the current value. {isDaraja ? 'Daraja prompts are available online and settle only after Safaricom status verification.' : 'After saving credentials, register the HTTPS IPN callback below. Checkout is available online and settles only after Retivox verifies the transaction directly with Pesapal.'}
+          Credentials are encrypted in Supabase Vault and never sent back to this form. Leave saved credential fields blank to keep the current value. {isDaraja ? 'For Buy Goods, the Store/API shortcode is used as BusinessShortCode and in the STK password; the customer-facing Till is sent as PartyB.' : 'After saving credentials, register the HTTPS IPN callback below. Checkout is available online and settles only after Retivox verifies the transaction directly with Pesapal.'}
         </p>
         {state.error ? <p role="alert" style={{ margin: 0, color: 'var(--color-danger)', fontSize: 13 }}>{state.error}</p> : null}
         {state.success ? <p role="status" style={{ margin: 0, color: 'var(--color-success)', fontSize: 13 }}>Settings saved securely.</p> : null}

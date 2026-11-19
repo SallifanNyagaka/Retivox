@@ -334,6 +334,7 @@ class _ProviderEditor extends StatefulWidget {
 
 class _ProviderEditorState extends State<_ProviderEditor> {
   late final TextEditingController _shortcode;
+  late final TextEditingController _tillNumber;
   late final TextEditingController _reference;
   late final TextEditingController _callback;
   late final TextEditingController _consumerKey;
@@ -351,6 +352,9 @@ class _ProviderEditorState extends State<_ProviderEditor> {
     final settings = widget.settings;
     _shortcode = TextEditingController(
       text: settings?['business_shortcode']?.toString() ?? '',
+    );
+    _tillNumber = TextEditingController(
+      text: settings?['till_number']?.toString() ?? '',
     );
     _reference = TextEditingController(
       text: settings?['account_reference']?.toString() ?? 'RETIVOX',
@@ -372,6 +376,7 @@ class _ProviderEditorState extends State<_ProviderEditor> {
     if (!identical(oldWidget.settings, widget.settings)) {
       final settings = widget.settings;
       _shortcode.text = settings?['business_shortcode']?.toString() ?? '';
+      _tillNumber.text = settings?['till_number']?.toString() ?? '';
       _reference.text = settings?['account_reference']?.toString() ?? 'RETIVOX';
       _callback.text =
           settings?['callback_url']?.toString() ?? widget.defaultCallbackUrl;
@@ -384,6 +389,7 @@ class _ProviderEditorState extends State<_ProviderEditor> {
   @override
   void dispose() {
     _shortcode.dispose();
+    _tillNumber.dispose();
     _reference.dispose();
     _callback.dispose();
     _consumerKey.dispose();
@@ -452,8 +458,21 @@ class _ProviderEditorState extends State<_ProviderEditor> {
                     controller: _shortcode,
                     enabled: widget.enabled,
                     decoration: const InputDecoration(
-                      labelText: 'PayBill or Till shortcode',
-                      hintText: 'Your merchant shortcode',
+                      labelText: 'Store / API shortcode',
+                      hintText: 'BusinessShortCode and STK password shortcode',
+                    ),
+                  ),
+                ),
+              if (_isDaraja)
+                SizedBox(
+                  width: 240,
+                  child: TextFormField(
+                    controller: _tillNumber,
+                    enabled: widget.enabled,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      labelText: 'Customer-facing Buy Goods Till',
+                      hintText: 'PartyB; required for Buy Goods',
                     ),
                   ),
                 ),
@@ -572,6 +591,8 @@ class _ProviderEditorState extends State<_ProviderEditor> {
                         'businessShortcode': _isDaraja
                             ? _shortcode.text.trim()
                             : '',
+                        if (_isDaraja)
+                          'tillNumber': _tillNumber.text.trim(),
                         'accountReference': _reference.text.trim(),
                         if (_isDaraja) 'transactionType': _transactionType,
                         'callbackUrl': _callback.text.trim(),
