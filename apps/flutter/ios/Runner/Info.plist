@@ -7,7 +7,9 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Retivox Client</string>
+	<string>Retivox</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Retivox uses the camera to scan product barcodes into the point of sale.</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>

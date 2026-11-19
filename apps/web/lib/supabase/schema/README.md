@@ -116,4 +116,6 @@ login-review content. Live checks confirm the 27 tables without policies grant n
 - 118_index_new_payment_fk_columns.sql — indexes foreign-key columns on assisted-setup pricing, promotions, and price-notice ledgers.
 - 119_retain_daraja_callback_mismatches.sql — stores sanitized Daraja callback payloads in the service-only event ledger and records settlement mismatches without rolling back their audit trail.
 - 120_sale_idempotency_and_retry_safety.sql — binds online sale retries to stable request IDs and immutable payloads, makes offline/PWA retry finalization idempotent, and retains database stock locks as the final availability check.
+- 121_cash_sales_without_reference_on_offline_sync.sql — repairs the offline dashboard wrapper's cash argument while retaining idempotent sale retries. Applied to the live Supabase project on 2026-11-18.
+- 122_remove_legacy_cash_reference_requirement.sql — removes the obsolete cash deposit/reference validation from the legacy dashboard transaction RPC and passes NULL directly through online/offline sale wrappers; M-Pesa reference validation remains intact. Applied to the live Supabase project on 2026-11-18.
 

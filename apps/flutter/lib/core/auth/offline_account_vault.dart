@@ -158,13 +158,27 @@ class OfflineAccountVault {
   Future<T?> readCachedValue<T>(RetivoxUser user, String key) async {
     final ciphertext = await database.readCachedValue(user.id, key);
     if (ciphertext == null) return null;
-    return jsonDecode(
-      await _open(
-        ciphertext,
-        await _readDataKey(user.id),
-        dataDescription: 'account cache "$key"',
-      ),
-    ) as T;
+    try {
+      return jsonDecode(
+        await _open(
+          ciphertext,
+          await _readDataKey(user.id),
+          dataDescription: 'account cache "$key"',
+        ),
+      ) as T;
+    } on OfflineAccountException {
+      // This entry is a server-backed cache, so a bad device key or damaged
+      // ciphertext is a cache miss. Leave offline sales untouched; the normal
+      // online repository path will repopulate this cache on the next fetch.
+      await database.deleteCachedValue(user.id, key);
+      return null;
+    } on FormatException {
+      await database.deleteCachedValue(user.id, key);
+      return null;
+    } on TypeError {
+      await database.deleteCachedValue(user.id, key);
+      return null;
+    }
   }
 
   Future<DateTime?> cachedValueUpdatedAt(RetivoxUser user, String key) async {
@@ -184,7 +198,7 @@ class OfflineAccountVault {
       await _open(
         ciphertext,
         await _readDataKey(accountId),
-        dataDescription: 'saved offline record',
+        dataDescription: 'saved offline sale',
       ),
     ) as Map<String, dynamic>;
   }
@@ -225,7 +239,16 @@ class OfflineAccountVault {
     final existing = await _secureStorage.read(
       key: '$_dataKeyPrefix$accountId',
     );
-    if (existing != null) return SecretKey(base64Decode(existing));
+    if (existing != null) {
+      try {
+        final bytes = base64Decode(existing);
+        if (bytes.length == 32) return SecretKey(bytes);
+      } on FormatException {
+        // Replace malformed key material after an online sign-in. Any old
+        // encrypted cache values become misses, while offline sales remain
+        // preserved for explicit review instead of blocking the sales screen.
+      }
+    }
     final bytes = _secureRandomBytes(32);
     await _secureStorage.write(
       key: '$_dataKeyPrefix$accountId',
@@ -277,18 +300,22 @@ class OfflineAccountVault {
         'Saved offline data has an unsupported format.',
       );
     }
-    final box = SecretBox(
-      base64Decode(parts[2]),
-      nonce: base64Decode(parts[1]),
-      mac: Mac(base64Decode(parts[3])),
-    );
+    final nonce = base64Decode(parts[1]);
+    final cipherText = base64Decode(parts[2]);
+    final mac = base64Decode(parts[3]);
+    if (nonce.length != 12 || mac.length != 16) {
+      throw const OfflineAccountException(
+        'Saved offline data is incomplete. It remains stored for review.',
+      );
+    }
+    final box = SecretBox(cipherText, nonce: nonce, mac: Mac(mac));
     try {
       return utf8.decode(await _cipher.decrypt(box, secretKey: key));
     } on SecretBoxAuthenticationError {
       throw OfflineAccountException(
-        'The $dataDescription for this account could not be authenticated. '
-        'Sign in online as this account to refresh server-backed data. '
-        'Local records have not been deleted.',
+        dataDescription == 'saved offline sale'
+            ? 'This saved offline sale could not be authenticated. Its local record has not been deleted; cancel it from the pending sales queue if it cannot be recovered.'
+            : 'The $dataDescription for this account could not be authenticated. Sign in online as this account to refresh server-backed data. Local records have not been deleted.',
       );
     }
   }

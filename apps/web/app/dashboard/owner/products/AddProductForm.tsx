@@ -10,7 +10,9 @@
 import { startTransition, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { useActionState } from 'react'
 import { useRouter } from 'next/navigation'
+import { ScanBarcode } from 'lucide-react'
 import Modal from '../../../../components/ui/Modal'
+import BarcodeCameraDialog from '../../../../components/barcode/BarcodeCameraDialog'
 import Toast from '../../../../components/ui/Toast'
 import LoadingOverlay from '../../../../components/ui/LoadingOverlay'
 import { useToast } from '../../../../lib/hooks/useToast'
@@ -18,6 +20,7 @@ import { conversionPreview } from '../../../../lib/uom/utils'
 import type { UnitOfMeasure } from '../../../../lib/uom/server'
 import { addProduct, type FormState } from './actions'
 import { addUOMAction, deactivateUnusedUOMAction, type FormState as UOMFormState } from './uom-actions'
+import { barcodeConfusableKey, findConfusableBarcode, normalizeBarcode, type BarcodeOwner } from '../../../../lib/barcodes/similarity'
 
 /**
  * Branch option used for branch-specific pricing setup.
@@ -34,6 +37,8 @@ type Props = {
   currency: string
   uoms: UnitOfMeasure[]
   branches: BranchOption[]
+  existingProducts?: Array<{ id: string; name: string; barcodes?: string[] }>
+  barcodeOwners?: BarcodeOwner[]
 }
 
 /**
@@ -160,7 +165,7 @@ function calculateAssistedPrice(quantity: number, points: PricePointDraft[], rou
 /**
  * Guided Add Product form.
  */
-export default function AddProductForm({ currency, uoms, branches }: Props) {
+export default function AddProductForm({ currency, uoms, branches, existingProducts = [], barcodeOwners: barcodeOwnersProp }: Props) {
   const router = useRouter()
   const initialUoms = dedupeUoms(uoms)
   const initialUomId = initialUoms[0]?.id ?? ''
@@ -172,6 +177,8 @@ export default function AddProductForm({ currency, uoms, branches }: Props) {
   const [name, setName] = useState('')
   const [sku, setSku] = useState('')
   const [barcodes, setBarcodes] = useState('')
+  const [barcodeScannerOpen, setBarcodeScannerOpen] = useState(false)
+  const barcodeFieldRef = useRef<HTMLTextAreaElement>(null)
   const [category, setCategory] = useState('')
   const [subcategory, setSubcategory] = useState('')
   const [brandFamily, setBrandFamily] = useState('')
@@ -205,6 +212,58 @@ export default function AddProductForm({ currency, uoms, branches }: Props) {
   const previousPending = useRef(isPending)
   const previousUOMPending = useRef(uomPending)
   const previousRemoveUOMPending = useRef(removeUomPending)
+
+  const barcodeOwners: BarcodeOwner[] = barcodeOwnersProp ?? existingProducts.flatMap((product) =>
+    (product.barcodes ?? []).map((code) => ({ productId: product.id, productName: product.name, code }))
+  )
+  const barcodeNotice = (() => {
+    const codes = barcodes.split(/[\r\n,]+/).map((code) => code.trim()).filter(Boolean)
+    for (let index = 0; index < codes.length; index += 1) {
+      const code = codes[index]
+      const exact = barcodeOwners.find((owner) => normalizeBarcode(owner.code) === normalizeBarcode(code))
+      if (exact) return `Barcode ${code} is already attached to ${exact.productName}.`
+      const similar = findConfusableBarcode(code, barcodeOwners)
+      if (similar) return `Barcode ${code} is too similar to ${similar.code} on ${similar.productName}. Check the scan before saving.`
+      for (const previous of codes.slice(0, index)) {
+        if (normalizeBarcode(previous) === normalizeBarcode(code)) return `Barcode ${code} is entered more than once.`
+        if (barcodeConfusableKey(previous) === barcodeConfusableKey(code)) return `Barcode ${code} is too similar to another barcode in this form.`
+      }
+    }
+    return ''
+  })()
+
+  const appendBarcode = (value: string) => {
+    const code = value.trim()
+    if (!code) return
+    const codes = barcodes.split(/[\r\n,]+/).map((item) => item.trim()).filter(Boolean)
+    const exact = barcodeOwners.find((owner) => normalizeBarcode(owner.code) === normalizeBarcode(code))
+    const similar = findConfusableBarcode(code, barcodeOwners)
+    const draftSimilar = codes.find((item) => barcodeConfusableKey(item) === barcodeConfusableKey(code) && normalizeBarcode(item) !== normalizeBarcode(code))
+    if (exact || similar || draftSimilar) {
+      const match = exact ?? similar
+      const message = match
+        ? exact
+          ? `Barcode ${code} is already attached to ${match.productName}.`
+          : `Barcode ${code} is too similar to ${match.code} on ${match.productName}. Check the scan.`
+        : `Barcode ${code} is too similar to another barcode in this form.`
+      toast.error(message)
+      setBarcodeScannerOpen(false)
+      return
+    }
+    if (!codes.some((item) => item.toUpperCase() === code.toUpperCase())) {
+      setBarcodes([...codes, code].join('\n'))
+    }
+    setBarcodeScannerOpen(false)
+  }
+
+  const scanBarcode = () => {
+    if (typeof window !== 'undefined' && 'BarcodeDetector' in window) {
+      setBarcodeScannerOpen(true)
+      return
+    }
+    barcodeFieldRef.current?.focus()
+    barcodeFieldRef.current?.setSelectionRange(barcodes.length, barcodes.length)
+  }
 
   const visibleUoms = useMemo(() => dedupeUoms(availableUoms), [availableUoms])
   const selectedBaseUom = visibleUoms.find((uom) => uom.id === selectedBaseUomId) ?? null
@@ -611,16 +670,23 @@ export default function AddProductForm({ currency, uoms, branches }: Props) {
                   </label>
                 </div>
 
-                <label style={{ fontSize: 13 }}>
+                <div style={{ fontSize: 13 }}>
                   <span style={{ display: 'block', marginBottom: 6, fontWeight: 500 }}>Barcode values (optional)</span>
-                  <textarea
-                    value={barcodes}
-                    onChange={(event) => setBarcodes(event.target.value)}
-                    rows={2}
-                    placeholder="One barcode per line. A scanner can enter the printed code at checkout."
-                    style={{ width: '100%', border: '1px solid var(--color-border)', borderRadius: 8, padding: '10px 12px', boxSizing: 'border-box', resize: 'vertical', fontSize: 13 }}
-                  />
-                </label>
+                  <div className="flex items-start gap-2">
+                    <textarea
+                      ref={barcodeFieldRef}
+                      value={barcodes}
+                      onChange={(event) => setBarcodes(event.target.value)}
+                      rows={2}
+                      placeholder="One barcode per line. A scanner can enter the printed code at checkout."
+                      style={{ flex: 1, minWidth: 0, border: '1px solid var(--color-border)', borderRadius: 8, padding: '10px 12px', boxSizing: 'border-box', resize: 'vertical', fontSize: 13 }}
+                    />
+                    <button type="button" className="btn-outline" title="Scan barcode" aria-label="Scan barcode" onClick={scanBarcode} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, borderRadius: 8, padding: '9px 12px' }}>
+                      <ScanBarcode size={17} /> Scan
+                    </button>
+                  </div>
+              {barcodeNotice && <p role="alert" style={{ margin: '6px 0 0', color: 'var(--color-danger)', fontSize: 12 }}>{barcodeNotice}</p>}
+                </div>
 
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <label style={{ fontSize: 13 }}>
@@ -1112,6 +1178,14 @@ export default function AddProductForm({ currency, uoms, branches }: Props) {
           </div>
         </form>
       </Modal>
+
+      {barcodeScannerOpen && (
+        <BarcodeCameraDialog
+          title="Scan product barcode"
+          onDetected={(code) => { appendBarcode(code); return true }}
+          onClose={() => setBarcodeScannerOpen(false)}
+        />
+      )}
 
       <Modal isOpen={createUnitOpen} title="Create new unit" onClose={() => setCreateUnitOpen(false)}>
         <form onSubmit={onCreateUnitSubmit}>

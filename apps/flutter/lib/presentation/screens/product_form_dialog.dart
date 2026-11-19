@@ -1,7 +1,11 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 
 import '../../core/auth/retivox_user.dart';
 import '../../features/dashboard/dashboard_repository.dart';
+import '../../features/dashboard/barcode_similarity.dart';
+import 'mobile_barcode_scanner_screen.dart';
 
 enum ProductFormSaveResult { saved, queued }
 
@@ -33,6 +37,7 @@ class ProductFormDialog extends StatefulWidget {
     required this.repository,
     required this.units,
     this.branches = const [],
+    this.existingProducts = const [],
     this.product,
     super.key,
   });
@@ -41,6 +46,7 @@ class ProductFormDialog extends StatefulWidget {
   final DashboardRepository repository;
   final List<Map<String, dynamic>> units;
   final List<Map<String, dynamic>> branches;
+  final List<Map<String, dynamic>> existingProducts;
   final Map<String, dynamic>? product;
 
   @override
@@ -49,6 +55,7 @@ class ProductFormDialog extends StatefulWidget {
 
 class _ProductFormDialogState extends State<ProductFormDialog> {
   final _formKey = GlobalKey<FormState>();
+  final _barcodesFocus = FocusNode();
   late final TextEditingController _name;
   late final TextEditingController _sku;
   late final TextEditingController _category;
@@ -77,6 +84,44 @@ class _ProductFormDialogState extends State<ProductFormDialog> {
   int _activeStep = 0;
 
   bool get _isEditing => widget.product != null;
+
+  String? get _barcodeConflict {
+    final codes = _barcodeValues;
+    for (var index = 0; index < codes.length; index++) {
+      final code = codes[index];
+      final exact = widget.existingProducts.where((row) {
+        if (row['id']?.toString() == widget.product?['id']?.toString()) {
+          return false;
+        }
+        final barcodes = row['barcodes'];
+        return barcodes is List &&
+            barcodes.any(
+              (value) =>
+                  normalizeBarcode(value.toString()) == normalizeBarcode(code),
+            );
+      }).firstOrNull;
+      if (exact != null) {
+        return 'Barcode $code is already assigned to ${exact['name'] ?? 'another product'}.';
+      }
+      final similar = findConfusableBarcodeOwner(
+        code,
+        widget.existingProducts,
+        excludedProductId: widget.product?['id']?.toString(),
+      );
+      if (similar != null) {
+        return 'Barcode $code is too similar to ${similar['code']} on ${similar['product_name']}. Check the scanned value.';
+      }
+      for (final previous in codes.take(index)) {
+        if (normalizeBarcode(previous) == normalizeBarcode(code)) {
+          return 'Barcode $code is entered more than once.';
+        }
+        if (barcodeConfusableKey(previous) == barcodeConfusableKey(code)) {
+          return 'Barcode $code is too similar to another barcode in this product.';
+        }
+      }
+    }
+    return null;
+  }
 
   List<String> get _barcodeValues => _barcodes.text
       .split(RegExp(r'[\r\n,]+'))
@@ -293,6 +338,7 @@ class _ProductFormDialogState extends State<ProductFormDialog> {
     _minPrice.dispose();
     _maxPrice.dispose();
     _unit.dispose();
+    _barcodesFocus.dispose();
     for (final controller in _salePriceControllers.values) {
       controller.dispose();
     }
@@ -300,6 +346,81 @@ class _ProductFormDialogState extends State<ProductFormDialog> {
       point.dispose();
     }
     super.dispose();
+  }
+
+  void _appendBarcode(String value) {
+    final code = value.trim();
+    if (code.isEmpty) return;
+    final values = _barcodeValues;
+    final exact = widget.existingProducts.where((row) {
+      if (row['id']?.toString() == widget.product?['id']?.toString()) {
+        return false;
+      }
+      final barcodes = row['barcodes'];
+      return barcodes is List &&
+          barcodes.any(
+            (item) =>
+                normalizeBarcode(item.toString()) == normalizeBarcode(code),
+          );
+    }).firstOrNull;
+    final similar = findConfusableBarcodeOwner(
+      code,
+      widget.existingProducts,
+      excludedProductId: widget.product?['id']?.toString(),
+    );
+    final draftSimilar = values
+        .where(
+          (item) =>
+              normalizeBarcode(item) != normalizeBarcode(code) &&
+              barcodeConfusableKey(item) == barcodeConfusableKey(code),
+        )
+        .firstOrNull;
+    if (exact != null || similar != null || draftSimilar != null) {
+      final message = exact != null
+          ? 'Barcode $code is already assigned to ${exact['name'] ?? 'another product'}.'
+          : similar != null
+          ? 'Barcode $code is too similar to ${similar['code']} on ${similar['product_name']}. Check the scan.'
+          : 'Barcode $code is too similar to another barcode in this product.';
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(message)));
+      return;
+    }
+    if (!values.any(
+      (existing) => existing.toUpperCase() == code.toUpperCase(),
+    )) {
+      setState(() {
+        values.add(code);
+        _barcodes.text = values.join('\n');
+        _barcodes.selection = TextSelection.collapsed(
+          offset: _barcodes.text.length,
+        );
+      });
+    }
+  }
+
+  Future<void> _scanBarcode() async {
+    if (Platform.isAndroid || Platform.isIOS) {
+      final code = await showDialog<String>(
+        context: context,
+        builder: (context) => Dialog.fullscreen(
+          child: MobileBarcodeScannerScreen(
+            onBarcode: (value) => value.trim().isNotEmpty,
+          ),
+        ),
+      );
+      if (code != null && mounted) _appendBarcode(code);
+      return;
+    }
+
+    _barcodes.selection = TextSelection.collapsed(
+      offset: _barcodes.text.length,
+    );
+    _barcodesFocus.requestFocus();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Ready for a USB or Bluetooth barcode scanner.'),
+      ),
+    );
   }
 
   static Map<String, dynamic>? _nested(Object? value) {
@@ -521,10 +642,22 @@ class _ProductFormDialogState extends State<ProductFormDialog> {
       return;
     }
     if (!_formKey.currentState!.validate()) return;
-    if (_barcodeValues.length > 25 || _barcodeValues.any((code) => code.length > 128)) {
+    if (_barcodeValues.length > 25 ||
+        _barcodeValues.any((code) => code.length > 128)) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Add up to 25 barcode values, each no longer than 128 characters.')),
+        const SnackBar(
+          content: Text(
+            'Add up to 25 barcode values, each no longer than 128 characters.',
+          ),
+        ),
       );
+      return;
+    }
+    final barcodeConflict = _barcodeConflict;
+    if (barcodeConflict != null) {
+      setState(() => _activeStep = 0);
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(barcodeConflict)));
       return;
     }
     final basePrice = _number(_basePrice);
@@ -975,13 +1108,34 @@ class _ProductFormDialogState extends State<ProductFormDialog> {
                     ),
                   ),
                   const SizedBox(height: 8),
-                  TextFormField(
-                    controller: _barcodes,
-                    maxLines: 2,
-                    decoration: const InputDecoration(
-                      labelText: 'Barcode values (optional)',
-                      helperText: 'One per line. Existing codes remain linked when editing.',
-                    ),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: TextFormField(
+                          controller: _barcodes,
+                          focusNode: _barcodesFocus,
+                          maxLines: 2,
+                          decoration: InputDecoration(
+                            labelText: 'Barcode values (optional)',
+                            helperText: 'Edit the saved list: add, change, or remove a line. An empty list removes all active barcodes.',
+                            errorText: _barcodeConflict,
+                          ),
+                          onChanged: (_) => setState(() {}),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: IconButton.filledTonal(
+                          tooltip: Platform.isAndroid || Platform.isIOS
+                              ? 'Scan barcode with camera'
+                              : 'Scan with connected barcode scanner',
+                          onPressed: _saving ? null : _scanBarcode,
+                          icon: const Icon(Icons.qr_code_scanner),
+                        ),
+                      ),
+                    ],
                   ),
                   SwitchListTile.adaptive(
                     contentPadding: EdgeInsets.zero,

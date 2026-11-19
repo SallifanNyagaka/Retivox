@@ -22,6 +22,21 @@ RETIVOX_WEB_API_URL=https://your-deployed-retivox-web-app.example
 
 For local development, the app reads `.env` next to the executable. Flutter build-time `--dart-define` values and process environment variables are supported as fallbacks. `RETIVOX_WEB_API_URL` is the origin of the deployed Retivox Next.js app and is required for owner admin management and subscription display/STK payments. Deploy the new `apps/web/app/api/desktop` routes first; the web deployment also needs its existing server-side `SUPABASE_SERVICE_ROLE_KEY` and `NEXT_PUBLIC_APP_URL` configuration, plus server-side Daraja settings for STK payments. Never put a Supabase service-role key or Daraja credentials in the app.
 
+## Android and iOS mobile targets
+
+The mobile targets reuse this Flutter app's authentication, repositories, encrypted account-scoped cache, local SQLite sale queue, role navigation, and business screens. Phones use bottom navigation, a compact account/connectivity bar, a vertically adapted POS, and camera barcode scanning against the locally cached product catalog. Android requires the Android SDK and Java 17; iOS builds require macOS and Xcode. Supply only the public Supabase project URL, publishable key, and deployed web API origin at build time (or through the app's supported runtime configuration):
+
+```powershell
+flutter build apk --release `
+  --dart-define=SUPABASE_URL=https://your-project.supabase.co `
+  --dart-define=SUPABASE_PUBLISHABLE_KEY=your-publishable-key `
+  --dart-define=RETIVOX_WEB_API_URL=https://your-deployed-retivox-web-app.example
+```
+
+The camera scanner uses `mobile_scanner`; Android declares camera and internet permissions, and iOS presents a camera-use explanation. Camera and manual barcode lookup both use the loaded local catalog, so scanning does not depend on an internet request. Keep the Android application ID and release signing configuration stable when distributing updates to existing installations.
+
+Offline coverage remains workflow-specific, as it is on desktop: sales are stored in the dedicated encrypted SQLite queue, and supported dashboard edits are stored in the encrypted account-scoped action queue. Authentication, approvals, payment provider operations, and other server-authoritative workflows still require the backend. The mobile navigation does not change those business rules or claim an electronic payment is complete offline. This mobile foundation does not change the production schema or remove the React Native app.
+
 Apply the current Supabase schema, including `apps/web/lib/supabase/schema/019_stock_delivery_approval_workflow.sql`, `020_uom_system.sql`, `021_product_pricing_models.sql`, `023_uom_aware_stock_and_sales.sql`, `024_pricing_models_and_price_point_discounts.sql`, `034_supplier_delivery_edit_workflow.sql`, `035_finance_expenses_and_losses.sql`, `036_recurring_finance_expenses.sql`, `040_employee_inventory_loss_reports.sql`, `042_admin_inventory_loss_reports.sql`, `043_deleted_branch_dashboard_scope.sql`, `046_subscription_payment_requests.sql`, `047_platform_console_and_daraja.sql`, `049_platform_operations_console.sql`, `050_daraja_paybill_prompt_method.sql`, `052_cash_deposit_reconciliation.sql`, `053_supplier_directory_and_rankings.sql`, `057_subscription_lifecycle.sql`, `059_desktop_overview_summary.sql`, and `060_desktop_branch_details.sql` for the finance and dashboard workflows. Apply `054_mobile_offline_transaction_timestamp.sql` and `058_offline_dashboard_transaction_sync.sql` before testing employee or owner/admin offline sale synchronization. Confirm the transfer, stock, and UOM migrations (including `013_dashboard_transfer_access_rpc.sql`, `014_stock_section_admin_capabilities.sql`, and `027_uom_aware_stock_transfers.sql`) are also applied.
 
 ## Offline sales

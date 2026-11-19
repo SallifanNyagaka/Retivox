@@ -18,6 +18,7 @@ dependencies:
   flutter_secure_storage: ^11.2.0
   http: ^1.6.0
   intl: ^0.20.3
+  mobile_scanner: 7.5.0
   pdf: ^3.11.3
   printing: ^5.15.1
   supabase_flutter: ^2.18.3

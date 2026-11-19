@@ -99,10 +99,10 @@ export default function PwaRuntime() {
         if (summary.synced > 0) {
           setNotice(`${summary.synced} offline sale${summary.synced === 1 ? '' : 's'} synced successfully.`)
           window.setTimeout(() => setNotice(null), 6500)
-          window.dispatchEvent(new Event('retivox:offline-sales-synced'))
         } else if (summary.needsAttention > 0) {
           setNotice(`${summary.needsAttention} saved sale${summary.needsAttention === 1 ? '' : 's'} needs review before syncing.`)
         }
+        window.dispatchEvent(new Event('retivox:offline-sales-synced'))
       } catch {
         // A network change can happen while a sync is in progress. The queued sale remains intact for the next retry.
       } finally {

@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:pdf/pdf.dart';
@@ -9,10 +11,12 @@ import 'package:printing/printing.dart';
 
 import '../../core/auth/retivox_user.dart';
 import '../../features/sales/sale_repository.dart';
+import '../../features/dashboard/barcode_similarity.dart';
 import '../theme/retivox_theme.dart';
 import '../widgets/retivox_badge.dart';
 import '../widgets/retivox_button.dart';
 import '../widgets/retivox_card.dart';
+import 'mobile_barcode_scanner_screen.dart';
 
 class PosScreen extends StatefulWidget {
   const PosScreen({
@@ -59,6 +63,7 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
   bool _isLoadingCatalog = false;
   bool _isSyncing = false;
   bool _isSavingSale = false;
+  bool _handlingBarcode = false;
   bool _isConnected = false;
   DateTime? _catalogUpdatedAt;
 
@@ -67,6 +72,9 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
   List<LocalSale> _sales = [];
 
   double get _cartTotal => _cart.fold(0, (total, line) => total + line.total);
+
+  bool get _supportsCameraScanner =>
+      !kIsWeb && (Platform.isAndroid || Platform.isIOS);
 
   @override
   void initState() {
@@ -136,7 +144,8 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
       if (mounted) {
         setState(() {
           _isConnected = connected;
-          if (!connected && !{'cash', 'mpesa_manual'}.contains(_paymentMethod)) {
+          if (!connected &&
+              !{'cash', 'mpesa_manual'}.contains(_paymentMethod)) {
             _paymentMethod = 'cash';
           }
         });
@@ -196,6 +205,7 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
   Future<void> _syncPending() async {
     if (_isSyncing) return;
     if (!await _checkConnectivity()) return;
+    if (!mounted) return;
     setState(() => _isSyncing = true);
     try {
       await widget.repository.syncPending(widget.user);
@@ -224,156 +234,28 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
     await _loadBranchData();
   }
 
-  Future<void> _addProduct(SaleProduct product) async {
+  Future<bool> _addProduct(
+    SaleProduct product, {
+    bool protectExternalScannerInput = false,
+  }) async {
     if (product.availableBaseQuantity <= 0) {
       _showMessage('No stock is currently available for ${product.name}.');
-      return;
+      return false;
     }
     if (product.uomOptions.isEmpty) {
       _showMessage('${product.name} has no sale unit configured.');
-      return;
+      return false;
     }
-
-    final quantityController = TextEditingController(text: '1');
-    Map<String, dynamic> selectedUom =
-        product.defaultSaleUom ?? product.uomOptions.first;
-    String? error;
 
     final selection = await showDialog<_ProductSelection>(
       context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (dialogContext, setDialogState) => AlertDialog(
-          title: Text(product.name),
-          content: SizedBox(
-            width: 360,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Text(
-                  'Available: ${_quantityText(product.availableBaseQuantity)} ${product.uomOptions.first['name'] ?? 'units'}',
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: RetivoxTheme.textMutedLight,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                DropdownButtonFormField<String>(
-                  initialValue: selectedUom['id'] as String?,
-                  decoration: const InputDecoration(labelText: 'Sell as unit'),
-                  items: product.uomOptions
-                      .map(
-                        (uom) => DropdownMenuItem(
-                          value: uom['id'] as String?,
-                          child: Text(
-                            '${uom['name'] ?? 'Unit'} (${uom['abbreviation'] ?? ''})',
-                          ),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: (id) {
-                    if (id == null) return;
-                    setDialogState(() {
-                      selectedUom = product.uomOptions.firstWhere(
-                        (uom) => uom['id'] == id,
-                      );
-                      error = null;
-                    });
-                  },
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: quantityController,
-                  autofocus: true,
-                  keyboardType: const TextInputType.numberWithOptions(
-                    decimal: true,
-                  ),
-                  decoration: InputDecoration(
-                    labelText: 'Quantity',
-                    errorText: error,
-                  ),
-                  onChanged: (_) => setDialogState(() => error = null),
-                ),
-                const SizedBox(height: 12),
-                ValueListenableBuilder<TextEditingValue>(
-                  valueListenable: quantityController,
-                  builder: (context, value, _) {
-                    final quantity = double.tryParse(value.text) ?? 0;
-                    final price = product.previewPrice(quantity, selectedUom);
-                    return Text(
-                      price == null
-                          ? 'No price is configured for this quantity.'
-                          : 'Line total: ${_formatMoney(price)}',
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w700,
-                        color: price == null
-                            ? RetivoxTheme.danger
-                            : RetivoxTheme.primaryLightMode,
-                      ),
-                    );
-                  },
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () {
-                final quantity = double.tryParse(quantityController.text);
-                final conversion = _number(
-                  selectedUom['conversionFactor'],
-                  fallback: 1,
-                );
-                if (quantity == null || !quantity.isFinite || quantity <= 0) {
-                  setDialogState(
-                    () => error = 'Enter a quantity greater than zero.',
-                  );
-                  return;
-                }
-                final baseQuantity = quantity * conversion;
-                if ((baseQuantity - baseQuantity.roundToDouble()).abs() >
-                    0.0001) {
-                  setDialogState(
-                    () => error =
-                        'This unit quantity must convert to whole base units.',
-                  );
-                  return;
-                }
-                if (baseQuantity > product.availableBaseQuantity) {
-                  setDialogState(
-                    () => error = 'Quantity exceeds the available stock.',
-                  );
-                  return;
-                }
-                final price = product.previewPrice(quantity, selectedUom);
-                if (price == null) {
-                  setDialogState(
-                    () => error = 'No price is configured for this quantity.',
-                  );
-                  return;
-                }
-                Navigator.pop(
-                  dialogContext,
-                  _ProductSelection(
-                    uom: selectedUom,
-                    quantity: quantity,
-                    total: price,
-                  ),
-                );
-              },
-              child: const Text('Add to sale'),
-            ),
-          ],
-        ),
+      builder: (_) => _AddSaleProductDialog(
+        product: product,
+        formatMoney: _formatMoney,
+        protectExternalScannerInput: protectExternalScannerInput,
       ),
     );
-    quantityController.dispose();
-    if (selection == null || !mounted) return;
+    if (selection == null || !mounted) return false;
 
     final uomId = selection.uom['id'] as String?;
     final key = '${product.optionId}:$uomId';
@@ -391,7 +273,7 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
           ),
         ),
       );
-      return;
+      return true;
     }
 
     final existing = _cart[existingIndex];
@@ -405,32 +287,114 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
       _showMessage(
         'The combined quantity is unavailable or has no configured price.',
       );
-      return;
+      return false;
     }
 
     setState(() {
       existing.quantity = newQuantity;
       existing.total = price;
     });
+    return true;
   }
 
   Future<void> _submitBarcode(String value) async {
-    final code = value.trim().toUpperCase();
-    if (code.isEmpty) return;
-    final matches = _products.where(
-      (product) => product.barcodes.any(
-        (barcode) => barcode.trim().toUpperCase() == code,
-      ),
-    );
-    final product = matches.firstOrNull;
-    _searchController.clear();
-    setState(() => _search = '');
-    _productSearchFocus.requestFocus();
-    if (product == null) {
-      _showMessage('No product is linked to barcode $code.');
+    if (_handlingBarcode) return;
+    _handlingBarcode = true;
+    if (mounted) {
+      setState(() => _scannerEnabled = false);
+      _productSearchFocus.unfocus();
+    }
+    final added = await _handleBarcode(value, fromExternalScanner: true);
+    if (!mounted) return;
+    _handlingBarcode = false;
+    if (!added) {
+      _activateScanner();
       return;
     }
-    _addScannedProduct(product);
+    if (await _askScanAnother() && mounted) _activateScanner();
+  }
+
+  Future<bool> _handleBarcode(
+    String value, {
+    bool focusSearch = true,
+    bool fromExternalScanner = false,
+  }) async {
+    final code = value.trim().toUpperCase();
+    if (code.isEmpty) return false;
+    final product = findSaleProductByBarcode(_products, code);
+    _searchController.clear();
+    if (mounted) setState(() => _search = '');
+    if (product == null) {
+      final similar = _products
+          .expand((item) => item.barcodes.map((barcode) => (item, barcode)))
+          .where(
+            (entry) =>
+                normalizeBarcode(entry.$2) != normalizeBarcode(code) &&
+                barcodeConfusableKey(entry.$2) == barcodeConfusableKey(code),
+          )
+          .firstOrNull;
+      _showMessage(
+        similar == null
+            ? 'No product is linked to barcode $code.'
+            : 'Scanned barcode $code is too similar to ${similar.$2} on ${similar.$1.name}. It was not added; scan the label again.',
+      );
+      if (focusSearch && mounted) _productSearchFocus.requestFocus();
+      return false;
+    }
+    return _addProduct(
+      product,
+      protectExternalScannerInput: fromExternalScanner,
+    );
+  }
+
+  Future<void> _openCameraScanner() async {
+    while (mounted) {
+      final code = await showDialog<String>(
+        context: context,
+        builder: (context) => Dialog.fullscreen(
+          child: MobileBarcodeScannerScreen(
+            onBarcode: (value) {
+              final code = normalizeBarcode(value);
+              return findSaleProductByBarcode(_products, value) != null ||
+                  _products.any(
+                    (product) => product.barcodes.any(
+                      (barcode) =>
+                          normalizeBarcode(barcode) != code &&
+                          barcodeConfusableKey(barcode) ==
+                              barcodeConfusableKey(code),
+                    ),
+                  );
+            },
+          ),
+        ),
+      );
+      if (code == null || !mounted) return;
+      final added = await _handleBarcode(code, focusSearch: false);
+      if (!added || !mounted) return;
+      if (!await _askScanAnother() || !mounted) return;
+    }
+  }
+
+  Future<bool> _askScanAnother() async {
+    return await showDialog<bool>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: const Text('Product added successfully'),
+            content: const Text('Scan another product?'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, false),
+                child: const Text('Done'),
+              ),
+              FilledButton.icon(
+                onPressed: () => Navigator.pop(dialogContext, true),
+                icon: const Icon(Icons.qr_code_scanner),
+                label: const Text('Scan another'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
   }
 
   Future<void> _showScannerSetup() async {
@@ -457,7 +421,7 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
               ),
               SizedBox(height: 12),
               Text(
-                'Each successful scan adds one unit using the product’s default sale unit. Repeated scans increase the quantity. The sale is recorded only when you select Complete sale.',
+                'Each scan pauses the scanner and asks you to confirm the sale unit and quantity before adding the item. The sale is recorded only when you select Complete sale.',
               ),
             ],
           ),
@@ -485,76 +449,6 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
       _searchController.clear();
     });
     _productSearchFocus.requestFocus();
-  }
-
-  void _addScannedProduct(SaleProduct product) {
-    final uom =
-        product.defaultSaleUom ??
-        (product.uomOptions.isEmpty ? null : product.uomOptions.first);
-    if (uom == null) {
-      _showMessage('${product.name} has no sale unit configured.');
-      return;
-    }
-
-    final uomId = uom['id'] as String?;
-    final conversion = _number(uom['conversionFactor'], fallback: 1);
-    final addedBaseQuantity = conversion;
-    if ((addedBaseQuantity - addedBaseQuantity.roundToDouble()).abs() >
-        0.0001) {
-      _showMessage(
-        'The default sale unit for ${product.name} cannot be added as a whole stock quantity.',
-      );
-      return;
-    }
-
-    final key = '${product.optionId}:$uomId';
-    final existingIndex = _cart.indexWhere((line) => line.key == key);
-    final existingQuantity = existingIndex < 0
-        ? 0.0
-        : _cart[existingIndex].quantity;
-    final nextQuantity = existingQuantity + 1;
-    final currentProductBaseQuantity = _cart
-        .where((line) => line.product.optionId == product.optionId)
-        .fold<double>(
-          0,
-          (total, line) =>
-              total +
-              line.quantity *
-                  _number(line.uom['conversionFactor'], fallback: 1),
-        );
-    if (currentProductBaseQuantity + addedBaseQuantity >
-        product.availableBaseQuantity) {
-      _showMessage('No more stock is available for ${product.name}.');
-      return;
-    }
-
-    final total = product.previewPrice(nextQuantity, uom);
-    if (total == null) {
-      _showMessage(
-        'No approved price is configured for one ${uom['name'] ?? 'unit'} of ${product.name}.',
-      );
-      return;
-    }
-
-    setState(() {
-      if (existingIndex < 0) {
-        _cart.add(
-          _CartLine(
-            key: key,
-            product: product,
-            uom: uom,
-            quantity: 1,
-            total: total,
-          ),
-        );
-      } else {
-        _cart[existingIndex].quantity = nextQuantity;
-        _cart[existingIndex].total = total;
-      }
-    });
-    _showMessage(
-      '${product.name} added to sale (${_quantityText(nextQuantity)} ${uom['name'] ?? 'units'}).',
-    );
   }
 
   void _changeCartQuantity(_CartLine line, double nextQuantity) {
@@ -660,6 +554,7 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
         _isCredit = false;
       });
       await _loadSales();
+      if (!mounted) return;
       _showMessage(
         'Sale recorded successfully. Saved locally and queued for sync.',
       );
@@ -691,12 +586,20 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
       ),
     );
     if (confirmed != true) return;
-    await widget.repository.cancelSale(sale.localId);
+    if (!mounted) return;
+    final cancelled = await widget.repository.cancelSale(
+      widget.user.id,
+      sale.localId,
+    );
     await _loadSales();
+    if (mounted && !cancelled) {
+      _showMessage('This sale is already syncing or has been synced.');
+    }
   }
 
   Future<void> _correctSale(LocalSale sale) async {
     final items = sale.items.map(Map<String, dynamic>.from).toList();
+    if (!sale.payloadReadable) return;
     final correctedItems = await showDialog<List<Map<String, dynamic>>>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
@@ -874,14 +777,21 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
       );
       await _loadSales();
       if (await _checkConnectivity()) await _syncPending();
-      if (mounted)
+      if (mounted) {
         _showMessage('Sale correction saved; sync has been retried.');
+      }
     } catch (error) {
       if (mounted) _showMessage('Could not correct this sale: $error');
     }
   }
 
   Future<void> _printReceipt(LocalSale sale) async {
+    if (!sale.payloadReadable) {
+      _showMessage(
+        'This saved sale cannot be printed because its data is unreadable.',
+      );
+      return;
+    }
     final branch = widget.user.branches
         .where((item) => item.id == sale.branchId)
         .firstOrNull;
@@ -1022,8 +932,9 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
   }
 
   void _showMessage(String message) {
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(message)));
+    if (!mounted) return;
+    ScaffoldMessenger.maybeOf(context)
+        ?.showSnackBar(SnackBar(content: Text(message)));
   }
 
   String _formatMoney(double amount) =>
@@ -1088,10 +999,10 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
               padding: const EdgeInsets.all(24),
               children: [
                 // Top Action Bar with Branch & Refresh matching web
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Column(
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final compact = constraints.maxWidth < 680;
+                    final title = Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
@@ -1109,12 +1020,10 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
                           style: TextStyle(fontSize: 13, color: textMuted),
                         ),
                       ],
-                    ),
-                    Row(
-                      children: [
-                        if (branches.length > 1)
-                          SizedBox(
-                            width: 240,
+                    );
+                    final branchControl = branches.length > 1
+                        ? SizedBox(
+                            width: compact ? constraints.maxWidth : 240,
                             child: DropdownButtonFormField<String>(
                               initialValue: _branchId,
                               isDense: true,
@@ -1135,16 +1044,20 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
                               onChanged: _changeBranch,
                             ),
                           )
-                        else
-                          RetivoxBadge(
+                        : RetivoxBadge(
                             variant: RetivoxBadgeVariant.muted,
                             label: branches.first.name,
                             leading: const Icon(
                               Icons.storefront_outlined,
                               size: 14,
                             ),
-                          ),
-                        const SizedBox(width: 10),
+                          );
+                    final actions = Wrap(
+                      spacing: 10,
+                      runSpacing: 8,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        branchControl,
                         RetivoxButton(
                           label: _isSyncing ? 'Syncing...' : 'Sync sales',
                           icon: const Icon(Icons.sync_rounded),
@@ -1153,8 +1066,23 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
                           onPressed: _syncPending,
                         ),
                       ],
-                    ),
-                  ],
+                    );
+                    return compact
+                        ? Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              title,
+                              const SizedBox(height: 12),
+                              actions,
+                            ],
+                          )
+                        : Row(
+                            children: [
+                              Expanded(child: title),
+                              actions,
+                            ],
+                          );
+                  },
                 ),
                 const SizedBox(height: 16),
 
@@ -1247,790 +1175,1073 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
                   ),
 
                 // Main POS Dual-Column Layout
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Left Column: Catalog & Current Sale Items
-                    Expanded(
-                      flex: 6,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          // Search & Filter Card
-                          RetivoxCard(
-                            padding: RetivoxCardPadding.sm,
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: [
-                                TextField(
-                                  controller: _searchController,
-                                  focusNode: _productSearchFocus,
-                                  onChanged: (val) =>
-                                      setState(() => _search = val),
-                                  onSubmitted: _submitBarcode,
-                                  autofocus: true,
-                                  decoration: InputDecoration(
-                                    prefixIcon: Icon(
-                                      _scannerEnabled
-                                          ? Icons.qr_code_scanner
-                                          : Icons.search,
-                                      size: 18,
-                                    ),
-                                    hintText: _scannerEnabled
-                                        ? 'Ready to scan a product barcode...'
-                                        : 'Search name / SKU or scan barcode...',
-                                    isDense: true,
-                                    suffixText: _catalogUpdatedAt != null
-                                        ? 'Updated ${DateFormat.jm().format(_catalogUpdatedAt!)}'
-                                        : null,
-                                    suffixStyle: TextStyle(
-                                      fontSize: 11,
-                                      color: textMuted,
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(height: 10),
-                                Wrap(
-                                  spacing: 8,
-                                  runSpacing: 8,
-                                  crossAxisAlignment: WrapCrossAlignment.center,
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final wideLayout = constraints.maxWidth >= 900;
+                    return Flex(
+                      direction: wideLayout ? Axis.horizontal : Axis.vertical,
+                      mainAxisSize: wideLayout
+                          ? MainAxisSize.max
+                          : MainAxisSize.min,
+                      crossAxisAlignment: wideLayout
+                          ? CrossAxisAlignment.start
+                          : CrossAxisAlignment.stretch,
+                      children: [
+                        // Left Column: Catalog & Current Sale Items
+                        Flexible(
+                          flex: 6,
+                          fit: wideLayout ? FlexFit.tight : FlexFit.loose,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              // Search & Filter Card
+                              RetivoxCard(
+                                padding: RetivoxCardPadding.sm,
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
                                   children: [
-                                    RetivoxButton(
-                                      label: _scannerEnabled
-                                          ? 'Stop scanner'
-                                          : 'Use scanner',
-                                      icon: Icon(
-                                        _scannerEnabled
-                                            ? Icons.stop_circle_outlined
-                                            : Icons.qr_code_scanner,
+                                    TextField(
+                                      controller: _searchController,
+                                      focusNode: _productSearchFocus,
+                                      onChanged: (val) =>
+                                          setState(() => _search = val),
+                                      onSubmitted: _submitBarcode,
+                                      autofocus: true,
+                                      decoration: InputDecoration(
+                                        prefixIcon: Icon(
+                                          _scannerEnabled
+                                              ? Icons.qr_code_scanner
+                                              : Icons.search,
+                                          size: 18,
+                                        ),
+                                        hintText: _scannerEnabled
+                                            ? 'Ready to scan a product barcode...'
+                                            : 'Search name / SKU or scan barcode...',
+                                        isDense: true,
+                                        suffixText: _catalogUpdatedAt != null
+                                            ? 'Updated ${DateFormat.jm().format(_catalogUpdatedAt!)}'
+                                            : null,
+                                        suffixStyle: TextStyle(
+                                          fontSize: 11,
+                                          color: textMuted,
+                                        ),
                                       ),
-                                      variant: _scannerEnabled
-                                          ? RetivoxButtonVariant.outline
-                                          : RetivoxButtonVariant.primary,
-                                      onPressed: _scannerEnabled
-                                          ? () => setState(
-                                              () => _scannerEnabled = false,
-                                            )
-                                          : _activateScanner,
                                     ),
-                                    RetivoxButton(
-                                      label: 'Scanner setup',
-                                      icon: const Icon(Icons.settings_outlined),
-                                      variant: RetivoxButtonVariant.outline,
-                                      onPressed: _showScannerSetup,
-                                    ),
-                                    Text(
-                                      _scannerEnabled
-                                          ? 'Ready. Scan a barcode; repeat scans add quantity.'
-                                          : 'Connect a USB/Bluetooth scanner, then choose Use scanner.',
-                                      style: TextStyle(
-                                        fontSize: 11,
-                                        color: textMuted,
-                                      ),
+                                    const SizedBox(height: 10),
+                                    Wrap(
+                                      spacing: 8,
+                                      runSpacing: 8,
+                                      crossAxisAlignment:
+                                          WrapCrossAlignment.center,
+                                      children: [
+                                        RetivoxButton(
+                                          label: _scannerEnabled
+                                              ? 'Stop scanner'
+                                              : _supportsCameraScanner
+                                              ? 'Scan barcode'
+                                              : 'Use scanner',
+                                          icon: Icon(
+                                            _scannerEnabled
+                                                ? Icons.stop_circle_outlined
+                                                : Icons.qr_code_scanner,
+                                          ),
+                                          variant: _scannerEnabled
+                                              ? RetivoxButtonVariant.outline
+                                              : RetivoxButtonVariant.primary,
+                                          onPressed: _scannerEnabled
+                                              ? () => setState(
+                                                  () => _scannerEnabled = false,
+                                                )
+                                              : _supportsCameraScanner
+                                              ? _openCameraScanner
+                                              : _activateScanner,
+                                        ),
+                                        if (!_supportsCameraScanner)
+                                          RetivoxButton(
+                                            label: 'Scanner setup',
+                                            icon: const Icon(
+                                              Icons.settings_outlined,
+                                            ),
+                                            variant:
+                                                RetivoxButtonVariant.outline,
+                                            onPressed: _showScannerSetup,
+                                          ),
+                                        Text(
+                                          _scannerEnabled
+                                              ? 'Ready. Scan a barcode; repeat scans add quantity.'
+                                              : _supportsCameraScanner
+                                              ? 'Scan products offline using the camera or enter a barcode in search.'
+                                              : 'Connect a USB/Bluetooth scanner, then choose Use scanner.',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            color: textMuted,
+                                          ),
+                                        ),
+                                      ],
                                     ),
                                   ],
                                 ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 14),
-
-                          // Product Grid
-                          if (_isLoadingCatalog && _products.isEmpty)
-                            const Padding(
-                              padding: EdgeInsets.all(32),
-                              child: Center(child: CircularProgressIndicator()),
-                            )
-                          else if (visibleProducts.isEmpty)
-                            RetivoxCard(
-                              padding: RetivoxCardPadding.lg,
-                              child: Center(
-                                child: Text(
-                                  _products.isEmpty
-                                      ? 'No products available for this branch.'
-                                      : 'No products match your search.',
-                                  style: TextStyle(
-                                    color: textMuted,
-                                    fontSize: 13,
-                                  ),
-                                ),
                               ),
-                            )
-                          else
-                            LayoutBuilder(
-                              builder: (context, constraints) {
-                                final cols = (constraints.maxWidth / 240)
-                                    .floor()
-                                    .clamp(1, 3);
-                                return GridView.builder(
-                                  shrinkWrap: true,
-                                  physics: const NeverScrollableScrollPhysics(),
-                                  itemCount: visibleProducts.length,
-                                  gridDelegate:
-                                      SliverGridDelegateWithFixedCrossAxisCount(
-                                        crossAxisCount: cols,
-                                        childAspectRatio: 1.8,
-                                        crossAxisSpacing: 10,
-                                        mainAxisSpacing: 10,
+                              const SizedBox(height: 14),
+
+                              // Product Grid
+                              if (_isLoadingCatalog && _products.isEmpty)
+                                const Padding(
+                                  padding: EdgeInsets.all(32),
+                                  child: Center(
+                                    child: CircularProgressIndicator(),
+                                  ),
+                                )
+                              else if (visibleProducts.isEmpty)
+                                RetivoxCard(
+                                  padding: RetivoxCardPadding.lg,
+                                  child: Center(
+                                    child: Text(
+                                      _products.isEmpty
+                                          ? 'No products available for this branch.'
+                                          : 'No products match your search.',
+                                      style: TextStyle(
+                                        color: textMuted,
+                                        fontSize: 13,
                                       ),
-                                  itemBuilder: (context, index) {
-                                    final product = visibleProducts[index];
-                                    final available =
-                                        product.availableBaseQuantity;
-                                    return RetivoxCard(
-                                      padding: RetivoxCardPadding.sm,
-                                      child: InkWell(
-                                        onTap: available > 0
-                                            ? () => _addProduct(product)
-                                            : null,
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          mainAxisAlignment:
-                                              MainAxisAlignment.spaceBetween,
-                                          children: [
-                                            Column(
+                                    ),
+                                  ),
+                                )
+                              else
+                                LayoutBuilder(
+                                  builder: (context, constraints) {
+                                    final cols = (constraints.maxWidth / 240)
+                                        .floor()
+                                        .clamp(1, 3);
+                                    return GridView.builder(
+                                      shrinkWrap: true,
+                                      physics:
+                                          const NeverScrollableScrollPhysics(),
+                                      itemCount: visibleProducts.length,
+                                      gridDelegate:
+                                          SliverGridDelegateWithFixedCrossAxisCount(
+                                            crossAxisCount: cols,
+                                            childAspectRatio: 1.8,
+                                            crossAxisSpacing: 10,
+                                            mainAxisSpacing: 10,
+                                          ),
+                                      itemBuilder: (context, index) {
+                                        final product = visibleProducts[index];
+                                        final available =
+                                            product.availableBaseQuantity;
+                                        return RetivoxCard(
+                                          padding: RetivoxCardPadding.sm,
+                                          child: InkWell(
+                                            onTap: available > 0
+                                                ? () => _addProduct(product)
+                                                : null,
+                                            child: Column(
                                               crossAxisAlignment:
                                                   CrossAxisAlignment.start,
-                                              children: [
-                                                Text(
-                                                  product.name,
-                                                  maxLines: 1,
-                                                  overflow:
-                                                      TextOverflow.ellipsis,
-                                                  style: TextStyle(
-                                                    fontSize: 13,
-                                                    fontWeight: FontWeight.w600,
-                                                    color: textPrimary,
-                                                  ),
-                                                ),
-                                                if (product.sku.isNotEmpty)
-                                                  Text(
-                                                    product.sku,
-                                                    style: TextStyle(
-                                                      fontSize: 11,
-                                                      color: textMuted,
-                                                    ),
-                                                  ),
-                                              ],
-                                            ),
-                                            Row(
                                               mainAxisAlignment:
                                                   MainAxisAlignment
                                                       .spaceBetween,
                                               children: [
-                                                RetivoxBadge(
-                                                  variant: available > 0
-                                                      ? RetivoxBadgeVariant
-                                                            .success
-                                                      : RetivoxBadgeVariant
-                                                            .danger,
-                                                  label:
-                                                      'Stock: ${_quantityText(available)}',
-                                                  size: RetivoxBadgeSize.sm,
+                                                Column(
+                                                  crossAxisAlignment:
+                                                      CrossAxisAlignment.start,
+                                                  children: [
+                                                    Text(
+                                                      product.name,
+                                                      maxLines: 1,
+                                                      overflow:
+                                                          TextOverflow.ellipsis,
+                                                      style: TextStyle(
+                                                        fontSize: 13,
+                                                        fontWeight:
+                                                            FontWeight.w600,
+                                                        color: textPrimary,
+                                                      ),
+                                                    ),
+                                                    if (product.sku.isNotEmpty)
+                                                      Text(
+                                                        product.sku,
+                                                        style: TextStyle(
+                                                          fontSize: 11,
+                                                          color: textMuted,
+                                                        ),
+                                                      ),
+                                                  ],
                                                 ),
-                                                Text(
-                                                  _formatMoney(
-                                                    product.sellingPrice,
-                                                  ),
-                                                  style: const TextStyle(
-                                                    fontSize: 13,
-                                                    fontWeight: FontWeight.w700,
-                                                    color: RetivoxTheme
-                                                        .primaryLightMode,
-                                                  ),
+                                                Row(
+                                                  mainAxisAlignment:
+                                                      MainAxisAlignment
+                                                          .spaceBetween,
+                                                  children: [
+                                                    RetivoxBadge(
+                                                      variant: available > 0
+                                                          ? RetivoxBadgeVariant
+                                                                .success
+                                                          : RetivoxBadgeVariant
+                                                                .danger,
+                                                      label:
+                                                          'Stock: ${_quantityText(available)}',
+                                                      size: RetivoxBadgeSize.sm,
+                                                    ),
+                                                    Text(
+                                                      _formatMoney(
+                                                        product.sellingPrice,
+                                                      ),
+                                                      style: const TextStyle(
+                                                        fontSize: 13,
+                                                        fontWeight:
+                                                            FontWeight.w700,
+                                                        color: RetivoxTheme
+                                                            .primaryLightMode,
+                                                      ),
+                                                    ),
+                                                  ],
                                                 ),
                                               ],
                                             ),
-                                          ],
-                                        ),
-                                      ),
+                                          ),
+                                        );
+                                      },
                                     );
                                   },
-                                );
-                              },
-                            ),
-                          const SizedBox(height: 16),
-
-                          // Current Cart Table Card
-                          RetivoxCard(
-                            padding: RetivoxCardPadding.md,
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: [
-                                RetivoxCardHeader(
-                                  title: 'Sale items',
-                                  subtitle: '${_cart.length} item(s) selected',
-                                  action: _cart.isNotEmpty
-                                      ? TextButton(
-                                          onPressed: () =>
-                                              setState(() => _cart.clear()),
-                                          child: const Text(
-                                            'Clear all',
-                                            style: TextStyle(
-                                              fontSize: 12,
-                                              color: RetivoxTheme.danger,
-                                            ),
-                                          ),
-                                        )
-                                      : null,
                                 ),
-                                if (_cart.isEmpty)
-                                  Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      vertical: 24,
-                                    ),
-                                    child: Center(
-                                      child: Text(
-                                        'Select products from the catalog above to add to this sale.',
-                                        style: TextStyle(
-                                          color: textMuted,
-                                          fontSize: 13,
-                                        ),
-                                      ),
-                                    ),
-                                  )
-                                else
-                                  for (final line in _cart) ...[
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(
-                                        vertical: 8,
-                                      ),
-                                      decoration: BoxDecoration(
-                                        border: Border(
-                                          bottom: BorderSide(
-                                            color: isDark
-                                                ? RetivoxTheme.borderDark
-                                                : RetivoxTheme.borderLight,
-                                          ),
-                                        ),
-                                      ),
-                                      child: Row(
-                                        children: [
-                                          Expanded(
-                                            child: Column(
-                                              crossAxisAlignment:
-                                                  CrossAxisAlignment.start,
-                                              children: [
-                                                Text(
-                                                  line.product.name,
-                                                  style: TextStyle(
-                                                    fontSize: 13,
-                                                    fontWeight: FontWeight.w600,
-                                                    color: textPrimary,
-                                                  ),
-                                                ),
-                                                Text(
-                                                  '${line.uom['name'] ?? 'unit'} · ${_formatMoney(line.total)}',
-                                                  style: TextStyle(
-                                                    fontSize: 11,
-                                                    color: textMuted,
-                                                  ),
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-                                          Row(
-                                            children: [
-                                              IconButton(
-                                                icon: const Icon(
-                                                  Icons.remove_circle_outline,
-                                                  size: 18,
-                                                ),
-                                                visualDensity:
-                                                    VisualDensity.compact,
-                                                onPressed: () =>
-                                                    _changeCartQuantity(
-                                                      line,
-                                                      line.quantity - 1,
-                                                    ),
-                                              ),
-                                              Text(
-                                                _quantityText(line.quantity),
+                              const SizedBox(height: 16),
+
+                              // Current Cart Table Card
+                              RetivoxCard(
+                                padding: RetivoxCardPadding.md,
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
+                                  children: [
+                                    RetivoxCardHeader(
+                                      title: 'Sale items',
+                                      subtitle:
+                                          '${_cart.length} item(s) selected',
+                                      action: _cart.isNotEmpty
+                                          ? TextButton(
+                                              onPressed: () =>
+                                                  setState(() => _cart.clear()),
+                                              child: const Text(
+                                                'Clear all',
                                                 style: TextStyle(
-                                                  fontSize: 13,
-                                                  fontWeight: FontWeight.w600,
-                                                  color: textPrimary,
-                                                ),
-                                              ),
-                                              IconButton(
-                                                icon: const Icon(
-                                                  Icons.add_circle_outline,
-                                                  size: 18,
-                                                ),
-                                                visualDensity:
-                                                    VisualDensity.compact,
-                                                onPressed: () =>
-                                                    _changeCartQuantity(
-                                                      line,
-                                                      line.quantity + 1,
-                                                    ),
-                                              ),
-                                              const SizedBox(width: 8),
-                                              IconButton(
-                                                icon: const Icon(
-                                                  Icons.delete_outline,
-                                                  size: 18,
+                                                  fontSize: 12,
                                                   color: RetivoxTheme.danger,
                                                 ),
-                                                visualDensity:
-                                                    VisualDensity.compact,
-                                                onPressed: () => setState(
-                                                  () => _cart.remove(line),
+                                              ),
+                                            )
+                                          : null,
+                                    ),
+                                    if (_cart.isEmpty)
+                                      Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          vertical: 24,
+                                        ),
+                                        child: Center(
+                                          child: Text(
+                                            'Select products from the catalog above to add to this sale.',
+                                            style: TextStyle(
+                                              color: textMuted,
+                                              fontSize: 13,
+                                            ),
+                                          ),
+                                        ),
+                                      )
+                                    else
+                                      for (final line in _cart) ...[
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            vertical: 8,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            border: Border(
+                                              bottom: BorderSide(
+                                                color: isDark
+                                                    ? RetivoxTheme.borderDark
+                                                    : RetivoxTheme.borderLight,
+                                              ),
+                                            ),
+                                          ),
+                                          child: Row(
+                                            children: [
+                                              Expanded(
+                                                child: Column(
+                                                  crossAxisAlignment:
+                                                      CrossAxisAlignment.start,
+                                                  children: [
+                                                    Text(
+                                                      line.product.name,
+                                                      style: TextStyle(
+                                                        fontSize: 13,
+                                                        fontWeight:
+                                                            FontWeight.w600,
+                                                        color: textPrimary,
+                                                      ),
+                                                    ),
+                                                    Text(
+                                                      '${line.uom['name'] ?? 'unit'} · ${_formatMoney(line.total)}',
+                                                      style: TextStyle(
+                                                        fontSize: 11,
+                                                        color: textMuted,
+                                                      ),
+                                                    ),
+                                                  ],
                                                 ),
+                                              ),
+                                              Row(
+                                                children: [
+                                                  IconButton(
+                                                    icon: const Icon(
+                                                      Icons
+                                                          .remove_circle_outline,
+                                                      size: 18,
+                                                    ),
+                                                    visualDensity:
+                                                        VisualDensity.compact,
+                                                    onPressed: () =>
+                                                        _changeCartQuantity(
+                                                          line,
+                                                          line.quantity - 1,
+                                                        ),
+                                                  ),
+                                                  Text(
+                                                    _quantityText(
+                                                      line.quantity,
+                                                    ),
+                                                    style: TextStyle(
+                                                      fontSize: 13,
+                                                      fontWeight:
+                                                          FontWeight.w600,
+                                                      color: textPrimary,
+                                                    ),
+                                                  ),
+                                                  IconButton(
+                                                    icon: const Icon(
+                                                      Icons.add_circle_outline,
+                                                      size: 18,
+                                                    ),
+                                                    visualDensity:
+                                                        VisualDensity.compact,
+                                                    onPressed: () =>
+                                                        _changeCartQuantity(
+                                                          line,
+                                                          line.quantity + 1,
+                                                        ),
+                                                  ),
+                                                  const SizedBox(width: 8),
+                                                  IconButton(
+                                                    icon: const Icon(
+                                                      Icons.delete_outline,
+                                                      size: 18,
+                                                      color:
+                                                          RetivoxTheme.danger,
+                                                    ),
+                                                    visualDensity:
+                                                        VisualDensity.compact,
+                                                    onPressed: () => setState(
+                                                      () => _cart.remove(line),
+                                                    ),
+                                                  ),
+                                                ],
                                               ),
                                             ],
                                           ),
-                                        ],
-                                      ),
-                                    ),
+                                        ),
+                                      ],
                                   ],
-                              ],
-                            ),
+                                ),
+                              ),
+                            ],
                           ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 16),
+                        ),
+                        SizedBox(
+                          width: wideLayout ? 16 : 0,
+                          height: wideLayout ? 0 : 16,
+                        ),
 
-                    // Right Column: Checkout Summary Pane matching web
-                    Expanded(
-                      flex: 4,
-                      child: Column(
-                        children: [
-                          RetivoxCard(
-                            padding: RetivoxCardPadding.md,
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: [
-                                const RetivoxCardHeader(title: 'Order summary'),
-
-                                // Subtotal Row
-                                Row(
-                                  mainAxisAlignment:
-                                      MainAxisAlignment.spaceBetween,
+                        // Right Column: Checkout Summary Pane matching web
+                        Flexible(
+                          flex: 4,
+                          fit: wideLayout ? FlexFit.tight : FlexFit.loose,
+                          child: Column(
+                            children: [
+                              RetivoxCard(
+                                padding: RetivoxCardPadding.md,
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
                                   children: [
-                                    Text(
-                                      'Subtotal',
-                                      style: TextStyle(
-                                        fontSize: 13,
-                                        color: textMuted,
-                                      ),
+                                    const RetivoxCardHeader(
+                                      title: 'Order summary',
                                     ),
+
+                                    // Subtotal Row
+                                    Row(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        Text(
+                                          'Subtotal',
+                                          style: TextStyle(
+                                            fontSize: 13,
+                                            color: textMuted,
+                                          ),
+                                        ),
+                                        Text(
+                                          _formatMoney(_cartTotal),
+                                          style: TextStyle(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w600,
+                                            color: textPrimary,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 12),
+                                    Divider(
+                                      color: isDark
+                                          ? RetivoxTheme.borderDark
+                                          : RetivoxTheme.borderLight,
+                                    ),
+                                    const SizedBox(height: 12),
+
+                                    // Payment Method Selector matching web
                                     Text(
-                                      _formatMoney(_cartTotal),
+                                      'Payment method',
                                       style: TextStyle(
-                                        fontSize: 14,
+                                        fontSize: 12,
                                         fontWeight: FontWeight.w600,
-                                        color: textPrimary,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 12),
-                                Divider(
-                                  color: isDark
-                                      ? RetivoxTheme.borderDark
-                                      : RetivoxTheme.borderLight,
-                                ),
-                                const SizedBox(height: 12),
-
-                                // Payment Method Selector matching web
-                                Text(
-                                  'Payment method',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                    color: textMuted,
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                DropdownButtonFormField<String>(
-                                  value: _paymentMethod,
-                                  decoration: const InputDecoration(
-                                    labelText: 'Payment method',
-                                  ),
-                                  items: [
-                                    DropdownMenuItem(
-                                      value: 'cash',
-                                      child: Text('Cash'),
-                                    ),
-                                    DropdownMenuItem(
-                                      value: 'mpesa_manual',
-                                      child: Text('Mobile manual'),
-                                    ),
-                                  ],
-                                  onChanged: (value) => setState(
-                                    () => _paymentMethod = value ?? 'cash',
-                                  ),
-                                ),
-
-                                // M-Pesa Reference Field when M-Pesa chosen
-                                if (_paymentMethod != 'cash' &&
-                                    (_paymentMethod != 'mpesa_manual' ||
-                                        !_isCredit ||
-                                        (double.tryParse(
-                                                  _creditPaidController.text,
-                                                ) ??
-                                                0) >
-                                            0)) ...[
-                                  const SizedBox(height: 14),
-                                  TextField(
-                                    controller: _mpesaReferenceController,
-                                    textCapitalization:
-                                        TextCapitalization.characters,
-                                    decoration: InputDecoration(
-                                      labelText:
-                                          _paymentMethod == 'mpesa_manual'
-                                          ? 'Mobile payment reference code'
-                                          : 'Payment reference (optional)',
-                                      hintText: _paymentMethod == 'mpesa_manual'
-                                          ? 'e.g. SBF92JK12'
-                                          : null,
-                                    ),
-                                  ),
-                                ],
-
-                                if (_paymentMethod == 'cash') ...[
-                                  const SizedBox(height: 12),
-                                  TextField(
-                                    controller: _cashTenderedController,
-                                    keyboardType:
-                                        const TextInputType.numberWithOptions(
-                                          decimal: true,
-                                        ),
-                                    decoration: InputDecoration(
-                                      labelText: _isCredit
-                                          ? 'Cash received now'
-                                          : 'Cash received',
-                                      hintText: _formatMoney(
-                                        _isCredit
-                                            ? (double.tryParse(
-                                                    _creditPaidController.text,
-                                                  ) ??
-                                                  0)
-                                            : _cartTotal,
-                                      ),
-                                    ),
-                                    onChanged: (_) => setState(() {}),
-                                  ),
-                                  const SizedBox(height: 6),
-                                  Text(
-                                    'Change: ${_formatMoney((double.tryParse(_cashTenderedController.text) ?? (_isCredit ? (double.tryParse(_creditPaidController.text) ?? 0) : _cartTotal)) - (_isCredit ? (double.tryParse(_creditPaidController.text) ?? 0) : _cartTotal))}',
-                                    style: TextStyle(
-                                      color: textMuted,
-                                      fontSize: 12,
-                                    ),
-                                  ),
-                                ],
-
-                                SwitchListTile.adaptive(
-                                  contentPadding: EdgeInsets.zero,
-                                  title: const Text('Credit sale'),
-                                  value: _isCredit,
-                                  onChanged: (value) =>
-                                      setState(() => _isCredit = value),
-                                ),
-                                if (_isCredit) ...[
-                                  TextField(
-                                    controller: _customerNameController,
-                                    decoration: const InputDecoration(
-                                      labelText: 'Customer name *',
-                                    ),
-                                  ),
-                                  const SizedBox(height: 8),
-                                  TextField(
-                                    controller: _customerPhoneController,
-                                    keyboardType: TextInputType.phone,
-                                    decoration: const InputDecoration(
-                                      labelText: 'Customer phone *',
-                                    ),
-                                  ),
-                                  const SizedBox(height: 8),
-                                  TextField(
-                                    controller: _customerEmailController,
-                                    keyboardType: TextInputType.emailAddress,
-                                    decoration: const InputDecoration(
-                                      labelText: 'Customer email (optional)',
-                                    ),
-                                  ),
-                                  const SizedBox(height: 8),
-                                  TextField(
-                                    controller: _creditPaidController,
-                                    keyboardType:
-                                        const TextInputType.numberWithOptions(
-                                          decimal: true,
-                                        ),
-                                    decoration: const InputDecoration(
-                                      labelText: 'Amount paid now',
-                                      helperText: 'Leave zero if no payment was made yet',
-                                    ),
-                                    onChanged: (_) => setState(() {}),
-                                  ),
-                                  const SizedBox(height: 8),
-                                  TextField(
-                                    controller: _creditDueDateController,
-                                    readOnly: true,
-                                    decoration: const InputDecoration(
-                                      labelText: 'Expected payment date *',
-                                      hintText: 'Select a date',
-                                    ),
-                                    onTap: () async {
-                                      final chosen = await showDatePicker(
-                                        context: context,
-                                        firstDate: DateTime.now(),
-                                        lastDate: DateTime.now().add(
-                                          const Duration(days: 3650),
-                                        ),
-                                        initialDate: DateTime.now().add(
-                                          const Duration(days: 7),
-                                        ),
-                                      );
-                                      if (chosen != null)
-                                        setState(
-                                          () => _creditDueDateController.text =
-                                              DateFormat('yyyy-MM-dd')
-                                                  .format(chosen),
-                                        );
-                                    },
-                                  ),
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    'Balance due: ${_formatMoney(_cartTotal - (double.tryParse(_creditPaidController.text) ?? 0))}',
-                                    style: TextStyle(
-                                      color: textMuted,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ],
-
-                                const SizedBox(height: 16),
-                                Divider(
-                                  color: isDark
-                                      ? RetivoxTheme.borderDark
-                                      : RetivoxTheme.borderLight,
-                                ),
-                                const SizedBox(height: 12),
-
-                                // Total Row
-                                Row(
-                                  mainAxisAlignment:
-                                      MainAxisAlignment.spaceBetween,
-                                  children: [
-                                    Text(
-                                      'Total to pay',
-                                      style: TextStyle(
-                                        fontSize: 15,
-                                        fontWeight: FontWeight.w700,
-                                        color: textPrimary,
-                                      ),
-                                    ),
-                                    Text(
-                                      _formatMoney(_cartTotal),
-                                      style: const TextStyle(
-                                        fontSize: 20,
-                                        fontWeight: FontWeight.w800,
-                                        color: RetivoxTheme.primaryLightMode,
-                                        letterSpacing: -0.3,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 16),
-
-                                // Submit Sale Button
-                                RetivoxButton(
-                                  label: _isSavingSale
-                                      ? 'Recording sale...'
-                                      : 'Complete sale',
-                                  icon: const Icon(Icons.point_of_sale_rounded),
-                                  variant: RetivoxButtonVariant.primary,
-                                  isLoading: _isSavingSale,
-                                  onPressed: _cart.isEmpty || _isSavingSale
-                                      ? null
-                                      : _checkout,
-                                ),
-                                const SizedBox(height: 10),
-                                Row(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  children: [
-                                    Icon(
-                                      _isConnected
-                                          ? Icons.cloud_done_outlined
-                                          : Icons.cloud_off_outlined,
-                                      size: 13,
-                                      color: textMuted,
-                                    ),
-                                    const SizedBox(width: 4),
-                                    Text(
-                                      _isConnected
-                                          ? 'Online · Syncs automatically'
-                                          : 'Offline · Stored safely on device',
-                                      style: TextStyle(
-                                        fontSize: 11,
                                         color: textMuted,
                                       ),
                                     ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 16),
+                                    const SizedBox(height: 8),
+                                    DropdownButtonFormField<String>(
+                                      initialValue: _paymentMethod,
+                                      decoration: const InputDecoration(
+                                        labelText: 'Payment method',
+                                      ),
+                                      items: [
+                                        DropdownMenuItem(
+                                          value: 'cash',
+                                          child: Text('Cash'),
+                                        ),
+                                        DropdownMenuItem(
+                                          value: 'mpesa_manual',
+                                          child: Text('Mobile manual'),
+                                        ),
+                                      ],
+                                      onChanged: (value) => setState(
+                                        () => _paymentMethod = value ?? 'cash',
+                                      ),
+                                    ),
 
-                          // Recent Local Sales
-                          RetivoxCard(
-                            padding: RetivoxCardPadding.md,
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: [
-                                RetivoxCardHeader(
-                                  title: 'Recent local sales',
-                                  action: TextButton(
-                                    onPressed: _syncPending,
-                                    style: TextButton.styleFrom(
-                                      visualDensity: VisualDensity.compact,
-                                    ),
-                                    child: const Text(
-                                      'Sync all',
-                                      style: TextStyle(fontSize: 12),
-                                    ),
-                                  ),
-                                ),
-                                if (_sales.isEmpty)
-                                  Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      vertical: 14,
-                                    ),
-                                    child: Center(
-                                      child: Text(
-                                        'No locally recorded sales yet.',
+                                    // M-Pesa Reference Field when M-Pesa chosen
+                                    if (_paymentMethod != 'cash' &&
+                                        (_paymentMethod != 'mpesa_manual' ||
+                                            !_isCredit ||
+                                            (double.tryParse(
+                                                      _creditPaidController
+                                                          .text,
+                                                    ) ??
+                                                    0) >
+                                                0)) ...[
+                                      const SizedBox(height: 14),
+                                      TextField(
+                                        controller: _mpesaReferenceController,
+                                        textCapitalization:
+                                            TextCapitalization.characters,
+                                        decoration: InputDecoration(
+                                          labelText:
+                                              _paymentMethod == 'mpesa_manual'
+                                              ? 'Mobile payment reference code'
+                                              : 'Payment reference (optional)',
+                                          hintText:
+                                              _paymentMethod == 'mpesa_manual'
+                                              ? 'e.g. SBF92JK12'
+                                              : null,
+                                        ),
+                                      ),
+                                    ],
+
+                                    if (_paymentMethod == 'cash') ...[
+                                      const SizedBox(height: 12),
+                                      TextField(
+                                        controller: _cashTenderedController,
+                                        keyboardType:
+                                            const TextInputType.numberWithOptions(
+                                              decimal: true,
+                                            ),
+                                        decoration: InputDecoration(
+                                          labelText: _isCredit
+                                              ? 'Cash received now'
+                                              : 'Cash received',
+                                          hintText: _formatMoney(
+                                            _isCredit
+                                                ? (double.tryParse(
+                                                        _creditPaidController
+                                                            .text,
+                                                      ) ??
+                                                      0)
+                                                : _cartTotal,
+                                          ),
+                                        ),
+                                        onChanged: (_) => setState(() {}),
+                                      ),
+                                      const SizedBox(height: 6),
+                                      Text(
+                                        'Change: ${_formatMoney((double.tryParse(_cashTenderedController.text) ?? (_isCredit ? (double.tryParse(_creditPaidController.text) ?? 0) : _cartTotal)) - (_isCredit ? (double.tryParse(_creditPaidController.text) ?? 0) : _cartTotal))}',
                                         style: TextStyle(
                                           color: textMuted,
                                           fontSize: 12,
                                         ),
                                       ),
+                                    ],
+
+                                    SwitchListTile.adaptive(
+                                      contentPadding: EdgeInsets.zero,
+                                      title: const Text('Credit sale'),
+                                      value: _isCredit,
+                                      onChanged: (value) =>
+                                          setState(() => _isCredit = value),
                                     ),
-                                  )
-                                else
-                                  for (final sale
-                                      in _sales
-                                          .where((s) => s.branchId == _branchId)
-                                          .take(5)) ...[
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(
-                                        vertical: 6,
+                                    if (_isCredit) ...[
+                                      TextField(
+                                        controller: _customerNameController,
+                                        decoration: const InputDecoration(
+                                          labelText: 'Customer name *',
+                                        ),
                                       ),
-                                      child: Row(
-                                        mainAxisAlignment:
-                                            MainAxisAlignment.spaceBetween,
-                                        children: [
-                                          Column(
-                                            crossAxisAlignment:
-                                                CrossAxisAlignment.start,
-                                            children: [
-                                              Text(
-                                                _formatMoney(sale.totalAmount),
-                                                style: TextStyle(
-                                                  fontSize: 12,
-                                                  fontWeight: FontWeight.w600,
-                                                  color: textPrimary,
-                                                ),
-                                              ),
-                                              Text(
-                                                DateFormat('h:mm a').format(
-                                                  DateTime.parse(
-                                                    sale.recordedAt,
-                                                  ).toLocal(),
-                                                ),
-                                                style: TextStyle(
-                                                  fontSize: 10,
-                                                  color: textMuted,
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                          Row(
-                                            mainAxisSize: MainAxisSize.min,
-                                            children: [
-                                              InkWell(
-                                                borderRadius:
-                                                    BorderRadius.circular(20),
-                                                onTap:
-                                                    sale.status ==
-                                                        'needs_correction'
-                                                    ? () => _correctSale(sale)
-                                                    : null,
-                                                child: RetivoxBadge(
-                                                  variant:
-                                                      sale.status == 'synced'
-                                                      ? RetivoxBadgeVariant
-                                                            .success
-                                                      : sale.status ==
-                                                            'needs_correction'
-                                                      ? RetivoxBadgeVariant
-                                                            .danger
-                                                      : RetivoxBadgeVariant
-                                                            .warning,
-                                                  label: sale.status.replaceAll(
-                                                    '_',
-                                                    ' ',
-                                                  ),
-                                                  size: RetivoxBadgeSize.sm,
-                                                ),
-                                              ),
-                                              const SizedBox(width: 5),
-                                              IconButton(
-                                                icon: const Icon(
-                                                  Icons.print_outlined,
-                                                  size: 15,
-                                                ),
-                                                tooltip: 'Print receipt',
-                                                visualDensity:
-                                                    VisualDensity.compact,
-                                                padding: EdgeInsets.zero,
-                                                constraints:
-                                                    const BoxConstraints(
-                                                      minWidth: 28,
-                                                      minHeight: 28,
-                                                    ),
-                                                onPressed: () =>
-                                                    _printReceipt(sale),
-                                              ),
-                                              if (sale.status != 'synced') ...[
-                                                const SizedBox(width: 4),
-                                                IconButton(
-                                                  icon: const Icon(
-                                                    Icons.close_rounded,
-                                                    size: 14,
-                                                    color: RetivoxTheme.danger,
-                                                  ),
-                                                  tooltip: 'Cancel sale',
-                                                  visualDensity:
-                                                      VisualDensity.compact,
-                                                  padding: EdgeInsets.zero,
-                                                  constraints:
-                                                      const BoxConstraints(),
-                                                  onPressed: () =>
-                                                      _cancelSale(sale),
-                                                ),
-                                              ],
-                                            ],
-                                          ),
-                                        ],
+                                      const SizedBox(height: 8),
+                                      TextField(
+                                        controller: _customerPhoneController,
+                                        keyboardType: TextInputType.phone,
+                                        decoration: const InputDecoration(
+                                          labelText: 'Customer phone *',
+                                        ),
                                       ),
+                                      const SizedBox(height: 8),
+                                      TextField(
+                                        controller: _customerEmailController,
+                                        keyboardType:
+                                            TextInputType.emailAddress,
+                                        decoration: const InputDecoration(
+                                          labelText:
+                                              'Customer email (optional)',
+                                        ),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      TextField(
+                                        controller: _creditPaidController,
+                                        keyboardType:
+                                            const TextInputType.numberWithOptions(
+                                              decimal: true,
+                                            ),
+                                        decoration: const InputDecoration(
+                                          labelText: 'Amount paid now',
+                                          helperText: 'Leave zero if no payment was made yet',
+                                        ),
+                                        onChanged: (_) => setState(() {}),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      TextField(
+                                        controller: _creditDueDateController,
+                                        readOnly: true,
+                                        decoration: const InputDecoration(
+                                          labelText: 'Expected payment date *',
+                                          hintText: 'Select a date',
+                                        ),
+                                        onTap: () async {
+                                          final chosen = await showDatePicker(
+                                            context: context,
+                                            firstDate: DateTime.now(),
+                                            lastDate: DateTime.now().add(
+                                              const Duration(days: 3650),
+                                            ),
+                                            initialDate: DateTime.now().add(
+                                              const Duration(days: 7),
+                                            ),
+                                          );
+                                          if (chosen != null) {
+                                            setState(
+                                              () =>
+                                                  _creditDueDateController
+                                                      .text = DateFormat(
+                                                    'yyyy-MM-dd',
+                                                  ).format(chosen),
+                                            );
+                                          }
+                                        },
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Text(
+                                        'Balance due: ${_formatMoney(_cartTotal - (double.tryParse(_creditPaidController.text) ?? 0))}',
+                                        style: TextStyle(
+                                          color: textMuted,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ],
+
+                                    const SizedBox(height: 16),
+                                    Divider(
+                                      color: isDark
+                                          ? RetivoxTheme.borderDark
+                                          : RetivoxTheme.borderLight,
+                                    ),
+                                    const SizedBox(height: 12),
+
+                                    // Total Row
+                                    Row(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        Text(
+                                          'Total to pay',
+                                          style: TextStyle(
+                                            fontSize: 15,
+                                            fontWeight: FontWeight.w700,
+                                            color: textPrimary,
+                                          ),
+                                        ),
+                                        Text(
+                                          _formatMoney(_cartTotal),
+                                          style: const TextStyle(
+                                            fontSize: 20,
+                                            fontWeight: FontWeight.w800,
+                                            color:
+                                                RetivoxTheme.primaryLightMode,
+                                            letterSpacing: -0.3,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 16),
+
+                                    // Submit Sale Button
+                                    RetivoxButton(
+                                      label: _isSavingSale
+                                          ? 'Recording sale...'
+                                          : 'Complete sale',
+                                      icon: const Icon(
+                                        Icons.point_of_sale_rounded,
+                                      ),
+                                      variant: RetivoxButtonVariant.primary,
+                                      isLoading: _isSavingSale,
+                                      onPressed: _cart.isEmpty || _isSavingSale
+                                          ? null
+                                          : _checkout,
+                                    ),
+                                    const SizedBox(height: 10),
+                                    Row(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.center,
+                                      children: [
+                                        Icon(
+                                          _isConnected
+                                              ? Icons.cloud_done_outlined
+                                              : Icons.cloud_off_outlined,
+                                          size: 13,
+                                          color: textMuted,
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          _isConnected
+                                              ? 'Online · Syncs automatically'
+                                              : 'Offline · Stored safely on device',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            color: textMuted,
+                                          ),
+                                        ),
+                                      ],
                                     ),
                                   ],
-                              ],
-                            ),
+                                ),
+                              ),
+                              const SizedBox(height: 16),
+
+                              // Recent Local Sales
+                              RetivoxCard(
+                                padding: RetivoxCardPadding.md,
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
+                                  children: [
+                                    RetivoxCardHeader(
+                                      title: 'Recent local sales',
+                                      action: TextButton(
+                                        onPressed: _syncPending,
+                                        style: TextButton.styleFrom(
+                                          visualDensity: VisualDensity.compact,
+                                        ),
+                                        child: const Text(
+                                          'Sync all',
+                                          style: TextStyle(fontSize: 12),
+                                        ),
+                                      ),
+                                    ),
+                                    if (_sales.isEmpty)
+                                      Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          vertical: 14,
+                                        ),
+                                        child: Center(
+                                          child: Text(
+                                            'No locally recorded sales yet.',
+                                            style: TextStyle(
+                                              color: textMuted,
+                                              fontSize: 12,
+                                            ),
+                                          ),
+                                        ),
+                                      )
+                                    else
+                                      for (final sale
+                                          in _sales
+                                              .where(
+                                                (s) => s.branchId == _branchId,
+                                              )
+                                              .take(5)) ...[
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            vertical: 6,
+                                          ),
+                                          child: Row(
+                                            mainAxisAlignment:
+                                                MainAxisAlignment.spaceBetween,
+                                            children: [
+                                              Column(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
+                                                children: [
+                                                  Text(
+                                                    sale.payloadReadable
+                                                        ? _formatMoney(
+                                                            sale.totalAmount,
+                                                          )
+                                                        : 'Sale data unavailable',
+                                                    style: TextStyle(
+                                                      fontSize: 12,
+                                                      fontWeight:
+                                                          FontWeight.w600,
+                                                      color: textPrimary,
+                                                    ),
+                                                  ),
+                                                  Text(
+                                                    DateFormat('h:mm a').format(
+                                                      DateTime.parse(
+                                                        sale.recordedAt,
+                                                      ).toLocal(),
+                                                    ),
+                                                    style: TextStyle(
+                                                      fontSize: 10,
+                                                      color: textMuted,
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                              Row(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  InkWell(
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          20,
+                                                        ),
+                                                    onTap:
+                                                        sale.payloadReadable &&
+                                                            sale.status == 'needs_correction'
+                                                        ? () =>
+                                                              _correctSale(sale)
+                                                        : null,
+                                                    child: RetivoxBadge(
+                                                      variant:
+                                                          !sale.payloadReadable ||
+                                                              sale.status ==
+                                                                  'needs_correction'
+                                                          ? RetivoxBadgeVariant
+                                                                .danger
+                                                          : sale.status ==
+                                                                'synced'
+                                                          ? RetivoxBadgeVariant
+                                                                .success
+                                                          : sale.status == 'needs_correction'
+                                                          ? RetivoxBadgeVariant
+                                                                .danger
+                                                          : RetivoxBadgeVariant
+                                                                .warning,
+                                                      label:
+                                                          sale.payloadReadable
+                                                          ? sale.status
+                                                                .replaceAll(
+                                                                  '_',
+                                                                  ' ',
+                                                                )
+                                                          : 'data unavailable',
+                                                      size: RetivoxBadgeSize.sm,
+                                                    ),
+                                                  ),
+                                                  const SizedBox(width: 5),
+                                                  IconButton(
+                                                    icon: const Icon(
+                                                      Icons.print_outlined,
+                                                      size: 15,
+                                                    ),
+                                                    tooltip: 'Print receipt',
+                                                    visualDensity:
+                                                        VisualDensity.compact,
+                                                    padding: EdgeInsets.zero,
+                                                    constraints:
+                                                        const BoxConstraints(
+                                                          minWidth: 28,
+                                                          minHeight: 28,
+                                                        ),
+                                                    onPressed:
+                                                        sale.payloadReadable
+                                                        ? () => _printReceipt(
+                                                            sale,
+                                                          )
+                                                        : null,
+                                                  ),
+                                                  if (sale.status != 'synced' &&
+                                                      sale.status !=
+                                                          'syncing') ...[
+                                                    const SizedBox(width: 4),
+                                                    IconButton(
+                                                      icon: const Icon(
+                                                        Icons.close_rounded,
+                                                        size: 14,
+                                                        color:
+                                                            RetivoxTheme.danger,
+                                                      ),
+                                                      tooltip: 'Cancel sale',
+                                                      visualDensity:
+                                                          VisualDensity.compact,
+                                                      padding: EdgeInsets.zero,
+                                                      constraints:
+                                                          const BoxConstraints(),
+                                                      onPressed: () =>
+                                                          _cancelSale(sale),
+                                                    ),
+                                                  ],
+                                                ],
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ],
+                                  ],
+                                ),
+                              ),
+                            ],
                           ),
-                        ],
-                      ),
-                    ),
-                  ],
+                        ),
+                      ],
+                    );
+                  },
                 ),
               ],
             ),
+    );
+  }
+}
+
+class _AddSaleProductDialog extends StatefulWidget {
+  const _AddSaleProductDialog({
+    required this.product,
+    required this.formatMoney,
+    this.protectExternalScannerInput = false,
+  });
+
+  final SaleProduct product;
+  final String Function(double amount) formatMoney;
+  final bool protectExternalScannerInput;
+
+  @override
+  State<_AddSaleProductDialog> createState() => _AddSaleProductDialogState();
+}
+
+class _AddSaleProductDialogState extends State<_AddSaleProductDialog> {
+  final _quantityController = TextEditingController(text: '1');
+  late Map<String, dynamic> _selectedUom;
+  String? _error;
+  DateTime? _quantityTypingStartedAt;
+  bool _clearingScannerInput = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedUom =
+        widget.product.defaultSaleUom ?? widget.product.uomOptions.first;
+  }
+
+  @override
+  void dispose() {
+    _quantityController.dispose();
+    super.dispose();
+  }
+
+  double _number(Object? value, {double fallback = 0}) {
+    final parsed = double.tryParse(value?.toString() ?? '');
+    return parsed != null && parsed.isFinite ? parsed : fallback;
+  }
+
+  String _quantityText(double value) => value == value.roundToDouble()
+      ? value.toInt().toString()
+      : value.toStringAsFixed(2);
+
+  void _add() {
+    final quantity = double.tryParse(_quantityController.text);
+    final conversion = _number(_selectedUom['conversionFactor'], fallback: 1);
+    if (quantity == null || !quantity.isFinite || quantity <= 0) {
+      setState(() => _error = 'Enter a quantity greater than zero.');
+      return;
+    }
+    final baseQuantity = quantity * conversion;
+    if ((baseQuantity - baseQuantity.roundToDouble()).abs() > 0.0001) {
+      setState(
+        () => _error = 'This unit quantity must convert to whole base units.',
+      );
+      return;
+    }
+    if (baseQuantity > widget.product.availableBaseQuantity) {
+      setState(() => _error = 'Quantity exceeds the available stock.');
+      return;
+    }
+    final price = widget.product.previewPrice(quantity, _selectedUom);
+    if (price == null) {
+      setState(() => _error = 'No price is configured for this quantity.');
+      return;
+    }
+    Navigator.of(context).pop(
+      _ProductSelection(uom: _selectedUom, quantity: quantity, total: price),
+    );
+  }
+
+  void _onQuantityChanged(String value) {
+    if (_clearingScannerInput) {
+      _clearingScannerInput = false;
+      return;
+    }
+    if (widget.protectExternalScannerInput && value.isNotEmpty) {
+      _quantityTypingStartedAt ??= DateTime.now();
+      final elapsed = DateTime.now().difference(_quantityTypingStartedAt!);
+      if (value.length >= 5 && elapsed < const Duration(milliseconds: 600)) {
+        _quantityTypingStartedAt = null;
+        _clearingScannerInput = true;
+        _quantityController.clear();
+        setState(
+          () =>
+              _error = 'Scanner input is paused. Enter the quantity manually.',
+        );
+        return;
+      }
+    } else if (value.isEmpty) {
+      _quantityTypingStartedAt = null;
+    }
+    setState(() => _error = null);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final product = widget.product;
+    return AlertDialog(
+      title: Text(product.name),
+      content: SizedBox(
+        width: 360,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'Available: ${_quantityText(product.availableBaseQuantity)} ${product.uomOptions.first['name'] ?? 'units'}',
+              style: const TextStyle(
+                fontSize: 12,
+                color: RetivoxTheme.textMutedLight,
+              ),
+            ),
+            const SizedBox(height: 16),
+            DropdownButtonFormField<String>(
+              initialValue: _selectedUom['id'] as String?,
+              decoration: const InputDecoration(labelText: 'Sell as unit'),
+              items: product.uomOptions
+                  .map(
+                    (uom) => DropdownMenuItem<String>(
+                      value: uom['id'] as String?,
+                      child: Text(
+                        '${uom['name'] ?? 'Unit'} (${uom['abbreviation'] ?? ''})',
+                      ),
+                    ),
+                  )
+                  .toList(),
+              onChanged: (id) {
+                if (id == null) return;
+                setState(() {
+                  _selectedUom = product.uomOptions.firstWhere(
+                    (uom) => uom['id'] == id,
+                  );
+                  _error = null;
+                });
+              },
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _quantityController,
+              autofocus: true,
+              onSubmitted: (_) => _add(),
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              decoration: InputDecoration(
+                labelText: 'Quantity',
+                errorText: _error,
+              ),
+              onChanged: _onQuantityChanged,
+            ),
+            const SizedBox(height: 12),
+            ValueListenableBuilder<TextEditingValue>(
+              valueListenable: _quantityController,
+              builder: (context, value, _) {
+                final quantity = double.tryParse(value.text) ?? 0;
+                final unitPrice = product.previewPrice(1, _selectedUom);
+                final price = product.previewPrice(quantity, _selectedUom);
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      unitPrice == null
+                          ? 'Unit price is not configured.'
+                          : 'Unit price: ${widget.formatMoney(unitPrice)}',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      price == null
+                          ? 'No price is configured for this quantity.'
+                          : 'Subtotal: ${widget.formatMoney(price)}',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                        color: price == null
+                            ? RetivoxTheme.danger
+                            : RetivoxTheme.primaryLightMode,
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(onPressed: _add, child: const Text('Add to sale')),
+      ],
     );
   }
 }

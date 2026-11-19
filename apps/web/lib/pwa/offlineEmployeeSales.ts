@@ -15,6 +15,7 @@ export type OfflineEmployeeSaleInput = {
   paymentMethod: 'mpesa_manual' | 'cash' | 'card' | 'bank_transfer' | 'other'
   amountPaid: number | null
   amountTendered: number | null
+  totalAmount: number
   isCredit: boolean
   discountAmount: number
   customerName: string | null
@@ -27,8 +28,9 @@ export type OfflineEmployeeSaleInput = {
 
 type OfflineEmployeeSale = OfflineEmployeeSaleInput & {
   id: string
-  status: 'pending' | 'syncing' | 'synced' | 'needs_attention'
+  status: 'pending' | 'syncing' | 'synced' | 'needs_attention' | 'cancelled'
   createdAt: string
+  lastAttemptAt: string | null
   syncedAt: string | null
   transactionId: string | null
   lastError: string | null
@@ -37,7 +39,12 @@ type OfflineEmployeeSale = OfflineEmployeeSaleInput & {
 export type OfflineSaleSyncSummary = {
   synced: number
   needsAttention: number
+  pending: number
 }
+
+export type OfflineEmployeeSaleQueueItem = Pick<OfflineEmployeeSale,
+  'id' | 'status' | 'createdAt' | 'lastAttemptAt' | 'transactionId' | 'lastError' | 'recordedAt' | 'paymentMethod' | 'amountPaid' | 'amountTendered' | 'totalAmount' | 'isCredit' | 'items'
+>
 
 const DATABASE_NAME = 'retivox-pwa'
 const DATABASE_VERSION = 1
@@ -109,6 +116,65 @@ async function saveSale(sale: OfflineEmployeeSale) {
   await withStore('readwrite', (store) => store.put(sale))
 }
 
+export async function listOfflineEmployeeSales(userId: string): Promise<OfflineEmployeeSaleQueueItem[]> {
+  const sales = await getSalesForUser(userId)
+  return sales
+    .filter((sale) => sale.status !== 'synced' && sale.status !== 'cancelled')
+    .map(({ id, status, createdAt, lastAttemptAt, transactionId, lastError, recordedAt, paymentMethod, amountPaid, amountTendered, totalAmount, isCredit, items }) => ({
+      id, status, createdAt, lastAttemptAt, transactionId, lastError, recordedAt, paymentMethod, amountPaid, amountTendered, totalAmount, isCredit, items,
+    }))
+}
+
+async function getSaleForUser(userId: string, id: string) {
+  const sale = await withStore('readonly', (store) => store.get(id)) as OfflineEmployeeSale | undefined
+  return sale?.userId === userId ? sale : null
+}
+
+async function updateSaleIf(
+  userId: string,
+  id: string,
+  canUpdate: (sale: OfflineEmployeeSale) => boolean,
+  update: (sale: OfflineEmployeeSale) => OfflineEmployeeSale,
+) {
+  const database = await openDatabase()
+  return new Promise<OfflineEmployeeSale | null>((resolve, reject) => {
+    const transaction = database.transaction(STORE_NAME, 'readwrite')
+    const store = transaction.objectStore(STORE_NAME)
+    let updated: OfflineEmployeeSale | null = null
+    const request = store.get(id)
+
+    request.onsuccess = () => {
+      const sale = request.result as OfflineEmployeeSale | undefined
+      if (!sale || sale.userId !== userId || !canUpdate(sale)) return
+      updated = update(sale)
+      store.put(updated)
+    }
+    request.onerror = () => reject(request.error ?? new Error('Unable to update offline sale'))
+    transaction.oncomplete = () => {
+      database.close()
+      resolve(updated)
+    }
+    transaction.onerror = () => {
+      database.close()
+      reject(transaction.error ?? new Error('Unable to update offline sale'))
+    }
+    transaction.onabort = () => {
+      database.close()
+      reject(transaction.error ?? new Error('Offline sale update was interrupted'))
+    }
+  })
+}
+
+export async function cancelOfflineEmployeeSale(userId: string, id: string) {
+  const sale = await updateSaleIf(
+    userId,
+    id,
+    (current) => current.status === 'pending' || current.status === 'needs_attention',
+    (current) => ({ ...current, status: 'cancelled', lastError: null }),
+  )
+  return sale !== null
+}
+
 /**
  * Keeps an employee sale locally until the same signed-in employee reconnects.
  * The UUID is sent to the database wrapper so a retry can never duplicate it.
@@ -119,6 +185,7 @@ export async function queueOfflineEmployeeSale(input: OfflineEmployeeSaleInput) 
     id: createLocalId(),
     status: 'pending',
     createdAt: new Date().toISOString(),
+    lastAttemptAt: null,
     syncedAt: null,
     transactionId: null,
     lastError: null,
@@ -131,56 +198,113 @@ export async function queueOfflineEmployeeSale(input: OfflineEmployeeSaleInput) 
 /**
  * Sends pending offline employee sales through the existing idempotent RPC.
  */
-export async function syncOfflineEmployeeSales(userId: string): Promise<OfflineSaleSyncSummary> {
+export async function syncOfflineEmployeeSales(
+  userId: string,
+  options: { saleId?: string; force?: boolean } = {},
+): Promise<OfflineSaleSyncSummary> {
   if (!navigator.onLine) {
-    return { synced: 0, needsAttention: 0 }
+    return { synced: 0, needsAttention: 0, pending: 0 }
   }
 
   const sales = await getSalesForUser(userId)
-  const pendingSales = sales.filter((sale) => sale.status === 'pending' || sale.status === 'needs_attention')
+  const staleCutoff = Date.now() - 2 * 60 * 1000
+  const pendingSales = sales.filter((sale) => {
+    if (options.saleId && sale.id !== options.saleId) return false
+    if (sale.status === 'pending') return true
+    if (sale.status === 'needs_attention') return Boolean(options.force)
+    return sale.status === 'syncing' && (!sale.lastAttemptAt || Date.parse(sale.lastAttemptAt) < staleCutoff)
+  })
   const supabase = createClient()
   let synced = 0
   let needsAttention = 0
 
   for (const sale of pendingSales) {
-    await saveSale({ ...sale, status: 'syncing', lastError: null })
+    const { data: sessionData } = await supabase.auth.getSession()
+    if (sessionData.session?.user.id !== userId) break
 
-    const response = await supabase.rpc('employee_record_transaction_offline_v2', {
-      p_items: sale.items,
-      p_payment_method: sale.paymentMethod,
-      p_amount_paid: sale.amountPaid ?? null,
-      p_amount_tendered: sale.amountTendered ?? null,
-      p_customer_email: sale.customerEmail ?? null,
-      p_due_date: sale.dueDate ?? null,
-      p_is_credit: sale.isCredit ?? false,
-      p_discount_amount: sale.discountAmount,
-      p_customer_name: sale.customerName,
-      p_customer_phone: sale.customerPhone,
-      p_reference_code: sale.mpesaRefCode,
-      p_recorded_at: sale.recordedAt,
-      p_local_id: sale.id,
-    })
+    const attemptAt = new Date().toISOString()
+    const claimed = await updateSaleIf(
+      userId,
+      sale.id,
+      (current) => {
+        if (current.status === 'pending') return true
+        if (current.status === 'needs_attention') return Boolean(options.force)
+        return current.status === 'syncing' && current.lastAttemptAt === sale.lastAttemptAt &&
+          (!current.lastAttemptAt || Date.parse(current.lastAttemptAt) < staleCutoff)
+      },
+      (current) => ({ ...current, status: 'syncing', lastAttemptAt: attemptAt, lastError: null }),
+    )
+    if (!claimed) continue
 
-    if (response.error) {
-      await saveSale({
-        ...sale,
-        status: 'needs_attention',
-        lastError: 'This saved sale needs review before it can be synced.',
+    try {
+      const response = await supabase.rpc('employee_record_transaction_offline_v2', {
+        p_items: claimed.items,
+        p_payment_method: claimed.paymentMethod,
+        p_amount_paid: claimed.amountPaid ?? null,
+        p_amount_tendered: claimed.amountTendered ?? null,
+        p_customer_email: claimed.customerEmail ?? null,
+        p_due_date: claimed.dueDate ?? null,
+        p_is_credit: claimed.isCredit ?? false,
+        p_discount_amount: claimed.discountAmount,
+        p_customer_name: claimed.customerName,
+        p_customer_phone: claimed.customerPhone,
+        p_reference_code: claimed.mpesaRefCode,
+        p_recorded_at: claimed.recordedAt,
+        p_local_id: claimed.id,
       })
-      needsAttention += 1
-      continue
-    }
 
-    const result = Array.isArray(response.data) ? response.data[0] : response.data
-    await saveSale({
-      ...sale,
-      status: 'synced',
-      syncedAt: new Date().toISOString(),
-      transactionId: result?.transaction_id ? String(result.transaction_id) : null,
-      lastError: null,
-    })
-    synced += 1
+      if (response.error) {
+        const message = response.error.message || 'Sale sync failed.'
+        const errorStatus = 'status' in response.error ? Number(response.error.status) : NaN
+        const transient =
+          !navigator.onLine ||
+          errorStatus >= 500 ||
+          /fetch|network|timeout|temporar|connection|aborted|jwt|session expired|unauthorized|not authenticated/i.test(message)
+        await saveSale({
+          ...claimed,
+          status: transient ? 'pending' : 'needs_attention',
+          lastError: transient
+            ? 'Connection interrupted. Retivox will retry this saved sale.'
+            : message.slice(0, 300),
+        })
+        if (!transient) needsAttention += 1
+        continue
+      }
+
+      const result = Array.isArray(response.data) ? response.data[0] : response.data
+      await saveSale({
+        ...claimed,
+        status: 'synced',
+        syncedAt: new Date().toISOString(),
+        transactionId: result?.transaction_id ? String(result.transaction_id) : null,
+        lastError: null,
+      })
+      synced += 1
+    } catch (error) {
+      await saveSale({
+        ...claimed,
+        status: 'pending',
+        lastError: error instanceof Error ? error.message.slice(0, 300) : 'Connection interrupted. Retivox will retry this saved sale.',
+      })
+    }
   }
 
-  return { synced, needsAttention }
+  const remaining = (await getSalesForUser(userId)).filter((sale) => sale.status === 'pending' || sale.status === 'syncing')
+  return { synced, needsAttention, pending: remaining.length }
+}
+
+export async function retryOfflineEmployeeSale(userId: string, id: string) {
+  const sale = await getSaleForUser(userId, id)
+  if (!sale || sale.status === 'synced' || sale.status === 'cancelled') {
+    return { synced: 0, needsAttention: 0, pending: 0 }
+  }
+  if (sale.status === 'needs_attention') {
+    await updateSaleIf(
+      userId,
+      id,
+      (current) => current.status === 'needs_attention',
+      (current) => ({ ...current, status: 'pending', lastError: null }),
+    )
+  }
+  return syncOfflineEmployeeSales(userId, { saleId: id, force: true })
 }

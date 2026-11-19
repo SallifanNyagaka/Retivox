@@ -188,6 +188,25 @@ class SaleProduct {
   }
 }
 
+/// Resolves a barcode against the locally loaded catalog. Keep this lookup
+/// independent of Supabase so camera and keyboard scans continue working
+/// while the device is offline.
+SaleProduct? findSaleProductByBarcode(
+  Iterable<SaleProduct> products,
+  String barcode,
+) {
+  final normalized = barcode.trim().toUpperCase();
+  if (normalized.isEmpty) return null;
+  for (final product in products) {
+    if (product.barcodes.any(
+      (candidate) => candidate.trim().toUpperCase() == normalized,
+    )) {
+      return product;
+    }
+  }
+  return null;
+}
+
 class LocalSale {
   const LocalSale({
     required this.localId,
@@ -197,6 +216,7 @@ class LocalSale {
     required this.totalAmount,
     required this.items,
     required this.errorMessage,
+    this.payloadReadable = true,
     this.serverId,
     this.paymentMethod = 'cash',
     this.mpesaReference,
@@ -209,6 +229,7 @@ class LocalSale {
   final double totalAmount;
   final List<Map<String, dynamic>> items;
   final String? errorMessage;
+  final bool payloadReadable;
   final String? serverId;
   final String paymentMethod;
   final String? mpesaReference;
@@ -405,6 +426,7 @@ class SaleRepository {
       await syncPending(user);
     } catch (error) {
       await database.updateSale(
+        accountId: user.id,
         localId: localId,
         status: 'pending_sync',
         errorMessage: 'Saved locally; sync could not complete: $error',
@@ -413,11 +435,11 @@ class SaleRepository {
     return localId;
   }
 
-  Future<void> syncPending(RetivoxUser user) {
+  Future<void> syncPending(RetivoxUser user, {String? localId}) {
     final activeSync = _activeSyncs[user.id];
     if (activeSync != null) return activeSync;
     late final Future<void> sync;
-    sync = _syncWithLease(user).whenComplete(() {
+    sync = _syncWithLease(user, localId: localId).whenComplete(() {
       if (identical(_activeSyncs[user.id], sync)) {
         _activeSyncs.remove(user.id);
       }
@@ -426,7 +448,7 @@ class SaleRepository {
     return sync;
   }
 
-  Future<void> _syncWithLease(RetivoxUser user) async {
+  Future<void> _syncWithLease(RetivoxUser user, {String? localId}) async {
     final ownerId = const Uuid().v4();
     final acquired = await database.tryAcquireSaleSyncLock(
       accountId: user.id,
@@ -435,13 +457,13 @@ class SaleRepository {
     );
     if (!acquired) return;
     try {
-      await _syncPending(user);
+      await _syncPending(user, localId: localId);
     } finally {
       await database.releaseSaleSyncLock(accountId: user.id, ownerId: ownerId);
     }
   }
 
-  Future<void> _syncPending(RetivoxUser user) async {
+  Future<void> _syncPending(RetivoxUser user, {String? localId}) async {
     final supabase = client;
     if (supabase == null) return;
 
@@ -449,7 +471,7 @@ class SaleRepository {
     // date casts and the retired requirement for a per-sale deposit code.
     await _retryKnownLegacyCashFailures(user);
 
-    final pending = await database.pendingSales(user.id);
+    final pending = await database.pendingSales(user.id, localId: localId);
     if (pending.isEmpty) return;
 
     try {
@@ -457,6 +479,7 @@ class SaleRepository {
       if (response.user?.id != user.id) {
         for (final row in pending) {
           await database.updateSale(
+            accountId: user.id,
             localId: row.read<String>('local_id'),
             status: 'pending_sync',
             errorMessage:
@@ -468,6 +491,7 @@ class SaleRepository {
     } catch (error) {
       for (final row in pending) {
         await database.updateSale(
+          accountId: user.id,
           localId: row.read<String>('local_id'),
           status: 'pending_sync',
           errorMessage: error.toString(),
@@ -478,7 +502,11 @@ class SaleRepository {
 
     for (final row in pending) {
       final localId = row.read<String>('local_id');
-      await database.updateSale(localId: localId, status: 'syncing');
+      await database.updateSale(
+        accountId: user.id,
+        localId: localId,
+        status: 'syncing',
+      );
       try {
         final payload = await vault.decryptForAccount(
           user.id,
@@ -512,29 +540,44 @@ class SaleRepository {
         );
         updatedPayload['previewTotal'] = confirmedTotal;
         await database.replaceSalePayload(
-          localId,
-          await vault.encryptForAccount(user.id, updatedPayload),
+          accountId: user.id,
+          localId: localId,
+          encryptedPayload: await vault.encryptForAccount(
+            user.id,
+            updatedPayload,
+          ),
         );
         await database.updateSale(
+          accountId: user.id,
           localId: localId,
           status: 'synced',
           serverId: resultRow['transaction_id'] as String,
         );
       } on PostgrestException catch (error) {
         await database.updateSale(
+          accountId: user.id,
           localId: localId,
           status: 'needs_correction',
           errorMessage: error.message,
         );
       } on SocketException {
-        await database.updateSale(localId: localId, status: 'pending_sync');
+        await database.updateSale(
+          accountId: user.id,
+          localId: localId,
+          status: 'pending_sync',
+        );
         return;
       } on TimeoutException {
-        await database.updateSale(localId: localId, status: 'pending_sync');
+        await database.updateSale(
+          accountId: user.id,
+          localId: localId,
+          status: 'pending_sync',
+        );
         return;
       } catch (error) {
         if (_isNetworkError(error)) {
           await database.updateSale(
+            accountId: user.id,
             localId: localId,
             status: 'pending_sync',
             errorMessage: error.toString(),
@@ -542,6 +585,7 @@ class SaleRepository {
           return;
         }
         await database.updateSale(
+          accountId: user.id,
           localId: localId,
           status: 'needs_correction',
           errorMessage: error.toString(),
@@ -579,10 +623,15 @@ class SaleRepository {
         }
         if (dueDate.isEmpty) payload['dueDate'] = null;
         await database.replaceSalePayload(
-          localId,
-          await vault.encryptForAccount(user.id, payload),
+          accountId: user.id,
+          localId: localId,
+          encryptedPayload: await vault.encryptForAccount(user.id, payload),
         );
-        await database.updateSale(localId: localId, status: 'pending_sync');
+        await database.updateSale(
+          accountId: user.id,
+          localId: localId,
+          status: 'pending_sync',
+        );
       } catch (_) {
         // Leave the failed record visible for correction if it cannot be
         // decrypted or safely repaired.
@@ -622,39 +671,120 @@ class SaleRepository {
       (total, item) => total + SaleProduct._number(item['previewLineTotal']),
     );
     await database.replaceSalePayload(
-      localId,
-      await vault.encryptForAccount(accountId, payload),
+      accountId: accountId,
+      localId: localId,
+      encryptedPayload: await vault.encryptForAccount(accountId, payload),
     );
-    await database.updateSale(localId: localId, status: 'pending_sync');
+    await database.updateSale(
+      accountId: accountId,
+      localId: localId,
+      status: 'pending_sync',
+      errorMessage: null,
+    );
   }
 
-  Future<void> cancelSale(String localId) =>
-      database.updateSale(localId: localId, status: 'cancelled');
+  Future<void> retrySale(RetivoxUser user, String localId) async {
+    final rows = await database.salesForAccount(user.id);
+    final row = rows
+        .where((sale) => sale.read<String>('local_id') == localId)
+        .firstOrNull;
+    if (row == null) {
+      throw const SaleRepositoryException('The saved sale could not be found.');
+    }
+    final status = row.read<String>('status');
+    if (status == 'synced' || status == 'cancelled') {
+      throw const SaleRepositoryException(
+        'Only an unsynced sale can be retried.',
+      );
+    }
+
+    try {
+      await vault.decryptForAccount(
+        user.id,
+        row.read<String>('encrypted_payload'),
+      );
+    } catch (error) {
+      final message =
+          'This local sale could not be authenticated and is still preserved. '
+          'It cannot sync until its saved data is recovered. You can cancel it.';
+      await database.updateSale(
+        accountId: user.id,
+        localId: localId,
+        status: 'needs_correction',
+        errorMessage: message,
+      );
+      throw SaleRepositoryException(message);
+    }
+
+    await database.updateSale(
+      accountId: user.id,
+      localId: localId,
+      status: 'pending_sync',
+      errorMessage: null,
+    );
+    await syncPending(user, localId: localId);
+  }
+
+  Future<bool> cancelSale(String accountId, String localId) =>
+      database.cancelPendingSale(accountId: accountId, localId: localId);
 
   Future<List<LocalSale>> listSales(String accountId) async {
     final rows = await database.salesForAccount(accountId);
+    return _decodeSales(rows, accountId);
+  }
+
+  Future<List<LocalSale>> listPendingSales(String accountId) async {
+    final rows = await database.actionableSales(accountId);
+    return _decodeSales(rows, accountId);
+  }
+
+  Future<List<LocalSale>> _decodeSales(dynamic rows, String accountId) async {
     final sales = <LocalSale>[];
     for (final row in rows) {
-      final payload = await vault.decryptForAccount(
-        accountId,
-        row.read<String>('encrypted_payload'),
-      );
-      sales.add(
-        LocalSale(
-          localId: row.read<String>('local_id'),
-          branchId: row.read<String>('branch_id'),
-          status: row.read<String>('status'),
-          recordedAt: row.read<String>('recorded_at'),
-          totalAmount: SaleProduct._number(payload['previewTotal']),
-          items: (payload['items'] as List? ?? const [])
-              .whereType<Map<String, dynamic>>()
-              .toList(),
-          errorMessage: row.readNullable<String>('error_message'),
-          serverId: row.readNullable<String>('server_id'),
-          paymentMethod: payload['paymentMethod']?.toString() ?? 'cash',
-          mpesaReference: payload['mpesaRefCode']?.toString(),
-        ),
-      );
+      final localId = row.read<String>('local_id');
+      final branchId = row.read<String>('branch_id');
+      final status = row.read<String>('status');
+      final recordedAt = row.read<String>('recorded_at');
+      try {
+        final payload = await vault.decryptForAccount(
+          accountId,
+          row.read<String>('encrypted_payload'),
+        );
+        sales.add(
+          LocalSale(
+            localId: localId,
+            branchId: branchId,
+            status: status,
+            recordedAt: recordedAt,
+            totalAmount: SaleProduct._number(payload['previewTotal']),
+            items: (payload['items'] as List? ?? const [])
+                .whereType<Map<String, dynamic>>()
+                .toList(),
+            errorMessage: row.readNullable<String>('error_message'),
+            serverId: row.readNullable<String>('server_id'),
+            paymentMethod: payload['paymentMethod']?.toString() ?? 'cash',
+            mpesaReference: payload['mpesaRefCode']?.toString(),
+          ),
+        );
+      } catch (error) {
+        // A single damaged local row must never hide the rest of an account's
+        // sales or prevent the POS screen from opening. Keep its identifiers
+        // and status so staff can safely cancel it without decrypting it.
+        sales.add(
+          LocalSale(
+            localId: localId,
+            branchId: branchId,
+            status: status,
+            recordedAt: recordedAt,
+            totalAmount: 0,
+            items: const [],
+            errorMessage: error.toString(),
+            serverId: row.readNullable<String>('server_id'),
+            paymentMethod: 'unknown',
+            payloadReadable: false,
+          ),
+        );
+      }
     }
     return sales;
   }

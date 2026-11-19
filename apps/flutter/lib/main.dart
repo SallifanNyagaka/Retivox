@@ -25,7 +25,9 @@ Future<void> main(List<String> arguments) async {
   _installRuntimeErrorReporting();
 
   if (Platform.isAndroid || Platform.isIOS) {
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersive);
+    // Preserve the phone's status and navigation bars. Immersive mode hides
+    // system affordances and makes the app feel like the desktop kiosk build.
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
   }
 
   // Offline sales and active dashboard caches use SQLite. Hive was only used

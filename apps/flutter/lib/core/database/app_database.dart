@@ -185,6 +185,12 @@ class AppDatabase extends GeneratedDatabase {
     return rows.isEmpty ? null : rows.first.read<String>('encrypted_payload');
   }
 
+  Future<void> deleteCachedValue(String accountId, String key) =>
+      customStatement(
+        'DELETE FROM cached_data WHERE account_id = ? AND cache_key = ?',
+        [accountId, key],
+      );
+
   Future<String?> cachedValueUpdatedAt(String accountId, String key) async {
     final rows = await customSelect(
       'SELECT updated_at FROM cached_data WHERE account_id = ? AND cache_key = ?',
@@ -211,11 +217,28 @@ class AppDatabase extends GeneratedDatabase {
     );
   }
 
-  Future<List<QueryRow>> pendingSales(String accountId) => customSelect(
-    '''
-        SELECT local_id, branch_id, status, encrypted_payload, recorded_at
+  Future<List<QueryRow>> pendingSales(String accountId, {String? localId}) {
+    final localFilter = localId == null ? '' : 'AND local_id = ?';
+    final variables = <Variable>[Variable.withString(accountId)];
+    if (localId != null) variables.add(Variable.withString(localId));
+    return customSelect('''
+        SELECT local_id, branch_id, status, encrypted_payload, recorded_at,
+               error_message
         FROM offline_sales
-        WHERE account_id = ? AND status IN ('pending_sync', 'syncing')
+        WHERE account_id = ?
+          AND status IN ('pending_sync', 'syncing')
+          $localFilter
+        ORDER BY recorded_at ASC
+        ''', variables: variables).get();
+  }
+
+  Future<List<QueryRow>> actionableSales(String accountId) => customSelect(
+    '''
+        SELECT local_id, branch_id, status, encrypted_payload, recorded_at,
+               error_message
+        FROM offline_sales
+        WHERE account_id = ?
+          AND status IN ('pending_sync', 'syncing', 'needs_correction')
         ORDER BY recorded_at ASC
         ''',
     variables: [Variable.withString(accountId)],
@@ -249,14 +272,41 @@ class AppDatabase extends GeneratedDatabase {
     variables: [Variable.withString(accountId)],
   ).get();
 
-  Future<void> replaceSalePayload(
-    String localId,
-    String encryptedPayload,
-  ) async {
+  Future<void> replaceSalePayload({
+    required String accountId,
+    required String localId,
+    required String encryptedPayload,
+  }) async {
     await customStatement(
-      'UPDATE offline_sales SET encrypted_payload = ?, updated_at = ? WHERE local_id = ?',
-      [encryptedPayload, DateTime.now().toUtc().toIso8601String(), localId],
+      'UPDATE offline_sales SET encrypted_payload = ?, updated_at = ? WHERE account_id = ? AND local_id = ?',
+      [
+        encryptedPayload,
+        DateTime.now().toUtc().toIso8601String(),
+        accountId,
+        localId,
+      ],
     );
+  }
+
+  Future<bool> cancelPendingSale({
+    required String accountId,
+    required String localId,
+  }) async {
+    final changed = await customUpdate(
+      '''
+      UPDATE offline_sales
+      SET status = 'cancelled', error_message = NULL, updated_at = ?
+      WHERE account_id = ? AND local_id = ?
+        AND status IN ('pending_sync', 'needs_correction')
+      ''',
+      variables: [
+        Variable.withString(DateTime.now().toUtc().toIso8601String()),
+        Variable.withString(accountId),
+        Variable.withString(localId),
+      ],
+      updates: const {},
+    );
+    return changed > 0;
   }
 
   Future<int> countSalesForAccount(String accountId) async {
@@ -300,6 +350,7 @@ class AppDatabase extends GeneratedDatabase {
   );
 
   Future<void> updateSale({
+    required String accountId,
     required String localId,
     required String status,
     String? serverId,
@@ -310,13 +361,14 @@ class AppDatabase extends GeneratedDatabase {
       UPDATE offline_sales
       SET status = ?, server_id = COALESCE(?, server_id),
           error_message = ?, updated_at = ?
-      WHERE local_id = ?
+      WHERE account_id = ? AND local_id = ?
       ''',
       [
         status,
         serverId,
         errorMessage,
         DateTime.now().toUtc().toIso8601String(),
+        accountId,
         localId,
       ],
     );

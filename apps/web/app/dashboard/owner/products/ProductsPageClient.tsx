@@ -21,6 +21,7 @@ import EditProductModal from './EditProductModal'
 import { importProducts } from './actions'
 import { deleteUnusedUOMAction, updateUOMAction, type FormState as UOMFormState } from './uom-actions'
 import type { UnitOfMeasure } from '../../../../lib/uom/server'
+import type { BarcodeOwner } from '../../../../lib/barcodes/similarity'
 
 type ProductPricing = {
   base_price: string
@@ -85,6 +86,7 @@ type ProductStockBreakdown = {
 
 type Props = {
   products: Product[]
+  barcodeOwners?: BarcodeOwner[]
   currency: string
   uoms?: UnitOfMeasure[]
   allUoms?: UnitOfMeasure[]
@@ -662,6 +664,7 @@ function formatPricingOptions(product: Product, currency: string, branches: Arra
  */
 export default function ProductsPageClient({
   products,
+  barcodeOwners = [],
   currency,
   uoms = [],
   allUoms = uoms,
@@ -793,7 +796,7 @@ export default function ProductsPageClient({
               }}
             />
           </div>
-          {!readOnly && <AddProductForm currency={currency} uoms={uoms} branches={branches} />}
+          {!readOnly && <AddProductForm currency={currency} uoms={uoms} branches={branches} existingProducts={products} barcodeOwners={barcodeOwners} />}
         </div>
       </div>
 
@@ -898,7 +901,7 @@ export default function ProductsPageClient({
               {readOnly ? 'Adjust your search to find a product.' : 'Add your first product or adjust your search.'}
             </p>
           </div>
-          {!readOnly && <AddProductForm currency={currency} uoms={uoms} branches={branches} />}
+          {!readOnly && <AddProductForm currency={currency} uoms={uoms} branches={branches} existingProducts={products} barcodeOwners={barcodeOwners} />}
         </div>
       ) : (
         <Card>
@@ -1041,6 +1044,12 @@ export default function ProductsPageClient({
                               <p style={{ margin: 0, fontSize: 13, color: 'var(--color-text-primary)' }}>Subcategory: {product.subcategory || '-'}</p>
                               <p style={{ margin: '5px 0 0', fontSize: 13, color: 'var(--color-text-primary)' }}>Family: {product.brand_family || '-'}</p>
                               <p style={{ margin: '5px 0 0', fontSize: 13, color: 'var(--color-text-primary)' }}>Description: {product.description || '-'}</p>
+                              <p style={{ margin: '8px 0 5px', fontSize: 13, fontWeight: 700, color: 'var(--color-text-primary)' }}>Barcodes</p>
+                              {product.barcodes?.length ? (
+                                <div className="flex flex-wrap gap-2">
+                                  {product.barcodes.map((code) => <Badge key={`barcode-${product.id}-${code}`} variant="muted">{code}</Badge>)}
+                                </div>
+                              ) : <p style={{ margin: 0, fontSize: 13, color: 'var(--color-text-muted)' }}>No barcodes assigned</p>}
                             </div>
                             <div>
                               <p style={{ margin: '0 0 8px', fontSize: 12, fontWeight: 800, color: 'var(--color-text-muted)' }}>All UOMs</p>
@@ -1111,6 +1120,8 @@ export default function ProductsPageClient({
           product={selectedProduct}
           uoms={uoms}
           branches={branches}
+          existingProducts={products}
+          barcodeOwners={barcodeOwners}
           isOpen={isEditOpen}
           onClose={() => setIsEditOpen(false)}
         />

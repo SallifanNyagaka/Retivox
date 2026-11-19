@@ -197,6 +197,8 @@ BEGIN
    WHERE t.id=r.transaction_id AND t.business_id=v_business_id AND t.employee_id=v_actor;
   IF NOT FOUND THEN RAISE EXCEPTION 'Unable to bind local request ID to the saved transaction'; END IF;
   PERFORM public.finalize_sale_payment(r.transaction_id,p_payment_method,p_amount_paid,p_amount_tendered,p_reference_code,p_customer_email,p_due_date,p_is_credit);
+  UPDATE public.payments AS payment SET cash_deposit_code=NULL
+   WHERE payment.transaction_id=r.transaction_id AND payment.business_id=v_business_id AND payment.payment_method='cash';
   RETURN QUERY SELECT r.transaction_id,r.status,r.recorded_at,r.total_amount;
 END; $$;
 
@@ -240,8 +242,6 @@ BEGIN
    WHERE t.id=r.transaction_id AND t.business_id=v_business_id AND t.employee_id=v_actor;
   IF NOT FOUND THEN RAISE EXCEPTION 'Unable to bind local request ID to the saved transaction'; END IF;
   PERFORM public.finalize_sale_payment(r.transaction_id,p_payment_method,p_amount_paid,p_amount_tendered,p_reference_code,p_customer_email,p_due_date,p_is_credit);
-  UPDATE public.payments AS payment SET cash_deposit_code=NULL
-   WHERE payment.transaction_id=r.transaction_id AND payment.business_id=v_business_id AND payment.payment_method='cash';
   RETURN QUERY SELECT r.transaction_id,r.status,r.recorded_at,r.total_amount;
 END; $$;
 

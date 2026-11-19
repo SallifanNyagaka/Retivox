@@ -87,8 +87,7 @@ export async function POST(request: Request) {
     const serviceClient = createServiceRoleClient()
     const { data: payment, error: lookupError } = await serviceClient
       .from('subscription_payment_requests')
-      .select('id, amount, payer_phone, status, provider_merchant_request_id')
-      .eq('provider', 'daraja')
+      .select('id, amount, payer_phone, status, payment_method, provider, provider_merchant_request_id')
       .eq('provider_checkout_request_id', checkoutRequestId)
       .order('submitted_at', { ascending: false })
       .limit(1)
@@ -100,6 +99,13 @@ export async function POST(request: Request) {
 
     if (!payment) {
       return NextResponse.json({ ResultCode: 1, ResultDesc: 'Payment request not found' }, { status: 404 })
+    }
+
+    // Older STK requests did not persist provider='daraja' alongside their
+    // checkout ID. Accept those pending requests while still rejecting other
+    // tenders, then repair the marker so the settlement RPC can match them.
+    if (payment.payment_method !== 'mpesa_stk' || (payment.provider && payment.provider !== 'daraja')) {
+      return NextResponse.json({ ResultCode: 1, ResultDesc: 'Payment request is not a Daraja STK checkout' }, { status: 409 })
     }
 
     if (payment.status !== 'pending') {
@@ -136,6 +142,15 @@ export async function POST(request: Request) {
       if (!receiptNumber || !Number.isFinite(paidAmount) || paidAmount !== Number(payment.amount) || normalizedPhone !== payment.payer_phone) {
         return NextResponse.json({ ResultCode: 1, ResultDesc: 'Payment details mismatch' }, { status: 400 })
       }
+    }
+
+    if (payment.provider !== 'daraja') {
+      const { error: providerError } = await serviceClient
+        .from('subscription_payment_requests')
+        .update({ provider: 'daraja' })
+        .eq('id', payment.id)
+        .eq('status', 'pending')
+      if (providerError) throw providerError
     }
 
     const { data: processed, error } = await serviceClient.rpc('platform_record_daraja_payment_result_v2', {

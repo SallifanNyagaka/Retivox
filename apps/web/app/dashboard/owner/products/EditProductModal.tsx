@@ -9,7 +9,10 @@
 import { startTransition, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { useActionState } from 'react'
 import { useRouter } from 'next/navigation'
+import { ScanBarcode } from 'lucide-react'
 import Modal from '../../../../components/ui/Modal'
+import BarcodeCameraDialog from '../../../../components/barcode/BarcodeCameraDialog'
+import { barcodeConfusableKey, findConfusableBarcode, normalizeBarcode, type BarcodeOwner } from '../../../../lib/barcodes/similarity'
 import Toast from '../../../../components/ui/Toast'
 import LoadingOverlay from '../../../../components/ui/LoadingOverlay'
 import { useToast } from '../../../../lib/hooks/useToast'
@@ -100,6 +103,8 @@ type Props = {
   currency: string
   uoms: UnitOfMeasure[]
   branches: BranchOption[]
+  existingProducts?: Array<{ id: string; name: string; barcodes?: string[] }>
+  barcodeOwners?: BarcodeOwner[]
   isOpen: boolean
   onClose: () => void
 }
@@ -245,7 +250,7 @@ function dedupeUoms(uoms: UnitOfMeasure[]): UnitOfMeasure[] {
 /**
  * Client-side edit modal for existing products.
  */
-export default function EditProductModal({ product, currency, uoms, branches, isOpen, onClose }: Props) {
+export default function EditProductModal({ product, currency, uoms, branches, existingProducts = [], barcodeOwners: barcodeOwnersProp, isOpen, onClose }: Props) {
   const router = useRouter()
   const [createUnitOpen, setCreateUnitOpen] = useState(false)
   const [availableUoms, setAvailableUoms] = useState<UnitOfMeasure[]>(dedupeUoms(uoms))
@@ -253,6 +258,8 @@ export default function EditProductModal({ product, currency, uoms, branches, is
   const [name, setName] = useState('')
   const [sku, setSku] = useState('')
   const [barcodes, setBarcodes] = useState('')
+  const [barcodeScannerOpen, setBarcodeScannerOpen] = useState(false)
+  const barcodeFieldRef = useRef<HTMLTextAreaElement>(null)
   const [category, setCategory] = useState('')
   const [subcategory, setSubcategory] = useState('')
   const [brandFamily, setBrandFamily] = useState('')
@@ -290,6 +297,58 @@ export default function EditProductModal({ product, currency, uoms, branches, is
   const previousPending = useRef(isPending)
   const previousUOMPending = useRef(uomPending)
   const previousRemoveUOMPending = useRef(removeUomPending)
+
+  const barcodeOwners: BarcodeOwner[] = barcodeOwnersProp ?? existingProducts.flatMap((item) =>
+    (item.barcodes ?? []).map((code) => ({ productId: item.id, productName: item.name, code }))
+  )
+  const barcodeNotice = (() => {
+    const codes = barcodes.split(/[\r\n,]+/).map((code) => code.trim()).filter(Boolean)
+    for (let index = 0; index < codes.length; index += 1) {
+      const code = codes[index]
+      const exact = barcodeOwners.find((owner) => owner.productId !== product?.id && normalizeBarcode(owner.code) === normalizeBarcode(code))
+      if (exact) return `Barcode ${code} is already attached to ${exact.productName}.`
+      const similar = findConfusableBarcode(code, barcodeOwners, product?.id)
+      if (similar) return `Barcode ${code} is too similar to ${similar.code} on ${similar.productName}. Check the scan before saving.`
+      for (const previous of codes.slice(0, index)) {
+        if (normalizeBarcode(previous) === normalizeBarcode(code)) return `Barcode ${code} is entered more than once.`
+        if (barcodeConfusableKey(previous) === barcodeConfusableKey(code)) return `Barcode ${code} is too similar to another barcode in this form.`
+      }
+    }
+    return ''
+  })()
+
+  const appendBarcode = (value: string) => {
+    const code = value.trim()
+    if (!code) return
+    const codes = barcodes.split(/[\r\n,]+/).map((item) => item.trim()).filter(Boolean)
+    const exact = barcodeOwners.find((owner) => owner.productId !== product?.id && normalizeBarcode(owner.code) === normalizeBarcode(code))
+    const similar = findConfusableBarcode(code, barcodeOwners, product?.id)
+    const draftSimilar = codes.find((item) => barcodeConfusableKey(item) === barcodeConfusableKey(code) && normalizeBarcode(item) !== normalizeBarcode(code))
+    if (exact || similar || draftSimilar) {
+      const match = exact ?? similar
+      const message = match
+        ? exact
+          ? `Barcode ${code} is already attached to ${match.productName}.`
+          : `Barcode ${code} is too similar to ${match.code} on ${match.productName}. Check the scan.`
+        : `Barcode ${code} is too similar to another barcode in this form.`
+      toast.error(message)
+      setBarcodeScannerOpen(false)
+      return
+    }
+    if (!codes.some((item) => item.toUpperCase() === code.toUpperCase())) {
+      setBarcodes([...codes, code].join('\n'))
+    }
+    setBarcodeScannerOpen(false)
+  }
+
+  const scanBarcode = () => {
+    if (typeof window !== 'undefined' && 'BarcodeDetector' in window) {
+      setBarcodeScannerOpen(true)
+      return
+    }
+    barcodeFieldRef.current?.focus()
+    barcodeFieldRef.current?.setSelectionRange(barcodes.length, barcodes.length)
+  }
   const visibleUoms = useMemo(() => dedupeUoms(availableUoms), [availableUoms])
   const selectedBaseUom = visibleUoms.find((uom) => uom.id === selectedBaseUomId) ?? null
   const selectedPurchaseUoms = purchaseUomIds.map((uomId) => visibleUoms.find((uom) => uom.id === uomId)).filter((uom): uom is UnitOfMeasure => Boolean(uom))
@@ -995,16 +1054,24 @@ export default function EditProductModal({ product, currency, uoms, branches, is
               </div>
             )}
 
-            <label style={{ fontSize: 13 }}>
-              <span style={{ display: 'block', marginBottom: 6, fontWeight: 500 }}>Add barcode values</span>
-              <textarea
-                value={barcodes}
-                onChange={(event) => setBarcodes(event.target.value)}
-                rows={2}
-                placeholder="One new barcode per line. Existing codes stay linked."
-                style={{ width: '100%', border: '1px solid var(--color-border)', borderRadius: 8, padding: '10px 12px', boxSizing: 'border-box', resize: 'vertical', fontSize: 13 }}
-              />
-            </label>
+            <div style={{ fontSize: 13 }}>
+              <span style={{ display: 'block', marginBottom: 6, fontWeight: 500 }}>Product barcodes</span>
+              <div className="flex items-start gap-2">
+                <textarea
+                  ref={barcodeFieldRef}
+                  value={barcodes}
+                  onChange={(event) => setBarcodes(event.target.value)}
+                  rows={2}
+                  placeholder="One barcode per line. The list shown here is the saved set."
+                  style={{ flex: 1, minWidth: 0, border: '1px solid var(--color-border)', borderRadius: 8, padding: '10px 12px', boxSizing: 'border-box', resize: 'vertical', fontSize: 13 }}
+                />
+                <button type="button" className="btn-outline" title="Scan barcode" aria-label="Scan barcode" onClick={scanBarcode} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, borderRadius: 8, padding: '9px 12px' }}>
+                  <ScanBarcode size={17} /> Scan
+                </button>
+              </div>
+              <p style={{ margin: '6px 0 0', color: 'var(--color-text-muted)', fontSize: 12 }}>Edit the full list: add, change, or remove a line. Leaving it empty removes all active barcodes.</p>
+              {barcodeNotice && <p role="alert" style={{ margin: '6px 0 0', color: 'var(--color-danger)', fontSize: 12 }}>{barcodeNotice}</p>}
+            </div>
             <label style={{ fontSize: 13 }}>
               <span style={{ display: 'block', marginBottom: 6, fontWeight: 500 }}>Description</span>
               <textarea
@@ -1175,6 +1242,14 @@ export default function EditProductModal({ product, currency, uoms, branches, is
           </div>
         </form>
       </Modal>
+
+      {barcodeScannerOpen && (
+        <BarcodeCameraDialog
+          title="Scan product barcode"
+          onDetected={(code) => { appendBarcode(code); return true }}
+          onClose={() => setBarcodeScannerOpen(false)}
+        />
+      )}
 
       <Modal isOpen={createUnitOpen} title="Create new unit" onClose={() => setCreateUnitOpen(false)}>
         <form onSubmit={onCreateUnitSubmit}>

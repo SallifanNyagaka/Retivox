@@ -13,6 +13,7 @@ import { requireRole } from '../../../../lib/auth/helpers'
 import { createProductSchema, GlobalRole, setPricingSchema } from '@smartretail/shared'
 import logger from '../../../../lib/logger'
 import { getSpreadsheetValue, parseSpreadsheetFile } from '../../../../lib/spreadsheets/workbooks'
+import { barcodeConfusableKey, normalizeBarcode } from '../../../../lib/barcodes/similarity'
 
 export type FormState = {
   error: string | null
@@ -42,9 +43,21 @@ const getStrings = (formData: FormData, key: string): string[] => {
 }
 
 function parseBarcodeCodes(value: string): { codes?: string[]; error?: string } {
-  const codes = [...new Set(value.split(/[\r\n,]+/).map((code) => code.trim()).filter(Boolean))]
+  const codes: string[] = []
+  const seen = new Set<string>()
+  for (const code of value.split(/[\r\n,]+/).map((item) => item.trim()).filter(Boolean)) {
+    const normalized = normalizeBarcode(code)
+    if (seen.has(normalized)) continue
+    seen.add(normalized)
+    codes.push(code)
+  }
   if (codes.length > 25) return { error: 'Add no more than 25 barcode values at once' }
   if (codes.some((code) => code.length > 128)) return { error: 'Each barcode must be 128 characters or fewer' }
+  for (let index = 0; index < codes.length; index += 1) {
+    if (codes.slice(0, index).some((previous) => barcodeConfusableKey(previous) === barcodeConfusableKey(codes[index]))) {
+      return { error: `Barcode ${codes[index]} is too similar to another barcode in this product. Check the scanned values.` }
+    }
+  }
   return { codes }
 }
 
@@ -54,28 +67,52 @@ async function saveProductBarcodeCodes(
   productId: string,
   codes: string[]
 ): Promise<string | null> {
-  if (codes.length === 0) return null
   const existingResponse = await supabase
     .from('product_barcodes')
-    .select('code, product_id')
+    .select('id, code, product_id, is_active')
     .eq('business_id', businessId)
   if (existingResponse.error) return existingResponse.error.message
 
-  const existingByCode = new Map(
-    (existingResponse.data ?? []).map((row) => [row.code.trim().toUpperCase(), row.product_id])
-  )
-  const conflict = codes.find((code) => {
-    const existingProductId = existingByCode.get(code.toUpperCase())
-    return existingProductId && existingProductId !== productId
-  })
-  if (conflict) return `Barcode ${conflict} is already assigned to another product`
+  const existing = existingResponse.data ?? []
+  const byCode = new Map(existing.map((row) => [normalizeBarcode(row.code), row]))
+  const requested = new Set(codes.map(normalizeBarcode))
 
-  const newCodes = codes.filter((code) => !existingByCode.has(code.toUpperCase()))
-  if (newCodes.length === 0) return null
-  const insertResponse = await supabase.from('product_barcodes').insert(
-    newCodes.map((code) => ({ business_id: businessId, product_id: productId, code, source: 'manufacturer' }))
-  )
-  return insertResponse.error?.message ?? null
+  for (const code of codes) {
+    const exact = byCode.get(normalizeBarcode(code))
+    if (exact && exact.product_id !== productId) return `Barcode ${code} is already assigned to another product`
+    const similar = existing.find((row) =>
+      row.product_id !== productId && row.is_active &&
+      normalizeBarcode(row.code) !== normalizeBarcode(code) &&
+      barcodeConfusableKey(row.code) === barcodeConfusableKey(code)
+    )
+    if (similar) return `Barcode ${code} is too similar to ${similar.code}, which is assigned to another product. Check the scanned value.`
+  }
+
+  const toReactivate = codes
+    .map((code) => byCode.get(normalizeBarcode(code)))
+    .filter((row): row is NonNullable<typeof row> => Boolean(row && row.product_id === productId && !row.is_active))
+    .map((row) => row.id)
+  if (toReactivate.length > 0) {
+    const { error } = await supabase.from('product_barcodes').update({ is_active: true }).in('id', toReactivate).eq('business_id', businessId)
+    if (error) return error.message
+  }
+
+  const newCodes = codes.filter((code) => !byCode.has(normalizeBarcode(code)))
+  if (newCodes.length > 0) {
+    const insertResponse = await supabase.from('product_barcodes').insert(
+      newCodes.map((code) => ({ business_id: businessId, product_id: productId, code, source: 'manufacturer' }))
+    )
+    if (insertResponse.error) return insertResponse.error.message
+  }
+
+  const toDeactivate = existing
+    .filter((row) => row.product_id === productId && row.is_active && !requested.has(normalizeBarcode(row.code)))
+    .map((row) => row.id)
+  if (toDeactivate.length > 0) {
+    const { error } = await supabase.from('product_barcodes').update({ is_active: false }).in('id', toDeactivate).eq('business_id', businessId)
+    if (error) return error.message
+  }
+  return null
 }
 
 /**

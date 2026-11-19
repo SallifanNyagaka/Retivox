@@ -65,6 +65,7 @@ export type ProductCatalogRow = {
   product_kind?: 'fixed_package' | 'measured_counted'
   unit: string
   description: string | null
+  barcodes?: string[]
   is_active: boolean
   created_at: string
   product_pricing?: ProductPricingRow[] | null
@@ -233,14 +234,34 @@ export async function getAdminProductDashboardData(userId: string, businessId: s
 
     const products = (productsResponse.data ?? []) as ProductCatalogRow[]
     const productIds = products.map((product) => product.id)
+    let productsWithBarcodes = products
+    if (productIds.length > 0) {
+      const barcodeResponse = await supabase
+        .from('product_barcodes')
+        .select('product_id, code')
+        .eq('business_id', businessId)
+        .eq('is_active', true)
+        .in('product_id', productIds)
+      if (barcodeResponse.error) {
+        logger.warn('Admin product barcodes could not be loaded', { userId, businessId, error: barcodeResponse.error })
+      } else {
+        const byProduct = new Map<string, string[]>()
+        for (const row of barcodeResponse.data ?? []) {
+          const codes = byProduct.get(row.product_id) ?? []
+          codes.push(row.code)
+          byProduct.set(row.product_id, codes)
+        }
+        productsWithBarcodes = products.map((product) => ({ ...product, barcodes: byProduct.get(product.id) ?? [] }))
+      }
+    }
 
     if (adminBranchIds.length === 0 || productIds.length === 0) {
       return {
-        products,
+        products: productsWithBarcodes,
         currency: business.currency,
         productStocks: [],
         assignedBranchCount: adminBranchIds.length,
-        metrics: calculateProductMetrics(products),
+        metrics: calculateProductMetrics(productsWithBarcodes),
       }
     }
 
@@ -259,11 +280,11 @@ export async function getAdminProductDashboardData(userId: string, businessId: s
     }
 
     return {
-      products,
+      products: productsWithBarcodes,
       currency: business.currency,
       productStocks: mapProductStocks((stockResponse.data ?? []) as ProductStockRow[]),
       assignedBranchCount: adminBranchIds.length,
-      metrics: calculateProductMetrics(products),
+      metrics: calculateProductMetrics(productsWithBarcodes),
     }
   } catch (error: unknown) {
     logger.error('getAdminProductDashboardData failed', { userId, businessId, error })

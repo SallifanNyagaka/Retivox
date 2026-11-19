@@ -212,6 +212,7 @@ export async function POST(request: Request) {
 
   const { error: statusError } = await supabase.from('subscription_payment_requests')
     .update({
+      provider: 'daraja',
       provider_merchant_request_id: providerResponse.MerchantRequestID ?? null,
       provider_checkout_request_id: providerResponse.CheckoutRequestID,
       provider_result_description: providerResponse.CustomerMessage ??

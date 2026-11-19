@@ -11,6 +11,7 @@ import '../../core/auth/offline_account_vault.dart';
 import '../../core/auth/retivox_user.dart';
 import '../../core/network/web_api_client.dart';
 import '../../core/network/backend_health_check.dart';
+import 'barcode_similarity.dart';
 
 class DashboardSnapshot {
   const DashboardSnapshot({
@@ -1776,39 +1777,86 @@ class DashboardRepository {
     String productId,
     List<String> requestedCodes,
   ) async {
-    final codes = requestedCodes
-        .map((code) => code.trim())
-        .where((code) => code.isNotEmpty)
-        .toSet()
-        .toList();
+    final uniqueCodes = <String, String>{};
+    for (final value in requestedCodes) {
+      final code = value.trim();
+      if (code.isNotEmpty) {
+        uniqueCodes.putIfAbsent(normalizeBarcode(code), () => code);
+      }
+    }
+    final codes = uniqueCodes.values.toList();
     if (codes.length > 25 || codes.any((code) => code.length > 128)) {
       throw const DashboardRepositoryException(
         'Add up to 25 barcode values, each no longer than 128 characters.',
       );
     }
-    if (codes.isEmpty) return;
+    for (var index = 0; index < codes.length; index++) {
+      final code = codes[index];
+      if (codes
+          .take(index)
+          .any(
+            (previous) =>
+                barcodeConfusableKey(previous) == barcodeConfusableKey(code),
+          )) {
+        throw DashboardRepositoryException(
+          'Barcode $code is too similar to another barcode in this product. Check the scanned values.',
+        );
+      }
+    }
 
     final rows = _normalizeRows(
       await supabase
           .from('product_barcodes')
-          .select('code, product_id')
+          .select('id, code, product_id, is_active')
           .eq('business_id', user.businessId),
     );
-    final existing = <String, String>{
-      for (final row in rows)
-        row['code'].toString().trim().toUpperCase(): row['product_id']
-            .toString(),
+    final existing = <String, Map<String, dynamic>>{
+      for (final row in rows) normalizeBarcode(row['code'].toString()): row,
     };
     for (final code in codes) {
-      final owner = existing[code.toUpperCase()];
-      if (owner != null && owner != productId) {
+      final exact = existing[normalizeBarcode(code)];
+      final ownerId = exact?['product_id']?.toString();
+      if (exact != null && ownerId != productId) {
         throw DashboardRepositoryException(
           'Barcode $code is already assigned to another product.',
         );
       }
+      final similar = rows.where((row) {
+        return row['product_id']?.toString() != productId &&
+            row['is_active'] == true &&
+            normalizeBarcode(row['code'].toString()) !=
+                normalizeBarcode(code) &&
+            barcodeConfusableKey(row['code'].toString()) ==
+                barcodeConfusableKey(code);
+      }).firstOrNull;
+      if (similar != null) {
+        throw DashboardRepositoryException(
+          'Barcode $code is too similar to ${similar['code']} on another product. Check the scanned value.',
+        );
+      }
     }
+
+    final requested = codes.map(normalizeBarcode).toSet();
+    final reactivateIds = rows
+        .where(
+          (row) =>
+              row['product_id']?.toString() == productId &&
+              row['is_active'] != true &&
+              requested.contains(normalizeBarcode(row['code'].toString())),
+        )
+        .map((row) => row['id']?.toString())
+        .whereType<String>()
+        .toList();
+    if (reactivateIds.isNotEmpty) {
+      await supabase
+          .from('product_barcodes')
+          .update({'is_active': true})
+          .eq('business_id', user.businessId)
+          .inFilter('id', reactivateIds);
+    }
+
     final inserts = codes
-        .where((code) => !existing.containsKey(code.toUpperCase()))
+        .where((code) => !existing.containsKey(normalizeBarcode(code)))
         .map(
           (code) => {
             'business_id': user.businessId,
@@ -1820,6 +1868,24 @@ class DashboardRepository {
         .toList();
     if (inserts.isNotEmpty) {
       await supabase.from('product_barcodes').insert(inserts);
+    }
+
+    final deactivateIds = rows
+        .where(
+          (row) =>
+              row['product_id']?.toString() == productId &&
+              row['is_active'] == true &&
+              !requested.contains(normalizeBarcode(row['code'].toString())),
+        )
+        .map((row) => row['id']?.toString())
+        .whereType<String>()
+        .toList();
+    if (deactivateIds.isNotEmpty) {
+      await supabase
+          .from('product_barcodes')
+          .update({'is_active': false})
+          .eq('business_id', user.businessId)
+          .inFilter('id', deactivateIds);
     }
   }
 

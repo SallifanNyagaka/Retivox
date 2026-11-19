@@ -14,6 +14,7 @@ import { getEmployeeProfile } from '../../../../lib/employee/auth'
 import logger from '../../../../lib/logger'
 import { createClient } from '../../../../lib/supabase/server'
 import PrintReceiptButton from './PrintReceiptButton'
+import OfflineSalesQueuePanel from './OfflineSalesQueuePanel'
 
 /**
  * Number of employee transactions shown per page.
@@ -481,6 +482,8 @@ export default async function EmployeeTransactionsPage({
           Record transaction
         </Link>
       </div>
+
+      <OfflineSalesQueuePanel userId={user.id} currency={currency} />
 
       {/* URL-driven filters */}
       <Card padding="md">

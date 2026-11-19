@@ -9,11 +9,14 @@
 import { startTransition, useEffect, useRef, useState, type FormEvent } from 'react'
 import { useActionState } from 'react'
 import { useRouter } from 'next/navigation'
+import { Camera, ScanBarcode } from 'lucide-react'
 import LoadingOverlay from '../../../../../components/ui/LoadingOverlay'
 import Toast from '../../../../../components/ui/Toast'
+import BarcodeCameraDialog from '../../../../../components/barcode/BarcodeCameraDialog'
 import { useToast } from '../../../../../lib/hooks/useToast'
 import { queueOfflineEmployeeSale } from '../../../../../lib/pwa/offlineEmployeeSales'
 import { createClient } from '../../../../../lib/supabase/client'
+import { findConfusableBarcode } from '../../../../../lib/barcodes/similarity'
 import { recordEmployeeTransaction, type EmployeeTransactionFormState } from './actions'
 
 type RecordTransactionAction = (
@@ -370,12 +373,20 @@ export default function RecordEmployeeTransactionForm({
   const previousPending = useRef(false)
   const requestIdRef = useRef(initialRequestId)
   const barcodeInputRef = useRef<HTMLInputElement>(null)
+  const scannedQuantityRef = useRef<HTMLInputElement>(null)
   const barcodeRowSequence = useRef(0)
+  const processingBarcodeRef = useRef(false)
   const [rows, setRows] = useState<LineItemDraft[]>(() => getInitialLineItems())
   const [scannerEnabled, setScannerEnabled] = useState(false)
   const [scannerSetupOpen, setScannerSetupOpen] = useState(false)
   const [barcodeInput, setBarcodeInput] = useState('')
   const [barcodeMessage, setBarcodeMessage] = useState('')
+  const [cameraScannerOpen, setCameraScannerOpen] = useState(false)
+  const [scannedProduct, setScannedProduct] = useState<EmployeeProductOption | null>(null)
+  const [scannedUomId, setScannedUomId] = useState('')
+  const [scannedQuantity, setScannedQuantity] = useState('1')
+  const [scanAnotherPrompt, setScanAnotherPrompt] = useState(false)
+  const [scanSource, setScanSource] = useState<'camera' | 'keyboard' | null>(null)
   const [paymentMethod, setPaymentMethod] = useState<'mpesa_manual' | 'mpesa_stk' | 'pesapal' | 'cash' | 'card' | 'bank_transfer' | 'other'>('mpesa_manual')
   const [splitPaymentMode, setSplitPaymentMode] = useState(false)
   const [splitPayments, setSplitPayments] = useState<Array<{ id: string; paymentMethod: SplitPaymentMethod; amount: string; amountTendered: string; referenceCode: string }>>([])
@@ -475,6 +486,32 @@ export default function RecordEmployeeTransactionForm({
   const discountTooHigh = Number.isFinite(discountValue) && discountValue > maxAllowedDiscount
   const safeDiscountValue = discountInvalid ? 0 : discountValue
   const totalPreview = Math.max(0, subtotalPreview - safeDiscountValue)
+  const scannedUom = scannedProduct?.uomOptions.find((uom) => uom.id === scannedUomId) ?? null
+  const scannedQuantityValue = Number(scannedQuantity)
+  const scannedBaseQuantity = scannedUom && Number.isFinite(scannedQuantityValue) && scannedQuantityValue > 0
+    ? getBaseQuantity(scannedQuantityValue, scannedUom)
+    : null
+  const scannedUnitBaseQuantity = scannedUom ? getBaseQuantity(1, scannedUom) : null
+  const scannedUnitPricing = scannedProduct && scannedUom && scannedUnitBaseQuantity
+    ? resolvePreviewPricing(scannedProduct, scannedUnitBaseQuantity, scannedUom.id)
+    : null
+  const scannedPricing = scannedProduct && scannedUom && scannedBaseQuantity
+    ? resolvePreviewPricing(scannedProduct, scannedBaseQuantity, scannedUom.id)
+    : null
+  const scannedAvailableBaseQuantity = scannedProduct
+    ? scannedProduct.baseQuantityOnHand - scannedProduct.baseQuantityReserved - (offlineDeductedByOption.get(scannedProduct.optionId) ?? 0)
+    : 0
+  const scannedQuantityError = !scannedProduct || !scannedUom
+    ? 'This product does not have a sale unit configured.'
+    : !Number.isFinite(scannedQuantityValue) || scannedQuantityValue <= 0
+      ? 'Enter a quantity greater than zero.'
+      : !scannedBaseQuantity
+        ? 'Enter a valid quantity for this unit.'
+        : (requestedBaseQuantityByOption.get(scannedProduct.optionId) ?? 0) + scannedBaseQuantity > scannedAvailableBaseQuantity
+          ? 'Quantity exceeds the available stock.'
+          : !scannedPricing
+            ? 'No approved price is configured for this quantity.'
+            : null
   const splitPaidTotal = splitPayments.reduce((sum, payment) => sum + (Number(payment.amount) || 0), 0)
   const effectivePaidNow = splitPaymentMode ? splitPaidTotal : Number(amountPaid || (isCredit ? 0 : totalPreview))
   const hasValidLine = lineSummaries.some((summary) => summary.product && summary.selectedUom && summary.quantity > 0)
@@ -547,43 +584,96 @@ export default function RecordEmployeeTransactionForm({
     )
   }
 
-  const handleBarcodeScan = (code: string) => {
+  const handleBarcodeScan = (code: string, source: 'camera' | 'keyboard' = 'keyboard') => {
+    if (processingBarcodeRef.current) return false
     const normalized = code.trim().toUpperCase()
-    if (!normalized) return
+    if (!normalized) return false
     const match = products.find((product) => product.barcodes.some((barcode) => barcode.trim().toUpperCase() === normalized))
     setBarcodeInput('')
-    window.requestAnimationFrame(() => barcodeInputRef.current?.focus())
     if (!match) {
-      setBarcodeMessage(`No product is linked to barcode ${code.trim()}.`)
-      return
-    }
-    const defaultUomId = getDefaultSaleUOM(match)?.id ?? ''
-    const newRowId = `barcode-${Date.now()}-${barcodeRowSequence.current++}`
-    setRows((currentRows) => {
-      const existingRow = currentRows.find(
-        (row) => row.optionId === match.optionId && row.uomId === defaultUomId,
+      const similar = findConfusableBarcode(
+        normalized,
+        products.flatMap((product) => product.barcodes.map((barcode) => ({
+          productId: product.productId,
+          productName: product.name,
+          code: barcode,
+        })))
       )
+      setBarcodeMessage(similar
+        ? `Scanned barcode ${code.trim()} is too similar to ${similar.code} on ${similar.productName}. It was not added; scan the label again.`
+        : `No product is linked to barcode ${code.trim()}.`)
+      if (source === 'keyboard' && scannerEnabled) window.requestAnimationFrame(() => barcodeInputRef.current?.focus())
+      return Boolean(similar && source === 'camera')
+    }
+    const defaultUom = getDefaultSaleUOM(match)
+    if (!defaultUom) {
+      setBarcodeMessage(`${match.name} does not have a sale unit configured.`)
+      return false
+    }
+    processingBarcodeRef.current = true
+    setScannerEnabled(false)
+    setScanSource(source)
+    setScannedProduct(match)
+    setScannedUomId(defaultUom.id)
+    setScannedQuantity('1')
+    setBarcodeMessage('Confirm the sale unit and quantity before adding this product.')
+    window.requestAnimationFrame(() => scannedQuantityRef.current?.focus())
+    return true
+  }
+
+  const confirmScannedProduct = () => {
+    const product = scannedProduct
+    const uom = scannedUom
+    const quantity = scannedQuantityValue
+    const baseQuantity = scannedBaseQuantity
+    const pricing = scannedPricing
+    if (!product || !uom || !baseQuantity || !pricing || scannedQuantityError) return
+
+    const defaultUomId = uom.id
+    const rowId = `barcode-${barcodeRowSequence.current++}`
+    setRows((currentRows) => {
+      const existingRow = currentRows.find((row) => row.optionId === product.optionId && row.uomId === defaultUomId)
       if (existingRow) {
         return currentRows.map((row) => row.id === existingRow.id
-          ? { ...row, quantity: String((Number(row.quantity) || 0) + 1) }
+          ? { ...row, quantity: String((Number(row.quantity) || 0) + quantity) }
           : row)
       }
-
       const emptyRow = currentRows.find((row) => !row.optionId || !row.uomId)
       if (emptyRow) {
         return currentRows.map((row) => row.id === emptyRow.id
-          ? { ...row, optionId: match.optionId, uomId: defaultUomId, quantity: '1' }
+          ? { ...row, optionId: product.optionId, uomId: defaultUomId, quantity: String(quantity) }
           : row)
       }
-
-      return [...currentRows, {
-        id: newRowId,
-        optionId: match.optionId,
-        uomId: defaultUomId,
-        quantity: '1',
-      }]
+      return [...currentRows, { id: rowId, optionId: product.optionId, uomId: defaultUomId, quantity: String(quantity) }]
     })
-    setBarcodeMessage(`${match.name} added to the sale.`)
+    processingBarcodeRef.current = false
+    setScannedProduct(null)
+    setScanAnotherPrompt(true)
+    setBarcodeMessage(`${product.name} added to the sale.`)
+  }
+
+  const cancelScannedProduct = () => {
+    processingBarcodeRef.current = false
+    setScannedProduct(null)
+    setBarcodeMessage('Scan cancelled. No product was added.')
+  }
+
+  const continueBarcodeScanning = () => {
+    setScanAnotherPrompt(false)
+    if (scanSource === 'camera') {
+      setCameraScannerOpen(true)
+      return
+    }
+    setScannerEnabled(true)
+    window.requestAnimationFrame(() => barcodeInputRef.current?.focus())
+  }
+
+  const finishBarcodeScanning = () => {
+    setScanAnotherPrompt(false)
+    setScannerEnabled(false)
+    setScanSource(null)
+    setBarcodeInput('')
+    barcodeInputRef.current?.blur()
   }
 
   /**
@@ -690,6 +780,7 @@ export default function RecordEmployeeTransactionForm({
             paymentMethod: offlinePaymentMethod,
             amountPaid: isCredit ? Number(amountPaid || 0) : null,
             amountTendered: paymentMethod === 'cash' ? Number(amountTendered || (isCredit ? amountPaid : totalPreview)) : null,
+            totalAmount: totalPreview,
             isCredit,
             discountAmount: safeDiscountValue,
             customerName: customerName.trim() || null,
@@ -797,10 +888,18 @@ export default function RecordEmployeeTransactionForm({
             <div>
               <p style={{ margin: 0, fontSize: 14, fontWeight: 800, color: 'var(--color-text-primary)' }}>Barcode scanner</p>
               <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--color-text-muted)' }}>
-                Scan a product to add it to this sale. Scan it again to increase the quantity.
+                Scan a product, confirm its unit and quantity, then choose whether to scan another.
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className="btn-outline"
+                onClick={() => { setScannerEnabled(false); setScanSource('camera'); setCameraScannerOpen(true) }}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 7, padding: '8px 14px', borderRadius: 8, fontSize: 13 }}
+              >
+                <Camera size={16} /> Scan with camera
+              </button>
               <button
                 type="button"
                 className={scannerEnabled ? 'btn-outline' : 'btn-primary'}
@@ -842,7 +941,7 @@ export default function RecordEmployeeTransactionForm({
                 <li>Select <strong>Use scanner</strong>, then scan a barcode saved on the product.</li>
               </ol>
               <p style={{ margin: '6px 0 0', color: 'var(--color-text-muted)' }}>
-                A successful scan adds one sale unit using the product&apos;s default sale unit. The sale is only recorded when you submit this form.
+                Each recognized scan pauses input while you confirm the unit and quantity. The sale is only recorded when you submit this form.
               </p>
             </div>
           )}
@@ -857,7 +956,7 @@ export default function RecordEmployeeTransactionForm({
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
                     event.preventDefault()
-                    handleBarcodeScan(barcodeInput)
+                    handleBarcodeScan(barcodeInput, 'keyboard')
                   }
                 }}
                 autoComplete="off"
@@ -867,7 +966,7 @@ export default function RecordEmployeeTransactionForm({
                 style={inputStyle}
               />
               {barcodeMessage && (
-                <span aria-live="polite" style={{ color: barcodeMessage.startsWith('No product') ? 'var(--color-danger)' : 'var(--color-text-muted)', fontSize: 12 }}>
+                  <span aria-live="polite" style={{ color: barcodeMessage.startsWith('No product') || barcodeMessage.includes('does not have') || barcodeMessage.includes('too similar') ? 'var(--color-danger)' : 'var(--color-text-muted)', fontSize: 12 }}>
                   {barcodeMessage}
                 </span>
               )}
@@ -1323,6 +1422,71 @@ export default function RecordEmployeeTransactionForm({
           )}
         </button>
       </form>
+
+      {cameraScannerOpen && (
+        <BarcodeCameraDialog
+          title="Scan product barcode"
+          onDetected={(code) => {
+            const found = handleBarcodeScan(code, 'camera')
+            if (found) setCameraScannerOpen(false)
+            return found
+          }}
+          onClose={() => setCameraScannerOpen(false)}
+        />
+      )}
+
+      {scannedProduct && scannedUom && (
+        <div role="dialog" aria-modal="true" aria-labelledby="scanned-product-title" style={{ position: 'fixed', inset: 0, zIndex: 1100, display: 'grid', placeItems: 'center', background: 'rgba(8,15,25,.68)', padding: 16 }}>
+          <section style={{ width: 'min(480px, 100%)', borderRadius: 14, border: '1px solid var(--color-border)', background: 'var(--color-surface)', color: 'var(--color-text-primary)', padding: 20, boxShadow: '0 24px 80px rgba(0,0,0,.25)' }}>
+            <h2 id="scanned-product-title" style={{ margin: 0, fontSize: 18 }}>{scannedProduct.name}</h2>
+            <p style={{ margin: '5px 0 16px', color: 'var(--color-text-muted)', fontSize: 13 }}>Review the sale unit and quantity before adding this item.</p>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <label className="flex flex-col gap-1" style={splitLabelStyle}>Sale unit
+                <select value={scannedUomId} onChange={(event) => setScannedUomId(event.target.value)} style={inputStyle}>
+                  {scannedProduct.uomOptions.map((uom) => <option key={uom.id} value={uom.id}>{uom.name} ({uom.abbreviation || uom.conversionFactor})</option>)}
+                </select>
+              </label>
+              <label className="flex flex-col gap-1" style={splitLabelStyle}>Quantity
+                <input
+                  ref={scannedQuantityRef}
+                  type="number"
+                  min="0.0001"
+                  step="any"
+                  inputMode="decimal"
+                  autoFocus
+                  value={scannedQuantity}
+                  onChange={(event) => setScannedQuantity(event.target.value)}
+                  onKeyDown={(event) => { if (event.key === 'Enter' && !scannedQuantityError) { event.preventDefault(); confirmScannedProduct() } }}
+                  style={inputStyle}
+                />
+              </label>
+            </div>
+            <div style={{ marginTop: 12, borderRadius: 9, background: 'var(--color-background)', padding: 12, fontSize: 13 }}>
+              <p style={{ margin: 0, color: 'var(--color-text-muted)' }}>Available stock: {formatAvailableQuantity(Math.max(0, scannedAvailableBaseQuantity - (requestedBaseQuantityByOption.get(scannedProduct.optionId) ?? 0)), scannedUom, getBaseUOM(scannedProduct))}</p>
+              <p style={{ margin: '7px 0 0', color: 'var(--color-text-muted)' }}>Unit price: {scannedUnitPricing ? formatMoney(scannedUnitPricing.lineTotal, currency) : '—'}</p>
+              <p style={{ margin: '5px 0 0', fontWeight: 800 }}>Subtotal: {scannedPricing ? formatMoney(scannedPricing.lineTotal, currency) : '—'}</p>
+            </div>
+            {scannedQuantityError && <p role="alert" style={{ margin: '10px 0 0', color: 'var(--color-danger)', fontSize: 12 }}>{scannedQuantityError}</p>}
+            <div className="flex justify-end gap-2" style={{ marginTop: 18 }}>
+              <button type="button" className="btn-outline" onClick={cancelScannedProduct} style={{ borderRadius: 8, padding: '9px 14px' }}>Cancel</button>
+              <button type="button" className="btn-primary" disabled={Boolean(scannedQuantityError)} onClick={confirmScannedProduct} style={{ borderRadius: 8, padding: '9px 14px', opacity: scannedQuantityError ? .65 : 1 }}>Add to cart</button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {scanAnotherPrompt && (
+        <div role="dialog" aria-modal="true" aria-labelledby="scan-another-title" style={{ position: 'fixed', inset: 0, zIndex: 1100, display: 'grid', placeItems: 'center', background: 'rgba(8,15,25,.68)', padding: 16 }}>
+          <section style={{ width: 'min(400px, 100%)', borderRadius: 14, border: '1px solid var(--color-border)', background: 'var(--color-surface)', color: 'var(--color-text-primary)', padding: 20, boxShadow: '0 24px 80px rgba(0,0,0,.25)' }}>
+            <h2 id="scan-another-title" style={{ margin: 0, fontSize: 18 }}>Product added successfully</h2>
+            <p style={{ margin: '7px 0 18px', color: 'var(--color-text-muted)', fontSize: 13 }}>Scan another product?</p>
+            <div className="flex justify-end gap-2">
+              <button type="button" className="btn-outline" onClick={finishBarcodeScanning} style={{ borderRadius: 8, padding: '9px 14px' }}>Done</button>
+              <button type="button" className="btn-primary" onClick={continueBarcodeScanning} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, borderRadius: 8, padding: '9px 14px' }}><ScanBarcode size={16} /> Scan another</button>
+            </div>
+          </section>
+        </div>
+      )}
     </>
   )
 }

@@ -45,7 +45,9 @@ class _DashboardDataScreenState extends State<DashboardDataScreen> {
       _refresh();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Cash deposit submitted for review. Offline entries will sync automatically.'),
+          content: Text(
+            'Cash deposit submitted for review. Offline entries will sync automatically.',
+          ),
         ),
       );
     }
@@ -389,7 +391,10 @@ class _DashboardDataScreenState extends State<DashboardDataScreen> {
     }
   }
 
-  Future<void> _openProductForm({Map<String, dynamic>? product}) async {
+  Future<void> _openProductForm({
+    Map<String, dynamic>? product,
+    List<Map<String, dynamic>> existingProducts = const [],
+  }) async {
     try {
       final options = await widget.repository.loadProductOptions(
         widget.user,
@@ -403,6 +408,7 @@ class _DashboardDataScreenState extends State<DashboardDataScreen> {
           repository: widget.repository,
           units: options.units,
           branches: options.branches,
+          existingProducts: existingProducts,
           product: options.product ?? product,
         ),
       );
@@ -754,7 +760,9 @@ class _DashboardDataScreenState extends State<DashboardDataScreen> {
                 if (widget.section == 'products' &&
                     widget.user.role == RetivoxRole.owner)
                   FilledButton.icon(
-                    onPressed: () => _openProductForm(),
+                    onPressed: () => _openProductForm(
+                      existingProducts: result.data?.rows ?? const [],
+                    ),
                     icon: const Icon(Icons.add),
                     label: const Text('Add product'),
                   ),
@@ -937,7 +945,12 @@ class _DashboardDataScreenState extends State<DashboardDataScreen> {
                 else
                   _stockWorkflowContent(),
               ] else
-                _records(context, _filter(result.data!.rows)),
+                _records(
+                  context,
+                  widget.section == 'products'
+                      ? result.data!.rows
+                      : _filter(result.data!.rows),
+                ),
               if (widget.section == 'transactions' &&
                   result.data!.rows.length >= 200) ...[
                 const SizedBox(height: 12),
@@ -1021,10 +1034,16 @@ class _DashboardDataScreenState extends State<DashboardDataScreen> {
               children: [
                 Row(
                   children: [
-                    const Icon(Icons.warning_amber_rounded, color: Colors.deepOrange),
+                    const Icon(
+                      Icons.warning_amber_rounded,
+                      color: Colors.deepOrange,
+                    ),
                     const SizedBox(width: 8),
                     Expanded(
-                      child: Text('Expiry alerts', style: Theme.of(context).textTheme.titleMedium),
+                      child: Text(
+                        'Expiry alerts',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
                     ),
                     if (snapshot.isCached) const Chip(label: Text('Cached')),
                   ],
@@ -1033,14 +1052,20 @@ class _DashboardDataScreenState extends State<DashboardDataScreen> {
                 for (final row in snapshot.rows)
                   ListTile(
                     contentPadding: EdgeInsets.zero,
-                    title: Text('${row['product_name'] ?? 'Product'}${row['supplier_lot_code'] == null ? '' : ' · lot ${row['supplier_lot_code']}'}'),
-                    subtitle: Text('${row['branch_name'] ?? 'Branch'} · expires ${row['expires_on'] ?? 'date unavailable'} · ${row['base_quantity_on_hand'] ?? 0} in stock'),
+                    title: Text(
+                      '${row['product_name'] ?? 'Product'}${row['supplier_lot_code'] == null ? '' : ' · lot ${row['supplier_lot_code']}'}',
+                    ),
+                    subtitle: Text(
+                      '${row['branch_name'] ?? 'Branch'} · expires ${row['expires_on'] ?? 'date unavailable'} · ${row['base_quantity_on_hand'] ?? 0} in stock',
+                    ),
                     trailing: Text(
                       row['alert_status'] == 'expired'
                           ? 'Expired'
                           : '${row['days_remaining']} days',
                       style: TextStyle(
-                        color: row['alert_status'] == 'expired' ? Colors.red : Colors.deepOrange,
+                        color: row['alert_status'] == 'expired'
+                            ? Colors.red
+                            : Colors.deepOrange,
                         fontWeight: FontWeight.w700,
                       ),
                     ),
@@ -1309,7 +1334,7 @@ class _DashboardDataScreenState extends State<DashboardDataScreen> {
     return switch (widget.section) {
       'branches' => _branchCards(rows),
       'stock' => _stockTable(context, rows),
-      'products' => _productsTable(rows),
+      'products' => _productsTable(_filter(rows), allProducts: rows),
       'transactions' => _transactionsTable(rows),
       'cash_deposits' => _cashDepositsList(rows),
       'employees' => _employeesTable(rows),
@@ -1331,47 +1356,147 @@ class _DashboardDataScreenState extends State<DashboardDataScreen> {
             margin: const EdgeInsets.only(bottom: 10),
             child: Padding(
               padding: const EdgeInsets.all(14),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                Row(children: [
-                  const Icon(Icons.account_balance_outlined),
-                  const SizedBox(width: 10),
-                  Expanded(child: Text('${(row['branches'] as Map?)?['name'] ?? 'Branch'} · ${currency.format(_number(row['amount']))}', style: Theme.of(context).textTheme.titleMedium)),
-                  Chip(label: Text(row['is_pending_sync'] == true ? 'Waiting to sync' : (row['status']?.toString() ?? 'pending').replaceAll('_', ' '))),
-                ]),
-                const SizedBox(height: 8),
-                Text('Recorded by ${(row['depositor'] as Map?)?['name'] ?? row['deposited_by_name'] ?? 'Team member'} · ${_dateTime(row['deposit_date'])} · Ref: ${row['deposit_reference'] ?? '—'}'),
-                if (row['expected_cash_amount'] != null)
-                  Text('Expected ${currency.format(_number(row['expected_cash_amount']))} · Variance ${currency.format(_number(row['variance_amount']))}'),
-                if (row['admin_approved_at'] != null) const Text('Administrator review complete · awaiting owner final approval'),
-                if ((row['review_note'] ?? row['sync_error']) != null)
-                  Text(row['sync_error']?.toString() ?? 'Review note: ${row['review_note']}', style: TextStyle(color: Theme.of(context).colorScheme.error)),
-                if (row['is_pending_sync'] != true && ((isOwner && const ['pending', 'pending_owner'].contains(row['status'])) || (isAdmin && row['status'] == 'pending' && row['submitted_role'] == 'employee')))
-                  Align(alignment: Alignment.centerRight, child: Wrap(spacing: 8, children: [
-                    OutlinedButton.icon(onPressed: () => _reviewCashDeposit(row, 'reject'), icon: const Icon(Icons.close), label: const Text('Reject')),
-                    FilledButton.icon(onPressed: (isAdmin || _number(row['variance_amount']) == 0) ? () => _reviewCashDeposit(row, 'approve') : null, icon: const Icon(Icons.check), label: Text(isAdmin ? 'Approve for owner' : 'Approve')),
-                  ])),
-              ]),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.account_balance_outlined),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          '${(row['branches'] as Map?)?['name'] ?? 'Branch'} · ${currency.format(_number(row['amount']))}',
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                      ),
+                      Chip(
+                        label: Text(
+                          row['is_pending_sync'] == true
+                              ? 'Waiting to sync'
+                              : (row['status']?.toString() ?? 'pending')
+                                    .replaceAll('_', ' '),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Recorded by ${(row['depositor'] as Map?)?['name'] ?? row['deposited_by_name'] ?? 'Team member'} · ${_dateTime(row['deposit_date'])} · Ref: ${row['deposit_reference'] ?? '—'}',
+                  ),
+                  if (row['expected_cash_amount'] != null)
+                    Text(
+                      'Expected ${currency.format(_number(row['expected_cash_amount']))} · Variance ${currency.format(_number(row['variance_amount']))}',
+                    ),
+                  if (row['admin_approved_at'] != null)
+                    const Text(
+                      'Administrator review complete · awaiting owner final approval',
+                    ),
+                  if ((row['review_note'] ?? row['sync_error']) != null)
+                    Text(
+                      row['sync_error']?.toString() ??
+                          'Review note: ${row['review_note']}',
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                  if (row['is_pending_sync'] != true &&
+                      ((isOwner &&
+                              const [
+                                'pending',
+                                'pending_owner',
+                              ].contains(row['status'])) ||
+                          (isAdmin &&
+                              row['status'] == 'pending' &&
+                              row['submitted_role'] == 'employee')))
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: Wrap(
+                        spacing: 8,
+                        children: [
+                          OutlinedButton.icon(
+                            onPressed: () => _reviewCashDeposit(row, 'reject'),
+                            icon: const Icon(Icons.close),
+                            label: const Text('Reject'),
+                          ),
+                          FilledButton.icon(
+                            onPressed:
+                                (isAdmin ||
+                                    _number(row['variance_amount']) == 0)
+                                ? () => _reviewCashDeposit(row, 'approve')
+                                : null,
+                            icon: const Icon(Icons.check),
+                            label: Text(
+                              isAdmin ? 'Approve for owner' : 'Approve',
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
             ),
           ),
       ],
     );
   }
 
-  Future<void> _reviewCashDeposit(Map<String, dynamic> row, String action) async {
+  Future<void> _reviewCashDeposit(
+    Map<String, dynamic> row,
+    String action,
+  ) async {
     final note = TextEditingController();
     try {
-      final confirmed = await showDialog<bool>(context: context, builder: (dialogContext) => AlertDialog(
-        title: Text(action == 'approve' ? 'Approve cash deposit?' : 'Reject cash deposit?'),
-        content: TextField(controller: note, maxLength: 180, decoration: const InputDecoration(labelText: 'Review note (optional)')),
-        actions: [TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Cancel')), FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: Text(action == 'approve' ? 'Approve' : 'Reject'))],
-      ));
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: Text(
+            action == 'approve'
+                ? 'Approve cash deposit?'
+                : 'Reject cash deposit?',
+          ),
+          content: TextField(
+            controller: note,
+            maxLength: 180,
+            decoration: const InputDecoration(
+              labelText: 'Review note (optional)',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: Text(action == 'approve' ? 'Approve' : 'Reject'),
+            ),
+          ],
+        ),
+      );
       if (confirmed != true || !mounted) return;
-      await widget.repository.reviewCashDeposit(widget.user, depositId: row['id'].toString(), action: action, reviewNote: note.text);
+      await widget.repository.reviewCashDeposit(
+        widget.user,
+        depositId: row['id'].toString(),
+        action: action,
+        reviewNote: note.text,
+      );
       _refresh();
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Cash deposit review saved. Offline changes sync automatically.')));
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Cash deposit review saved. Offline changes sync automatically.',
+            ),
+          ),
+        );
     } catch (error) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not review deposit: $error')));
-    } finally { note.dispose(); }
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not review deposit: $error')),
+        );
+    } finally {
+      note.dispose();
+    }
   }
 
   Widget _deliveriesList(List<Map<String, dynamic>> rows) {
@@ -2228,7 +2353,10 @@ class _DashboardDataScreenState extends State<DashboardDataScreen> {
     }
   }
 
-  Widget _productsTable(List<Map<String, dynamic>> rows) {
+  Widget _productsTable(
+    List<Map<String, dynamic>> rows, {
+    List<Map<String, dynamic>> allProducts = const [],
+  }) {
     final canManage = widget.user.role == RetivoxRole.owner;
     final showStock = widget.user.role != RetivoxRole.employee;
     List<Map<String, dynamic>> rowsOf(Object? value) => value is List
@@ -2455,7 +2583,10 @@ class _DashboardDataScreenState extends State<DashboardDataScreen> {
                           ),
                           if (canManage) ...[
                             OutlinedButton.icon(
-                              onPressed: () => _openProductForm(product: row),
+                              onPressed: () => _openProductForm(
+                                product: row,
+                                existingProducts: allProducts,
+                              ),
                               icon: const Icon(Icons.edit_outlined, size: 16),
                               label: const Text('Edit'),
                               style: OutlinedButton.styleFrom(
@@ -2526,6 +2657,12 @@ class _DashboardDataScreenState extends State<DashboardDataScreen> {
                   'Type: ${product['product_kind'] == 'measured_counted' ? 'Measured / counted' : 'Fixed package'}',
                   'Description: ${product['description'] ?? '—'}',
                 ]),
+                _productDetailGroup(
+                  'Barcodes',
+                  (product['barcodes'] as List? ?? const [])
+                      .map((code) => code.toString())
+                      .toList(),
+                ),
                 _productDetailGroup('Pricing', [
                   'Base price: ${pricing?['base_price'] == null ? '—' : currency.format(_number(pricing?['base_price']))}',
                   'Minimum price: ${pricing?['min_price'] == null ? '—' : currency.format(_number(pricing?['min_price']))}',

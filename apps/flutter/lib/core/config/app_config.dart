@@ -1,5 +1,11 @@
 import 'dart:io';
 
+const _supabaseUrlFromBuild = String.fromEnvironment('SUPABASE_URL');
+const _supabaseKeyFromBuild = String.fromEnvironment(
+  'SUPABASE_PUBLISHABLE_KEY',
+);
+const _webApiUrlFromBuild = String.fromEnvironment('RETIVOX_WEB_API_URL');
+
 class AppConfig {
   const AppConfig({
     required this.supabaseUrl,
@@ -33,19 +39,19 @@ class AppConfig {
       supabaseUrl: _firstValue([
         fileValues['SUPABASE_URL'],
         processValues['SUPABASE_URL'],
-        buildUrl,
+        buildUrl ?? _supabaseUrlFromBuild,
       ]),
       supabasePublishableKey: _firstValue([
         fileValues['SUPABASE_PUBLISHABLE_KEY'],
         fileValues['SUPABASE_ANON_KEY'],
         processValues['SUPABASE_PUBLISHABLE_KEY'],
         processValues['SUPABASE_ANON_KEY'],
-        buildPublishableKey,
+        buildPublishableKey ?? _supabaseKeyFromBuild,
       ]),
       webApiBaseUrl: _firstValue([
         fileValues['RETIVOX_WEB_API_URL'],
         processValues['RETIVOX_WEB_API_URL'],
-        buildWebApiBaseUrl,
+        buildWebApiBaseUrl ?? _webApiUrlFromBuild,
       ]),
     );
   }

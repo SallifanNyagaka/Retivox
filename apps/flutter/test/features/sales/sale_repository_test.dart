@@ -8,6 +8,7 @@ void main() {
     required String method,
     required List<Map<String, dynamic>> options,
     String rounding = 'none',
+    List<String> barcodes = const [],
   }) {
     return SaleProduct(
       optionId: 'normal:product-id',
@@ -25,8 +26,32 @@ void main() {
       baseQuantityReserved: 0,
       recoveryItemId: null,
       stockSource: 'normal',
+      barcodes: barcodes,
     );
   }
+
+  group('findSaleProductByBarcode', () {
+    test('matches normalized barcode from the local catalog', () {
+      final item = product(
+        method: 'fixed_price',
+        options: const [],
+        barcodes: const ['  Ab-123  '],
+      );
+
+      expect(findSaleProductByBarcode([item], 'ab-123'), same(item));
+    });
+
+    test('returns null for an unknown or empty barcode', () {
+      final item = product(
+        method: 'fixed_price',
+        options: const [],
+        barcodes: const ['AB-123'],
+      );
+
+      expect(findSaleProductByBarcode([item], 'unknown'), isNull);
+      expect(findSaleProductByBarcode([item], '  '), isNull);
+    });
+  });
 
   group('SaleProduct.previewPrice', () {
     test('manual quantity only previews configured quantities', () {

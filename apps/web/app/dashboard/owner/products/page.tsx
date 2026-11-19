@@ -12,6 +12,7 @@ import { runSoftDeleteAwareQuery } from '../../../../lib/supabase/softDelete'
 import { getAllUOMsForBusiness, getUOMsForBusiness } from '../../../../lib/uom/server'
 import logger from '../../../../lib/logger'
 import ProductsPageClient from './ProductsPageClient'
+import type { BarcodeOwner } from '../../../../lib/barcodes/similarity'
 
 type ProductPricingRow = {
   base_price: string
@@ -227,6 +228,29 @@ export default async function ProductsPage() {
     return ((legacyResponse.data ?? []) as LegacyProductRow[]).map((row) => ({ ...normalizeLegacyProduct(row), barcodes: [] }))
   }
 
+  async function loadBarcodeOwners(): Promise<BarcodeOwner[]> {
+    try {
+      const { data, error } = await supabase
+        .from('product_barcodes')
+        .select('product_id, code, products!inner(name)')
+        .eq('business_id', businessId)
+        .eq('is_active', true)
+      if (error) throw error
+      return ((data ?? []) as unknown as Array<{
+        product_id: string
+        code: string
+        products: { name: string } | Array<{ name: string }> | null
+      }>).map((row) => ({
+        productId: row.product_id,
+        productName: Array.isArray(row.products) ? row.products[0]?.name ?? 'another product' : row.products?.name ?? 'another product',
+        code: row.code,
+      }))
+    } catch (error) {
+      logger.warn('Barcode collision list could not be loaded', { businessId, error })
+      return []
+    }
+  }
+
   /**
    * Fetches UOM records without blocking the page when the additive migration
    * has not reached the current database yet.
@@ -249,8 +273,9 @@ export default async function ProductsPage() {
     }
   }
 
-  const [products, businessResponse, uoms, branchesResponse] = await Promise.all([
+  const [products, barcodeOwners, businessResponse, uoms, branchesResponse] = await Promise.all([
     loadProducts(),
+    loadBarcodeOwners(),
     supabase.from('businesses').select('currency').eq('id', businessId).single(),
     loadUOMs(),
     runSoftDeleteAwareQuery<BranchOption>(
@@ -321,6 +346,7 @@ export default async function ProductsPage() {
   return (
     <ProductsPageClient
       products={products}
+      barcodeOwners={barcodeOwners}
       currency={currency}
       uoms={uoms}
       allUoms={allUoms}
