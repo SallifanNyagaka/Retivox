@@ -1,6 +1,8 @@
 import { createServiceRoleClient } from '../supabase/admin'
 import { createClient } from '../supabase/server'
+import type { SupabaseClient } from '@supabase/supabase-js'
 import { getBusinessDarajaConfig, initiateDarajaStkPushWithConfig, type DarajaConfig } from './daraja'
+import { processBusinessDarajaCallback, type BusinessDarajaCallbackPayload } from './businessDarajaCallback'
 
 type StartedCheckoutRow = {
   business_id: string
@@ -25,11 +27,12 @@ export async function startBusinessDarajaCheckout(input: {
   paymentId: string
   phone: string
   setup?: { ownerId: string; config: DarajaConfig }
+  sessionClient?: SupabaseClient
 }) {
   const serviceClient = createServiceRoleClient()
   // Load configuration before reserving the single checkout attempt.
   const setup = input.setup ?? await getBusinessDarajaSetup(input.businessId)
-  const sessionClient = await createClient()
+  const sessionClient = input.sessionClient ?? await createClient()
   const { data, error } = await sessionClient.rpc('start_business_daraja_stk_checkout', {
     p_payment_id: input.paymentId,
     p_phone: input.phone,
@@ -61,6 +64,28 @@ export async function startBusinessDarajaCheckout(input: {
     .maybeSingle()
   if (updateError || !updatedPayment) {
     throw new Error('The M-Pesa prompt was sent, but its reference could not be saved. Contact support before retrying this sale.')
+  }
+
+  // Safaricom can callback before the response's CheckoutRequestID has been
+  // committed to payments. The callback inbox retains that event; replay it
+  // now that the exact payment correlation is durable.
+  const { data: earlyCallbacks } = await serviceClient.from('provider_webhook_events')
+    .select('provider_payload')
+    .eq('provider', 'daraja')
+    .eq('result', 'unmatched')
+    .contains('provider_payload', { Body: { stkCallback: { CheckoutRequestID: response.CheckoutRequestID } } })
+    .limit(3)
+  for (const event of earlyCallbacks ?? []) {
+    try {
+      await processBusinessDarajaCallback(
+        serviceClient,
+        event.provider_payload as BusinessDarajaCallbackPayload,
+        async () => setup,
+      )
+    } catch {
+      // Keep the inbox event unmatched for callback retry or reconciliation.
+      // Never turn an accepted prompt into an assumed successful payment.
+    }
   }
 
   return { checkoutRequestId: response.CheckoutRequestID }

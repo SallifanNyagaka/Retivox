@@ -6,6 +6,7 @@
  */
 
 import { createServiceRoleClient } from '../supabase/admin'
+import { createHash } from 'node:crypto'
 
 export type DarajaStkPushResponse = {
   MerchantRequestID?: string
@@ -65,6 +66,13 @@ type DarajaConfigResolution = {
   missing: string[]
   source: 'platform' | 'none'
 }
+
+type CachedAccessToken = { token: string; expiresAt: number }
+const accessTokenCache = new Map<string, CachedAccessToken>()
+const accessTokenRequests = new Map<string, Promise<string>>()
+const MAX_CACHED_ACCESS_TOKENS = 128
+const DEFAULT_TOKEN_TTL_SECONDS = 3599
+const TOKEN_EXPIRY_SKEW_MS = 60_000
 
 async function getPlatformDarajaSettings(): Promise<PlatformPaymentSettingsRow | null> {
   try {
@@ -221,23 +229,58 @@ export function normalizeKenyanPhone(phone: string) {
 }
 
 async function getAccessToken(config: DarajaConfig) {
-  const credentials = Buffer.from(`${config.consumerKey}:${config.consumerSecret}`).toString('base64')
-  const response = await fetch(`${config.baseUrl}/oauth/v1/generate?grant_type=client_credentials`, {
-    method: 'GET',
-    headers: {
-      Authorization: `Basic ${credentials}`,
-    },
-    cache: 'no-store',
-    signal: AbortSignal.timeout(15000),
-  })
-
-  const payload = (await response.json()) as { access_token?: string; errorMessage?: string }
-
-  if (!response.ok || !payload.access_token) {
-    throw new Error(payload.errorMessage ?? 'Unable to authenticate with Daraja')
+  // The fingerprint scopes tokens to both environment and credentials without
+  // retaining the credentials as a cache key. This cache is process-local and
+  // bounded; secrets and tokens are never persisted or returned to clients.
+  const cacheKey = createHash('sha256')
+    .update(`${config.baseUrl}\0${config.consumerKey}\0${config.consumerSecret}`)
+    .digest('hex')
+  const now = Date.now()
+  const cached = accessTokenCache.get(cacheKey)
+  if (cached && cached.expiresAt > now + TOKEN_EXPIRY_SKEW_MS) {
+    // Refresh insertion order so the oldest unused entry is evicted first.
+    accessTokenCache.delete(cacheKey)
+    accessTokenCache.set(cacheKey, cached)
+    return cached.token
   }
+  if (cached) accessTokenCache.delete(cacheKey)
 
-  return payload.access_token
+  const inFlight = accessTokenRequests.get(cacheKey)
+  if (inFlight) return inFlight
+
+  const request = (async () => {
+    const credentials = Buffer.from(`${config.consumerKey}:${config.consumerSecret}`).toString('base64')
+    const response = await fetch(`${config.baseUrl}/oauth/v1/generate?grant_type=client_credentials`, {
+      method: 'GET',
+      headers: { Authorization: `Basic ${credentials}` },
+      cache: 'no-store',
+      signal: AbortSignal.timeout(15000),
+    })
+
+    const payload = (await response.json()) as { access_token?: string; expires_in?: string | number }
+    if (!response.ok || !payload.access_token) {
+      // Provider error bodies are not echoed into logs or surfaced to clients.
+      throw new Error('Unable to authenticate with Daraja')
+    }
+
+    const ttlSeconds = Number(payload.expires_in) || DEFAULT_TOKEN_TTL_SECONDS
+    const usableTtlMs = Math.max(0, ttlSeconds * 1000 - TOKEN_EXPIRY_SKEW_MS)
+    if (usableTtlMs > 0) {
+      accessTokenCache.set(cacheKey, { token: payload.access_token, expiresAt: Date.now() + usableTtlMs })
+      while (accessTokenCache.size > MAX_CACHED_ACCESS_TOKENS) {
+        const oldestKey = accessTokenCache.keys().next().value
+        if (oldestKey === undefined) break
+        accessTokenCache.delete(oldestKey)
+      }
+    }
+    return payload.access_token
+  })()
+  accessTokenRequests.set(cacheKey, request)
+  try {
+    return await request
+  } finally {
+    if (accessTokenRequests.get(cacheKey) === request) accessTokenRequests.delete(cacheKey)
+  }
 }
 
 /** Checks merchant credentials using OAuth only; it does not initiate a payment. */
