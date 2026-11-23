@@ -31,18 +31,21 @@ class BusinessPaymentSettingsSnapshot {
   const BusinessPaymentSettingsSnapshot({
     required this.providers,
     required this.methods,
+    this.manualPaymentOptions = const [],
     required this.updatedAt,
     required this.isCached,
   });
 
   final List<Map<String, dynamic>> providers;
   final Map<String, dynamic> methods;
+  final List<Map<String, dynamic>> manualPaymentOptions;
   final DateTime? updatedAt;
   final bool isCached;
 
   Map<String, Object?> toJson() => {
     'providers': providers,
     'methods': methods,
+    'manualPaymentOptions': manualPaymentOptions,
     'updatedAt': updatedAt?.toIso8601String(),
   };
 
@@ -59,12 +62,20 @@ class BusinessPaymentSettingsSnapshot {
         : <String, dynamic>{
             'cash': true,
             'mobile_manual': true,
+            'daraja_prompt_entitled': false,
+            'pesapal_checkout_entitled': false,
             'daraja_prompt': false,
             'pesapal_checkout': false,
           };
+    final manualPaymentOptions =
+        (json['manualPaymentOptions'] as List? ?? const [])
+            .whereType<Map>()
+            .map((row) => Map<String, dynamic>.from(row))
+            .toList();
     return BusinessPaymentSettingsSnapshot(
       providers: providers,
       methods: methods,
+      manualPaymentOptions: manualPaymentOptions,
       updatedAt: DateTime.tryParse(json['updatedAt']?.toString() ?? '')
           ?.toLocal(),
       isCached: isCached,
@@ -146,6 +157,55 @@ class DashboardRepository {
 
   static const _businessPaymentSettingsCacheKey =
       'dashboard:payment-provider-settings';
+  static const _businessPaymentInstructionsCacheKey =
+      'dashboard:business-payment-instructions';
+
+  /// Loads public merchant payment instructions from the authenticated
+  /// business-scoped RPC and falls back to the per-account encrypted cache.
+  Future<List<Map<String, dynamic>>> loadBusinessPaymentInstructions(
+    RetivoxUser user,
+  ) async {
+    final supabase = client;
+    if (supabase != null && await isBackendReachable()) {
+      try {
+        final raw = await supabase.rpc('business_public_payment_methods');
+        final methods = (raw as List? ?? const [])
+            .whereType<Map>()
+            .map((row) => Map<String, dynamic>.from(row))
+            .where((row) => row['is_active'] != false)
+            .toList();
+        await vault.cacheValue(user, _businessPaymentInstructionsCacheKey, {
+          'methods': methods,
+          'updatedAt': DateTime.now().toUtc().toIso8601String(),
+        });
+        return methods;
+      } catch (error) {
+        final cached = await vault.readCachedValue<Map<String, dynamic>>(
+          user,
+          _businessPaymentInstructionsCacheKey,
+        );
+        if (cached != null && _isNetworkError(error)) {
+          return _manualPaymentMethodsFromCache(cached);
+        }
+        if (cached == null && _isNetworkError(error)) return const [];
+        rethrow;
+      }
+    }
+
+    final cached = await vault.readCachedValue<Map<String, dynamic>>(
+      user,
+      _businessPaymentInstructionsCacheKey,
+    );
+    return cached == null ? const [] : _manualPaymentMethodsFromCache(cached);
+  }
+
+  List<Map<String, dynamic>> _manualPaymentMethodsFromCache(
+    Map<String, dynamic> cached,
+  ) => (cached['methods'] as List? ?? const [])
+      .whereType<Map>()
+      .map((row) => Map<String, dynamic>.from(row))
+      .where((row) => row['is_active'] != false)
+      .toList();
 
   Future<BusinessPaymentSettingsSnapshot> loadBusinessPaymentSettings(
     RetivoxUser user,
@@ -175,8 +235,10 @@ class DashboardRepository {
           user,
           _businessPaymentSettingsCacheKey,
         );
-        if (cached != null &&
-            (error is WebApiException || _isNetworkError(error))) {
+        final canUseCache = error is WebApiException
+            ? error.allowCachedFallback
+            : _isNetworkError(error);
+        if (cached != null && canUseCache) {
           return BusinessPaymentSettingsSnapshot.fromJson(
             cached,
             isCached: true,
@@ -198,6 +260,8 @@ class DashboardRepository {
       methods: const {
         'cash': true,
         'mobile_manual': true,
+        'daraja_prompt_entitled': false,
+        'pesapal_checkout_entitled': false,
         'daraja_prompt': false,
         'pesapal_checkout': false,
       },
@@ -230,6 +294,35 @@ class DashboardRepository {
       'action': 'save',
       ...settings,
     });
+    await loadBusinessPaymentSettings(user);
+  }
+
+  Future<void> saveBusinessManualPaymentMethod(
+    RetivoxUser user,
+    Map<String, Object?> settings,
+  ) async {
+    if (user.role != RetivoxRole.owner) {
+      throw const DashboardRepositoryException(
+        'Only the business owner can configure payment methods.',
+      );
+    }
+    if (!await isBackendReachable()) {
+      throw const DashboardRepositoryException(
+        'Payment instructions can only be changed while online.',
+      );
+    }
+    final api = webApiClient;
+    if (api == null) {
+      throw const DashboardRepositoryException(
+        'Configure RETIVOX_WEB_API_URL before saving payment instructions.',
+      );
+    }
+    await api.post('/api/desktop/payment-settings', {
+      'action': 'save_method',
+      ...settings,
+    });
+    await loadBusinessPaymentSettings(user);
+    await loadBusinessPaymentInstructions(user);
   }
 
   Future<String> runBusinessPaymentProviderAction(
@@ -259,6 +352,28 @@ class DashboardRepository {
     });
     return response['message']?.toString() ??
         'Payment provider action completed.';
+  }
+
+  Future<void> startBusinessSalePrompt({
+    required RetivoxUser user,
+    required String paymentId,
+    required String phone,
+  }) async {
+    if (!await isBackendReachable()) {
+      throw const DashboardRepositoryException(
+        'M-PESA prompts require a live Retivox connection. No prompt was started.',
+      );
+    }
+    final api = webApiClient;
+    if (api == null) {
+      throw const DashboardRepositoryException(
+        'Configure RETIVOX_WEB_API_URL before starting M-PESA prompts.',
+      );
+    }
+    await api.post('/api/desktop/business-payment-checkout', {
+      'paymentId': paymentId,
+      'phone': phone,
+    });
   }
 
   Future<OverviewSnapshot> loadOverview(RetivoxUser user) async {
@@ -2023,14 +2138,21 @@ class DashboardRepository {
     RetivoxUser user, {
     required String paymentId,
     required String action,
+    String? evidenceSource,
+    String? evidenceNote,
   }) async {
     final supabase = await _requireOnlineRole(user, [RetivoxRole.owner]);
     if (!const ['approve', 'reject'].contains(action)) {
       throw const DashboardRepositoryException('Invalid payment action.');
     }
     await supabase.rpc(
-      'owner_verify_payment',
-      params: {'p_payment_id': paymentId, 'p_action': action},
+      'owner_verify_payment_v2',
+      params: {
+        'p_payment_id': paymentId,
+        'p_action': action,
+        'p_evidence_source': evidenceSource,
+        'p_evidence_note': evidenceNote,
+      },
     );
   }
 
@@ -4260,6 +4382,11 @@ class DashboardRepository {
         ...item,
         'quantity_in_uom': item['quantity'],
         'quantity_expected': item['quantity'],
+        'base_quantity_expected':
+            _number(item['quantity']) *
+            (_number(unit?['conversion_factor']) > 0
+                ? _number(unit?['conversion_factor'])
+                : 1),
         'quantity_received': 0,
         'base_quantity_received': 0,
         'total_cost': ((item['costs'] as List? ?? const [])
@@ -4697,8 +4824,9 @@ class DashboardRepository {
             break;
           case 'record_supplier_delivery':
             response = await supabase.rpc(
-              'dashboard_record_supplier_delivery',
+              'dashboard_record_supplier_delivery_idempotent_v1',
               params: {
+                'p_request_id': action['id'],
                 'p_branch_id': payload['branch_id'],
                 'p_supplier_id': payload['supplier_id'],
                 'p_supplier_phone': payload['supplier_phone'],
@@ -4757,8 +4885,9 @@ class DashboardRepository {
             break;
           case 'adjust_stock':
             await supabase.rpc(
-              'dashboard_adjust_stock',
+              'dashboard_adjust_stock_idempotent_v1',
               params: {
+                'p_request_id': action['id'],
                 'p_stock_id': payload['stock_id'],
                 'p_quantity': payload['quantity'],
                 'p_operation': payload['operation'],
@@ -5865,13 +5994,26 @@ class DashboardRepository {
           await supabase
               .from('supplier_delivery_items')
               .select(
-                'id, delivery_id, product_id, quantity_expected, quantity_received, quantity_in_uom, base_quantity_received, unit_cost, total_cost, uom_id, products!inner(name, sku), units_of_measure(abbreviation, name)',
+                'id, delivery_id, product_id, quantity_expected, quantity_received, quantity_in_uom, base_quantity_received, unit_cost, total_cost, uom_id, products!inner(name, sku), units_of_measure(abbreviation, name, conversion_factor)',
               )
               .eq('business_id', user.businessId)
               .inFilter('delivery_id', deliveryIds)
               .order('id'),
         );
-        final itemsByDelivery = _groupRows(items, 'delivery_id');
+        final itemsByDelivery = _groupRows(
+          items.map((item) {
+            final unit = _nested(item['units_of_measure']);
+            return {
+              ...item,
+              'base_quantity_expected':
+                  _number(item['quantity_expected']) *
+                  (_number(unit?['conversion_factor']) > 0
+                      ? _number(unit?['conversion_factor'])
+                      : 1),
+            };
+          }).toList(),
+          'delivery_id',
+        );
         var editRequestsByDelivery = <String, List<Map<String, dynamic>>>{};
         if (user.role == RetivoxRole.owner) {
           final editRequests = _normalizeRows(

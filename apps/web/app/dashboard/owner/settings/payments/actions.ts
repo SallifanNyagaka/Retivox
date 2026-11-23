@@ -2,7 +2,7 @@
 
 import { revalidatePath } from 'next/cache'
 import { z } from 'zod'
-import { GlobalRole } from '@smartretail/shared'
+import { GlobalRole, validateBusinessPaymentMethod } from '@smartretail/shared'
 import { requireRole } from '../../../../../lib/auth/helpers'
 import { createServiceRoleClient } from '../../../../../lib/supabase/admin'
 import { createClient } from '../../../../../lib/supabase/server'
@@ -10,6 +10,7 @@ import { getBusinessDarajaConfig, registerDarajaC2BCallbacksWithConfig, testBusi
 import { getBusinessPesapalSetup, registerPesapalIpn, testBusinessPesapalConnection } from '../../../../../lib/payments/pesapal'
 import { requestOrigin } from '../../../../../lib/requestOrigin'
 import { headers } from 'next/headers'
+import { isBusinessPaymentMethodEnabled } from '../../../../../lib/payments/businessPaymentEntitlements'
 
 export type PaymentProviderFormState = {
   success: boolean
@@ -26,6 +27,12 @@ export async function testPaymentProviderConnection(_previous: PaymentProviderFo
   if (!profile.business_id) return { success: false, error: 'Business account is unavailable.' }
   const provider = value(formData, 'provider')
   try {
+    if (provider === 'daraja' && !await providerIsAllowed(profile.business_id, 'mpesa_stk')) {
+      return { success: false, error: providerNotEntitled('mpesa_stk') }
+    }
+    if (provider === 'pesapal' && !await providerIsAllowed(profile.business_id, 'pesapal')) {
+      return { success: false, error: providerNotEntitled('pesapal') }
+    }
     const message = provider === 'daraja'
       ? await testBusinessDarajaConnection(profile.business_id, profile.id)
       : provider === 'pesapal'
@@ -47,6 +54,9 @@ export async function registerPesapalBusinessIpn(
   const profile = await requireRole([GlobalRole.Owner])
   if (!profile.business_id) return { success: false, error: 'Business account is unavailable.', message: null }
   try {
+    if (!await providerIsAllowed(profile.business_id, 'pesapal')) {
+      return { success: false, error: providerNotEntitled('pesapal'), message: null }
+    }
     const setup = await getBusinessPesapalSetup(profile.business_id)
     if (setup.config.ipnId) return { success: true, error: null, message: `Pesapal IPN is registered (${setup.config.ipnId}).` }
     const ipnId = await registerPesapalIpn(setup.config)
@@ -77,6 +87,9 @@ export async function registerDarajaC2BCallbacks(
   const profile = await requireRole([GlobalRole.Owner])
   if (!profile.business_id) return { success: false, error: 'Business account is unavailable.', message: null }
   try {
+    if (!await providerIsAllowed(profile.business_id, 'mpesa_stk')) {
+      return { success: false, error: providerNotEntitled('mpesa_stk'), message: null }
+    }
     const origin = requestOrigin(await headers())
     const [config, serviceClient] = await Promise.all([
       getBusinessDarajaConfig(profile.business_id, profile.id),
@@ -119,6 +132,18 @@ function value(formData: FormData, key: string) {
   return typeof item === 'string' ? item.trim() : ''
 }
 
+async function providerIsAllowed(
+  businessId: string,
+  method: 'mpesa_stk' | 'pesapal' | 'card' | 'bank_transfer',
+) {
+  return isBusinessPaymentMethodEnabled(await createClient(), businessId, method)
+}
+
+function providerNotEntitled(method: 'mpesa_stk' | 'pesapal' | 'card' | 'bank_transfer') {
+  if (method === 'mpesa_stk') return 'M-PESA prompts are not included in this business subscription plan.'
+  return 'This online payment option is not included in this business subscription plan.'
+}
+
 export async function savePaymentProviderSettings(
   _previous: PaymentProviderFormState,
   formData: FormData,
@@ -141,6 +166,10 @@ export async function savePaymentProviderSettings(
   if (!parsed.success) return { success: false, error: parsed.error.issues[0]?.message ?? 'Check the provider settings.' }
 
   const settings = parsed.data
+  const entitlementMethod = settings.provider === 'daraja' ? 'mpesa_stk' : 'pesapal'
+  if (!await providerIsAllowed(profile.business_id, entitlementMethod)) {
+    return { success: false, error: providerNotEntitled(entitlementMethod) }
+  }
   if (settings.provider === 'daraja' && (!settings.businessShortcode || !settings.transactionType || (settings.transactionType === 'CustomerBuyGoodsOnline' && !settings.tillNumber))) {
     return { success: false, error: 'Daraja needs a Store/API shortcode and transaction type. Buy Goods also needs its customer-facing Till.' }
   }
@@ -186,6 +215,59 @@ export async function savePaymentProviderSettings(
   return { success: true, error: null }
 }
 
+const businessPaymentMethodSchema = z.object({
+  methodId: z.string().uuid().optional(),
+  methodCode: z.enum(['mpesa_manual', 'bank_transfer', 'card', 'other']),
+  accountType: z.enum(['buy_goods', 'paybill', 'pochi', 'bank_account', 'other']),
+  displayName: z.string().trim().min(1).max(80),
+  merchantNumber: z.string().trim().max(80),
+  accountReference: z.string().trim().max(80),
+  instructions: z.string().trim().max(1000),
+  isActive: z.boolean(),
+  isDefault: z.boolean(),
+})
+
+export async function saveBusinessPaymentMethod(
+  _previous: PaymentProviderFormState,
+  formData: FormData,
+): Promise<PaymentProviderFormState> {
+  const profile = await requireRole([GlobalRole.Owner])
+  if (!profile.business_id) return { success: false, error: 'Business account is unavailable.' }
+  const methodId = value(formData, 'methodId')
+  const parsed = businessPaymentMethodSchema.safeParse({
+    methodId: methodId || undefined,
+    methodCode: value(formData, 'methodCode'),
+    accountType: value(formData, 'accountType'),
+    displayName: value(formData, 'displayName'),
+    merchantNumber: value(formData, 'merchantNumber'),
+    accountReference: value(formData, 'accountReference'),
+    instructions: value(formData, 'instructions'),
+    isActive: formData.get('isActive') === 'on',
+    isDefault: formData.get('isDefault') === 'on',
+  })
+  if (!parsed.success) return { success: false, error: parsed.error.issues[0]?.message ?? 'Check the payment method details.' }
+  const method = parsed.data
+  const validationError = validateBusinessPaymentMethod(method)
+  if (validationError) return { success: false, error: validationError }
+  const serviceClient = createServiceRoleClient()
+  const { error } = await serviceClient.rpc('owner_save_business_payment_method', {
+    p_method_id: method.methodId ?? null,
+    p_business_id: profile.business_id,
+    p_actor_id: profile.id,
+    p_method_code: method.methodCode,
+    p_account_type: method.accountType,
+    p_display_name: method.displayName,
+    p_merchant_number: method.merchantNumber,
+    p_account_reference: method.accountReference,
+    p_instructions: method.instructions,
+    p_is_active: method.isActive,
+    p_is_default: method.isDefault,
+  })
+  if (error) return { success: false, error: 'Could not save payment instructions. Check the details and retry.' }
+  revalidatePath('/dashboard/owner/settings/payments')
+  return { success: true, error: null, message: 'Payment instructions saved.' }
+}
+
 export async function requestAssistedIntegrationSetup(formData: FormData): Promise<void> {
   const profile = await requireRole([GlobalRole.Owner])
   if (!profile.business_id) throw new Error('Business account is unavailable.')
@@ -193,6 +275,16 @@ export async function requestAssistedIntegrationSetup(formData: FormData): Promi
   const notes = value(formData, 'requestNotes').slice(0, 2000)
   const promotionCode = value(formData, 'promotionCode').slice(0, 40)
   if (!['daraja','pesapal','card_gateway','bank_transfer'].includes(provider)) throw new Error('Select a supported integration.')
+  const entitlementMethod = provider === 'daraja'
+    ? 'mpesa_stk'
+    : provider === 'pesapal'
+      ? 'pesapal'
+      : provider === 'card_gateway'
+        ? 'card'
+        : 'bank_transfer'
+  if (!await providerIsAllowed(profile.business_id, entitlementMethod)) {
+    throw new Error(providerNotEntitled(entitlementMethod))
+  }
   const supabase = await createClient()
   const { error } = await supabase.rpc('owner_request_integration_setup', {
     p_provider: provider,

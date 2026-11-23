@@ -10,7 +10,7 @@ const navItems = [
   { href: '/platform/pricing', label: 'Pricing', icon: Tags },
   { href: '/platform/promotions', label: 'Promotions & retention', icon: Tags },
   { href: '/platform/integrations', label: 'Setup requests', icon: Wrench },
-  { href: '/platform/payments', label: 'M-Pesa account', icon: CreditCard },
+  { href: '/platform/payments', label: 'Payments & billing', icon: CreditCard },
   { href: '/platform/communications', label: 'Email delivery', icon: Mail },
   { href: '/platform/settings', label: 'Runtime settings', icon: Settings },
   { href: '/platform/dormant', label: 'Dormancy', icon: Moon },

@@ -106,6 +106,39 @@ class _BusinessPaymentSettingsPanelState
     }
   }
 
+  Future<void> _editManualPaymentMethod([
+    Map<String, dynamic>? existing,
+  ]) async {
+    final result = await showDialog<Map<String, Object?>>(
+      context: context,
+      builder: (context) => _ManualPaymentMethodDialog(method: existing),
+    );
+    if (result == null || !mounted) return;
+    setState(() {
+      _busyAction = 'save-method';
+      _error = null;
+      _notice = null;
+    });
+    try {
+      await widget.repository.saveBusinessManualPaymentMethod(
+        widget.user,
+        result,
+      );
+      if (mounted) {
+        setState(() {
+          _notice = 'Payment instructions saved and refreshed in this account’s offline cache.';
+          _settings = widget.repository.loadBusinessPaymentSettings(
+            widget.user,
+          );
+        });
+      }
+    } catch (error) {
+      if (mounted) setState(() => _error = error.toString());
+    } finally {
+      if (mounted) setState(() => _busyAction = null);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -163,7 +196,14 @@ class _BusinessPaymentSettingsPanelState
                 final providers = snapshot?.providers ?? const [];
                 final daraja = _provider(providers, 'daraja');
                 final pesapal = _provider(providers, 'pesapal');
+                final manualPaymentOptions =
+                    snapshot?.manualPaymentOptions ?? const [];
                 final online = snapshot != null && !snapshot.isCached;
+                final canConfigureDaraja =
+                    online &&
+                    snapshot?.methods['daraja_prompt_entitled'] == true;
+                final canConfigurePesapal = online &&
+                    snapshot?.methods['pesapal_checkout_entitled'] == true;
                 return Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
@@ -199,52 +239,131 @@ class _BusinessPaymentSettingsPanelState
                           detail: 'Available online and offline',
                           enabled: true,
                         ),
-                        _MethodStatus(
-                          icon: Icons.phone_in_talk_outlined,
-                          label: 'M-Pesa prompt',
-                          detail: 'Daraja · online only',
-                          enabled: _configured(daraja, 'daraja'),
-                        ),
-                        _MethodStatus(
-                          icon: Icons.credit_card_outlined,
-                          label: 'Card & bank checkout',
-                          detail: 'Pesapal · online only',
-                          enabled:
-                              _configured(pesapal, 'pesapal') &&
-                              pesapal?['pesapal_ipn_ready'] == true,
-                        ),
+                        if (canConfigureDaraja)
+                          _MethodStatus(
+                            icon: Icons.phone_in_talk_outlined,
+                            label: 'M-Pesa prompt',
+                            detail: 'Daraja · online only',
+                            enabled: _configured(daraja, 'daraja'),
+                          ),
+                        if (canConfigurePesapal)
+                          _MethodStatus(
+                            icon: Icons.credit_card_outlined,
+                            label: 'Card & bank checkout',
+                            detail: 'Pesapal · online only',
+                            enabled:
+                                _configured(pesapal, 'pesapal') &&
+                                pesapal?['pesapal_ipn_ready'] == true,
+                          ),
                       ],
                     ),
                     const SizedBox(height: 12),
-                    _ProviderEditor(
-                      provider: 'daraja',
-                      settings: daraja,
-                      enabled: online && _busyAction == null,
-                      saving: _busyAction == 'save:daraja',
-                      testing: _busyAction == 'test:daraja',
-                      registering: _busyAction == 'register_daraja_c2b:',
-                      defaultCallbackUrl: _defaultCallback(
-                        '/api/payments/daraja/callback',
+                    if (canConfigureDaraja)
+                      _ProviderEditor(
+                        provider: 'daraja',
+                        settings: daraja,
+                        enabled: online && _busyAction == null,
+                        saving: _busyAction == 'save:daraja',
+                        testing: _busyAction == 'test:daraja',
+                        registering: _busyAction == 'register_daraja_c2b:',
+                        defaultCallbackUrl: _defaultCallback(
+                          '/api/payments/daraja/callback',
+                        ),
+                        onSave: _save,
+                        onTest: () => _runAction('test', provider: 'daraja'),
+                        onRegister: () => _runAction('register_daraja_c2b'),
                       ),
-                      onSave: _save,
-                      onTest: () => _runAction('test', provider: 'daraja'),
-                      onRegister: () => _runAction('register_daraja_c2b'),
-                    ),
-                    const SizedBox(height: 8),
-                    _ProviderEditor(
-                      provider: 'pesapal',
-                      settings: pesapal,
-                      enabled: online && _busyAction == null,
-                      saving: _busyAction == 'save:pesapal',
-                      testing: _busyAction == 'test:pesapal',
-                      registering: _busyAction == 'register_pesapal_ipn:',
-                      defaultCallbackUrl: _defaultCallback(
-                        '/api/payments/pesapal/ipn',
+                    if (canConfigurePesapal)
+                      _ProviderEditor(
+                        provider: 'pesapal',
+                        settings: pesapal,
+                        enabled: online && _busyAction == null,
+                        saving: _busyAction == 'save:pesapal',
+                        testing: _busyAction == 'test:pesapal',
+                        registering: _busyAction == 'register_pesapal_ipn:',
+                        defaultCallbackUrl: _defaultCallback(
+                          '/api/payments/pesapal/ipn',
+                        ),
+                        onSave: _save,
+                        onTest: () => _runAction('test', provider: 'pesapal'),
+                        onRegister: () => _runAction('register_pesapal_ipn'),
                       ),
-                      onSave: _save,
-                      onTest: () => _runAction('test', provider: 'pesapal'),
-                      onRegister: () => _runAction('register_pesapal_ipn'),
+                    const SizedBox(height: 14),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            'Manual payment instructions',
+                            style: theme.textTheme.titleMedium,
+                          ),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: online && _busyAction == null
+                              ? () => _editManualPaymentMethod()
+                              : null,
+                          icon: const Icon(Icons.add),
+                          label: const Text('Add method'),
+                        ),
+                      ],
                     ),
+                    if (manualPaymentOptions.isEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(
+                          'No manual instructions saved. Add a Till, Paybill, Pochi, bank, card-terminal, or other payment destination. These details are cached per account and remain available offline.',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      )
+                    else
+                      ...manualPaymentOptions.map(
+                        (method) => Card.outlined(
+                          margin: const EdgeInsets.only(top: 8),
+                          child: ListTile(
+                            leading: Icon(
+                              method['method_code'] == 'mpesa_manual'
+                                  ? Icons.phone_android
+                                  : method['method_code'] == 'bank_transfer'
+                                  ? Icons.account_balance
+                                  : Icons.payments_outlined,
+                            ),
+                            title: Text(
+                              method['display_name']?.toString() ??
+                                  'Payment method',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            subtitle: Text(
+                              [
+                                '${method['account_type'] ?? 'other'} · ${method['merchant_number'] ?? 'No destination'}',
+                                if ((method['account_reference']?.toString() ??
+                                        '')
+                                    .isNotEmpty)
+                                  'Account: ${method['account_reference']}',
+                                if ((method['instructions']?.toString() ?? '')
+                                    .isNotEmpty)
+                                  method['instructions'].toString(),
+                                method['is_active'] == true
+                                    ? 'Active'
+                                    : 'Inactive',
+                                method['is_default'] == true
+                                    ? 'Default method'
+                                    : '',
+                              ].where((line) => line.isNotEmpty).join('\n'),
+                              maxLines: 4,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            trailing: IconButton(
+                              tooltip: 'Edit payment instructions',
+                              onPressed: online && _busyAction == null
+                                  ? () => _editManualPaymentMethod(method)
+                                  : null,
+                              icon: const Icon(Icons.edit_outlined),
+                            ),
+                          ),
+                        ),
+                      ),
                     if (_notice != null) ...[
                       const SizedBox(height: 10),
                       _NoticeBox(
@@ -591,8 +710,7 @@ class _ProviderEditorState extends State<_ProviderEditor> {
                         'businessShortcode': _isDaraja
                             ? _shortcode.text.trim()
                             : '',
-                        if (_isDaraja)
-                          'tillNumber': _tillNumber.text.trim(),
+                        if (_isDaraja) 'tillNumber': _tillNumber.text.trim(),
                         'accountReference': _reference.text.trim(),
                         if (_isDaraja) 'transactionType': _transactionType,
                         'callbackUrl': _callback.text.trim(),
@@ -723,4 +841,266 @@ class _NoticeBox extends StatelessWidget {
       ],
     ),
   );
+}
+
+class _ManualPaymentMethodDialog extends StatefulWidget {
+  const _ManualPaymentMethodDialog({this.method});
+
+  final Map<String, dynamic>? method;
+
+  @override
+  State<_ManualPaymentMethodDialog> createState() =>
+      _ManualPaymentMethodDialogState();
+}
+
+class _ManualPaymentMethodDialogState
+    extends State<_ManualPaymentMethodDialog> {
+  final _formKey = GlobalKey<FormState>();
+  late final TextEditingController _name;
+  late final TextEditingController _number;
+  late final TextEditingController _reference;
+  late final TextEditingController _instructions;
+  late String _methodCode;
+  late String _accountType;
+  late bool _active;
+  late bool _default;
+
+  @override
+  void initState() {
+    super.initState();
+    final method = widget.method;
+    _name = TextEditingController(
+      text: method?['display_name']?.toString() ?? '',
+    );
+    _number = TextEditingController(
+      text: method?['merchant_number']?.toString() ?? '',
+    );
+    _reference = TextEditingController(
+      text: method?['account_reference']?.toString() ?? '',
+    );
+    _instructions = TextEditingController(
+      text: method?['instructions']?.toString() ?? '',
+    );
+    _methodCode = method?['method_code']?.toString() ?? 'mpesa_manual';
+    _accountType = method?['account_type']?.toString() ?? 'buy_goods';
+    _active = method?['is_active'] != false;
+    _default = method?['is_default'] == true;
+  }
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _number.dispose();
+    _reference.dispose();
+    _instructions.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isMpesa = _methodCode == 'mpesa_manual';
+    final isPaybill = isMpesa && _accountType == 'paybill';
+    final isBank = _methodCode == 'bank_transfer';
+    return AlertDialog(
+      title: Text(
+        widget.method == null
+            ? 'Add payment instructions'
+            : 'Edit payment instructions',
+      ),
+      content: SizedBox(
+        width: 590,
+        child: Form(
+          key: _formKey,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                DropdownButtonFormField<String>(
+                  initialValue: _methodCode,
+                  decoration: const InputDecoration(
+                    labelText: 'Payment method',
+                  ),
+                  items: const [
+                    DropdownMenuItem(
+                      value: 'mpesa_manual',
+                      child: Text('M-PESA manual'),
+                    ),
+                    DropdownMenuItem(
+                      value: 'bank_transfer',
+                      child: Text('Bank transfer'),
+                    ),
+                    DropdownMenuItem(
+                      value: 'card',
+                      child: Text('Card terminal'),
+                    ),
+                    DropdownMenuItem(value: 'other', child: Text('Other')),
+                  ],
+                  onChanged: (value) => setState(() {
+                    _methodCode = value ?? _methodCode;
+                    if (_methodCode == 'bank_transfer') {
+                      _accountType = 'bank_account';
+                    }
+                    if (_methodCode == 'mpesa_manual' &&
+                        !{
+                          'buy_goods',
+                          'paybill',
+                          'pochi',
+                        }.contains(_accountType)) {
+                      _accountType = 'buy_goods';
+                    }
+                  }),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  initialValue: _accountType,
+                  decoration: const InputDecoration(labelText: 'Account type'),
+                  items: isMpesa
+                      ? const [
+                          DropdownMenuItem(
+                            value: 'buy_goods',
+                            child: Text('Buy Goods Till'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'paybill',
+                            child: Text('Paybill'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'pochi',
+                            child: Text('Pochi la Biashara'),
+                          ),
+                        ]
+                      : isBank
+                      ? const [
+                          DropdownMenuItem(
+                            value: 'bank_account',
+                            child: Text('Bank account'),
+                          ),
+                        ]
+                      : const [
+                          DropdownMenuItem(
+                            value: 'bank_account',
+                            child: Text('Bank account'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'other',
+                            child: Text('Other'),
+                          ),
+                        ],
+                  onChanged: _methodCode == 'bank_transfer'
+                      ? null
+                      : (value) => setState(
+                          () => _accountType = value ?? _accountType,
+                        ),
+                ),
+                const SizedBox(height: 12),
+                TextFormField(
+                  controller: _name,
+                  decoration: const InputDecoration(
+                    labelText: 'Display name',
+                    hintText: 'Main shop Till',
+                  ),
+                  maxLength: 80,
+                  validator: (value) => (value?.trim().isEmpty ?? true)
+                      ? 'Enter a display name.'
+                      : null,
+                ),
+                const SizedBox(height: 8),
+                TextFormField(
+                  controller: _number,
+                  decoration: InputDecoration(
+                    labelText: isBank
+                        ? 'Bank account / payee details'
+                        : isMpesa
+                        ? 'Till, Paybill or Pochi number'
+                        : 'Merchant number (optional)',
+                    helperText: isMpesa
+                        ? 'Customer-facing destination. Never enter API credentials here.'
+                        : 'These are non-secret payment instructions.',
+                  ),
+                  maxLength: 80,
+                  validator: isMpesa
+                      ? (value) => (value?.trim().isEmpty ?? true)
+                            ? 'Enter the customer-facing number.'
+                            : null
+                      : null,
+                ),
+                if (isPaybill) ...[
+                  const SizedBox(height: 8),
+                  TextFormField(
+                    controller: _reference,
+                    decoration: const InputDecoration(
+                      labelText: 'Paybill account/reference',
+                      helperText: 'Use the business or customer reference expected by the Paybill.',
+                    ),
+                    maxLength: 80,
+                    validator: (value) =>
+                        isPaybill && (value?.trim().isEmpty ?? true)
+                        ? 'Enter the Paybill account/reference.'
+                        : null,
+                  ),
+                ],
+                const SizedBox(height: 8),
+                TextFormField(
+                  controller: _instructions,
+                  decoration: const InputDecoration(
+                    labelText: 'Payment instructions',
+                    hintText: 'Tell the customer how to pay and staff how to confirm receipt.',
+                  ),
+                  maxLines: 3,
+                  maxLength: 1000,
+                ),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: _active,
+                  title: const Text('Available to staff'),
+                  onChanged: (value) => setState(() {
+                    _active = value ?? false;
+                    if (!_active) _default = false;
+                  }),
+                ),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: _default,
+                  title: const Text('Use as the default manual method'),
+                  onChanged: _active
+                      ? (value) => setState(() => _default = value ?? false)
+                      : null,
+                ),
+                Text(
+                  'M-PESA references must be verified by an authorized reviewer before the sale is treated as paid.',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () {
+            if (!_formKey.currentState!.validate()) return;
+            Navigator.of(context).pop(<String, Object?>{
+              'methodId': widget.method?['id'],
+              'methodCode': _methodCode,
+              'accountType': _accountType,
+              'displayName': _name.text.trim(),
+              'merchantNumber': _number.text.trim(),
+              'accountReference': _reference.text.trim(),
+              'instructions': _instructions.text.trim(),
+              'isActive': _active,
+              'isDefault': _default,
+            });
+          },
+          child: const Text('Save instructions'),
+        ),
+      ],
+    );
+  }
 }

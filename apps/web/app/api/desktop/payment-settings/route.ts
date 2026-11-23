@@ -1,5 +1,8 @@
 import { NextResponse } from 'next/server'
 import { z } from 'zod'
+import { validateBusinessPaymentMethod } from '@smartretail/shared'
+import { createClient as createSupabaseClient } from '@supabase/supabase-js'
+import { isBusinessPaymentMethodEnabled, paymentMethodForProvider } from '../../../../lib/payments/businessPaymentEntitlements'
 import {
   getBusinessDarajaConfig,
   registerDarajaC2BCallbacksWithConfig,
@@ -31,8 +34,20 @@ const saveSchema = z.object({
 })
 
 const actionSchema = z.object({
-  action: z.enum(['test', 'register_daraja_c2b', 'register_pesapal_ipn']),
+  action: z.enum(['test', 'register_daraja_c2b', 'register_pesapal_ipn', 'save_method']),
   provider: z.enum(['daraja', 'pesapal']).optional(),
+})
+
+const paymentMethodSchema = z.object({
+  methodId: z.string().uuid().nullable().optional(),
+  methodCode: z.enum(['mpesa_manual', 'bank_transfer', 'card', 'other']),
+  accountType: z.enum(['buy_goods', 'paybill', 'pochi', 'bank_account', 'other']),
+  displayName: z.string().trim().min(1).max(80),
+  merchantNumber: z.string().trim().max(80).optional().default(''),
+  accountReference: z.string().trim().max(80).optional().default(''),
+  instructions: z.string().trim().max(1000).optional().default(''),
+  isActive: z.boolean().default(true),
+  isDefault: z.boolean().default(false),
 })
 
 type OwnerProfile = {
@@ -76,15 +91,46 @@ async function authorizeOwner(request: Request) {
   if (!profile.business_id) {
     return { response: json({ error: 'Business context is missing.' }, 403) } as const
   }
-  return { service, profile } as const
+  return { service, profile, token } as const
+}
+
+function sessionClientForToken(token: string) {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  if (!url || !anonKey) return null
+  return createSupabaseClient(url, anonKey, {
+    global: { headers: { Authorization: `Bearer ${token}` } },
+    auth: { autoRefreshToken: false, persistSession: false },
+  })
+}
+
+function providerEntitlementMessage(provider: 'daraja' | 'pesapal') {
+  return provider === 'daraja'
+    ? 'M-PESA prompts are not included in this business subscription plan.'
+    : 'Hosted card and bank checkout are not included in this business subscription plan.'
 }
 
 export async function GET(request: Request) {
   const authorized = await authorizeOwner(request)
   if ('response' in authorized) return authorized.response
-  const { service, profile } = authorized
-
-  const [{ data, error }, { data: pesapal, error: pesapalError }] = await Promise.all([
+  const { service, profile, token } = authorized
+  const sessionClient = sessionClientForToken(token)
+  const [darajaAllowed, pesapalAllowed] = sessionClient
+    ? await Promise.all([
+        isBusinessPaymentMethodEnabled(sessionClient, profile.business_id!, 'mpesa_stk'),
+        isBusinessPaymentMethodEnabled(sessionClient, profile.business_id!, 'pesapal'),
+      ])
+    : [false, false]
+  if (!darajaAllowed || !pesapalAllowed) {
+    const { error: cleanupError } = await service.rpc(
+      'purge_unentitled_business_payment_provider_settings',
+      { p_business_id: profile.business_id },
+    )
+    if (cleanupError) {
+      return json({ error: 'Could not reconcile payment settings with the current subscription.' }, 503)
+    }
+  }
+  const [{ data, error }, { data: pesapal, error: pesapalError }, { data: manualMethods, error: methodsError }] = await Promise.all([
     service.rpc('owner_my_payment_provider_settings_v2', {
       p_business_id: profile.business_id,
       p_actor_id: profile.id,
@@ -94,12 +140,19 @@ export async function GET(request: Request) {
       .eq('business_id', profile.business_id)
       .eq('provider', 'pesapal')
       .maybeSingle(),
+    service.from('business_payment_methods')
+      .select('id,method_code,account_type,display_name,merchant_number,account_reference,instructions,is_active,is_default,configuration_version,updated_at')
+      .eq('business_id', profile.business_id)
+      .order('is_default', { ascending: false })
+      .order('updated_at', { ascending: false }),
   ])
-  if (error || pesapalError) {
-    return json({ error: 'Could not load business payment settings. Apply migration 074 if this feature is not installed.' }, 503)
+  if (error || pesapalError || methodsError) {
+    return json({ error: 'Could not load business payment settings. Apply migrations 074 and 124 if payment settings are not installed.' }, 503)
   }
 
-  const providers = Array.isArray(data) ? data : []
+  const providers = (Array.isArray(data) ? data : []).filter((row) =>
+    row.provider === 'daraja' ? darajaAllowed : row.provider === 'pesapal' && pesapalAllowed,
+  )
   return json({
     success: true,
     data: {
@@ -107,11 +160,14 @@ export async function GET(request: Request) {
         ...row,
         pesapal_ipn_ready: row.provider === 'pesapal' && Boolean(pesapal?.pesapal_ipn_id),
       })),
+      manualPaymentOptions: manualMethods ?? [],
       methods: {
         cash: true,
         mobile_manual: true,
-        daraja_prompt: providers.some((row) => row.provider === 'daraja' && row.is_active && row.consumer_key_set && row.consumer_secret_set && row.passkey_set),
-        pesapal_checkout: providers.some((row) => row.provider === 'pesapal' && row.is_active && row.consumer_key_set && row.consumer_secret_set && Boolean(pesapal?.pesapal_ipn_id)),
+        daraja_prompt_entitled: darajaAllowed,
+        pesapal_checkout_entitled: pesapalAllowed,
+        daraja_prompt: darajaAllowed && providers.some((row) => row.provider === 'daraja' && row.is_active && row.consumer_key_set && row.consumer_secret_set && row.passkey_set),
+        pesapal_checkout: pesapalAllowed && providers.some((row) => row.provider === 'pesapal' && row.is_active && row.consumer_key_set && row.consumer_secret_set && Boolean(pesapal?.pesapal_ipn_id)),
       },
     },
   })
@@ -120,7 +176,8 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const authorized = await authorizeOwner(request)
   if ('response' in authorized) return authorized.response
-  const { service, profile } = authorized
+  const { service, profile, token } = authorized
+  const sessionClient = sessionClientForToken(token)
   let body: unknown
   try {
     const text = await request.text()
@@ -138,6 +195,12 @@ export async function POST(request: Request) {
     const parsed = saveSchema.safeParse(body)
     if (!parsed.success) return json({ error: parsed.error.issues[0]?.message ?? 'Check the payment provider values.' }, 400)
     const settings = parsed.data
+    const entitled = sessionClient && await isBusinessPaymentMethodEnabled(
+      sessionClient,
+      profile.business_id!,
+      paymentMethodForProvider(settings.provider),
+    )
+    if (!entitled) return json({ error: providerEntitlementMessage(settings.provider) }, 403)
     if (settings.provider === 'daraja' && (!settings.businessShortcode || !settings.transactionType || (settings.transactionType === 'CustomerBuyGoodsOnline' && !settings.tillNumber))) {
       return json({ error: 'Daraja requires a Store/API shortcode and transaction type. Buy Goods also requires its customer-facing Till.' }, 400)
     }
@@ -186,9 +249,45 @@ export async function POST(request: Request) {
     return json({ success: true, message: 'Provider settings saved securely.' })
   }
 
+  if (action === 'save_method') {
+    const parsed = paymentMethodSchema.safeParse(body)
+    if (!parsed.success) return json({ error: parsed.error.issues[0]?.message ?? 'Check the payment instructions.' }, 400)
+    const method = parsed.data
+    const validationError = validateBusinessPaymentMethod(method)
+    if (validationError) return json({ error: validationError }, 400)
+    const { data: methodId, error } = await service.rpc('owner_save_business_payment_method', {
+      p_method_id: method.methodId ?? null,
+      p_business_id: profile.business_id,
+      p_actor_id: profile.id,
+      p_method_code: method.methodCode,
+      p_account_type: method.accountType,
+      p_display_name: method.displayName,
+      p_merchant_number: method.merchantNumber,
+      p_account_reference: method.accountReference,
+      p_instructions: method.instructions,
+      p_is_active: method.isActive,
+      p_is_default: method.isDefault,
+    })
+    if (error || !methodId) return json({ error: error?.message ?? 'Could not save payment instructions.' }, 400)
+    return json({ success: true, methodId })
+  }
+
   const parsed = actionSchema.safeParse(body)
   if (!parsed.success) return json({ error: parsed.error.issues[0]?.message ?? 'Select a supported payment action.' }, 400)
   const { business_id: businessId, id: ownerId } = profile
+  const provider = parsed.data.action === 'register_daraja_c2b'
+    ? 'daraja'
+    : parsed.data.action === 'register_pesapal_ipn'
+      ? 'pesapal'
+      : parsed.data.provider
+  if (provider) {
+    const entitled = sessionClient && await isBusinessPaymentMethodEnabled(
+      sessionClient,
+      businessId!,
+      paymentMethodForProvider(provider),
+    )
+    if (!entitled) return json({ error: providerEntitlementMessage(provider) }, 403)
+  }
 
   try {
     if (parsed.data.action === 'test') {

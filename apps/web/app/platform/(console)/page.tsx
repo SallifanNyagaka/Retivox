@@ -112,7 +112,7 @@ export default async function PlatformOverviewPage() {
       <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
         <QuickAction href="/platform/businesses" label="Businesses" icon={<Building2 size={18} />} />
         <QuickAction href="/platform/pricing" label="Pricing" icon={<Tags size={18} />} />
-        <QuickAction href="/platform/payments" label="M-Pesa" icon={<CreditCard size={18} />} />
+        <QuickAction href="/platform/payments" label="Payments & billing" icon={<CreditCard size={18} />} />
         <QuickAction href="/platform/dormant" label="Dormancy" icon={<Moon size={18} />} />
         <QuickAction href="/platform/login-attempts" label="Security" icon={<ShieldAlert size={18} />} />
       </div>

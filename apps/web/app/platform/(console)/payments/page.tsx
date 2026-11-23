@@ -5,6 +5,7 @@ import { createServiceRoleClient } from '../../../../lib/supabase/admin'
 import { headers } from 'next/headers'
 import { requestOrigin } from '../../../../lib/requestOrigin'
 import { recordPlatformSubscriptionRefund, requestPlatformSubscriptionRefund, reviewPlatformSubscriptionRefund, reviewSubscriptionPayment, updatePlatformPaymentSettings, savePlatformPesapalSettings, registerPlatformPesapalCallback, recheckPlatformPesapalSubscription, submitPlatformPesapalRefund } from '../actions'
+import BusinessBillingPortfolio, { type BillingPortfolioRow } from './BusinessBillingPortfolio'
 
 export const dynamic = 'force-dynamic'
 
@@ -50,6 +51,16 @@ type VerifiedPaymentRow = {
   paid_at: string | null; businesses: { name: string } | { name: string }[] | null
 }
 
+type PortfolioBusinessRow = { id: string; name: string; subscription_plan: string; subscription_status: string }
+type PortfolioSubscriptionRow = {
+  business_id: string; plan: string; status: string; billing_interval: string | null
+  current_period_end: string | null; next_plan_key: string | null; next_billing_interval: string | null; next_period_start: string | null
+}
+type PortfolioPaymentRow = {
+  id: string; business_id: string; amount: number; currency: string; status: string
+  payment_method: string; reference_code: string; submitted_at: string; paid_at: string | null
+}
+
 export default async function PlatformPaymentsPage() {
   const serviceClient = createServiceRoleClient()
   const origin = requestOrigin(await headers())
@@ -82,23 +93,86 @@ export default async function PlatformPaymentsPage() {
       .select('id, business_id, amount, currency, reference_code, paid_at, businesses(name)')
       .eq('status', 'verified').order('paid_at', { ascending: false }).limit(100),
   ])
+  const [businessResponse, subscriptionResponse, billingPaymentResponse] = await Promise.all([
+    serviceClient.from('businesses').select('id,name,subscription_plan,subscription_status').order('name').limit(1000),
+    serviceClient.from('subscriptions').select('business_id,plan,status,billing_interval,current_period_end,next_plan_key,next_billing_interval,next_period_start').order('created_at', { ascending: false }).limit(2000),
+    serviceClient.from('subscription_payment_requests').select('id,business_id,amount,currency,status,payment_method,reference_code,submitted_at,paid_at').order('submitted_at', { ascending: false }).limit(3000),
+  ])
 
-  if (error) {
-    return (
-      <Card padding="md">
-        <CardHeader title="M-Pesa setup needed" />
-        <p style={{ margin: 0, color: 'var(--color-text-muted)', fontSize: 14 }}>
-          Apply migration 049_platform_operations_console.sql to manage the platform receiving account here.
-        </p>
-      </Card>
-
-    )
+  const portfolioBusinesses = (businessResponse.data ?? []) as PortfolioBusinessRow[]
+  const portfolioSubscriptions = (subscriptionResponse.data ?? []) as PortfolioSubscriptionRow[]
+  const portfolioPayments = (billingPaymentResponse.data ?? []) as PortfolioPaymentRow[]
+  const subscriptionByBusiness = new Map<string, PortfolioSubscriptionRow>()
+  for (const subscription of portfolioSubscriptions) {
+    if (!subscriptionByBusiness.has(subscription.business_id)) subscriptionByBusiness.set(subscription.business_id, subscription)
   }
+  const latestPaymentByBusiness = new Map<string, PortfolioPaymentRow>()
+  const verifiedPaymentByBusiness = new Map<string, PortfolioPaymentRow>()
+  for (const payment of portfolioPayments) {
+    if (!latestPaymentByBusiness.has(payment.business_id)) latestPaymentByBusiness.set(payment.business_id, payment)
+    if (payment.status === 'verified') {
+      const currentVerified = verifiedPaymentByBusiness.get(payment.business_id)
+      const paidAt = payment.paid_at ? Date.parse(payment.paid_at) : 0
+      const currentPaidAt = currentVerified?.paid_at ? Date.parse(currentVerified.paid_at) : 0
+      if (!currentVerified || paidAt > currentPaidAt) verifiedPaymentByBusiness.set(payment.business_id, payment)
+    }
+  }
+  const billingRows: BillingPortfolioRow[] = portfolioBusinesses.map((business) => {
+    const subscription = subscriptionByBusiness.get(business.id)
+    const latest = latestPaymentByBusiness.get(business.id)
+    const verified = verifiedPaymentByBusiness.get(business.id)
+    return {
+      businessId: business.id,
+      businessName: business.name,
+      plan: subscription?.plan ?? business.subscription_plan ?? 'Unknown',
+      subscriptionStatus: subscription?.status ?? business.subscription_status ?? 'unknown',
+      billingInterval: subscription?.billing_interval ?? null,
+      periodEnd: subscription?.current_period_end ?? null,
+      nextPlan: subscription?.next_plan_key ?? null,
+      nextInterval: subscription?.next_billing_interval ?? null,
+      nextPeriodStart: subscription?.next_period_start ?? null,
+      latestPayment: latest ? { status: latest.status, amount: Number(latest.amount), currency: latest.currency, method: latest.payment_method, reference: latest.reference_code, submittedAt: latest.submitted_at } : null,
+      lastVerifiedPayment: verified ? { amount: Number(verified.amount), currency: verified.currency, method: verified.payment_method, reference: verified.reference_code, paidAt: verified.paid_at } : null,
+    }
+  })
 
   const settings = data as PaymentSettingsRow | null
 
   return (
     <div className="flex flex-col gap-6">
+      <div>
+        <h1 style={{ margin: 0, color: 'var(--color-text-primary)', fontSize: 28, fontWeight: 900 }}>Payments &amp; billing</h1>
+        <p style={{ margin: '6px 0 0', color: 'var(--color-text-muted)', fontSize: 14 }}>Approve subscription payments, track paid status by business, and review scheduled plan changes.</p>
+      </div>
+      <Card padding="md">
+        <CardHeader title="Payment approval queue" action={<Badge variant={(pendingPayments ?? []).length ? 'warning' : 'success'}>{(pendingPayments ?? []).length} awaiting review</Badge>} />
+        {pendingPaymentsError ? (
+          <p style={{ color: 'var(--color-danger)', fontSize: 13 }}>Unable to load pending payments. Refresh the page or check the subscription payment service.</p>
+        ) : (pendingPayments ?? []).length === 0 ? (
+          <p style={{ color: 'var(--color-text-muted)', fontSize: 13, margin: 0 }}>No subscription payments need review.</p>
+        ) : (
+          <div className="flex flex-col gap-3">
+            {(pendingPayments ?? []).map((rawPayment) => {
+              const payment = rawPayment as PendingSubscriptionPaymentRow
+              const joinedBusiness = Array.isArray(payment.businesses) ? payment.businesses[0] : payment.businesses
+              return <div key={payment.id} className="grid grid-cols-1 gap-3 border-b pb-4 md:grid-cols-[1.2fr_0.6fr_1.4fr_auto] md:items-center" style={{ borderColor: 'var(--color-border)' }}>
+                <div>
+                  <p style={{ color: 'var(--color-text-primary)', fontSize: 14, fontWeight: 750, margin: 0 }}>{joinedBusiness?.name ?? payment.business_id}</p>
+                  <p style={{ color: 'var(--color-text-muted)', fontSize: 12, margin: '4px 0 0' }}>{payment.plan_key ?? 'Plan pending'} · {payment.billing_interval} · {payment.payment_method.replace(/_/g, ' ')}</p>
+                  <p style={{ color: 'var(--color-text-muted)', fontSize: 12, margin: '3px 0 0' }}>Ref {payment.reference_code}{payment.payer_phone ? ` · ${payment.payer_phone}` : ''} · {new Date(payment.submitted_at).toLocaleString()}</p>
+                  {payment.provider_result_description && <p style={{ color: 'var(--color-warning)', fontSize: 12, margin: '4px 0 0' }}>{payment.provider_result_description}</p>}
+                </div>
+                <strong style={{ color: 'var(--color-text-primary)', fontSize: 14 }}>{new Intl.NumberFormat(undefined, { style: 'currency', currency: payment.currency }).format(Number(payment.amount))}</strong>
+                {payment.payment_method === 'pesapal' ? <div className="flex flex-col items-start gap-2"><span style={{ color: payment.pesapal_tracking_id ? 'var(--color-warning)' : 'var(--color-danger)', fontSize: 12 }}>{payment.provider_result_description ?? payment.review_note ?? (payment.pesapal_tracking_id ? 'Awaiting provider confirmation' : 'Checkout tracking is not available')}</span>{payment.pesapal_tracking_id && <form action={recheckPlatformPesapalSubscription}><input type="hidden" name="paymentRequestId" value={payment.id} /><button type="submit" className="btn-outline" style={{ borderRadius: 8, padding: '8px 12px' }}>Recheck with Pesapal</button></form>}</div> : <div className="flex flex-wrap items-end gap-2">
+                  {(['approve', 'reject'] as const).map((decision) => <form key={decision} action={reviewSubscriptionPayment} className="flex flex-col gap-1"><input type="hidden" name="paymentRequestId" value={payment.id} /><input type="hidden" name="decision" value={decision} /><input name="reviewNote" maxLength={240} placeholder="Optional note" aria-label={`${decision} review note`} style={{ ...inputStyle, width: 150, marginTop: 0 }} /><button type="submit" className={decision === 'approve' ? 'btn-success' : 'btn-outline'} style={{ borderRadius: 8, padding: '8px 12px' }}>{decision === 'approve' ? 'Approve payment' : 'Reject'}</button></form>)}
+                </div>}
+              </div>
+            })}
+          </div>
+        )}
+      </Card>
+      <BusinessBillingPortfolio rows={billingRows} loadError={Boolean(businessResponse.error || subscriptionResponse.error || billingPaymentResponse.error)} />
+      {error && <p role="alert" style={{ margin: 0, color: 'var(--color-warning)', fontSize: 13 }}>The platform receiving account settings could not be loaded. Subscription approval and business billing remain available above. Apply migration 049 to restore platform M-Pesa settings.</p>}
       <section
         className="rounded-3xl"
         style={{
@@ -136,52 +210,6 @@ export default async function PlatformPaymentsPage() {
           <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>{pesapalSettings?.ipn_id ? `IPN registered · ${pesapalSettings.ipn_id}` : 'Save credentials, then register the IPN before enabling checkout.'}</span>
         </div>
         {pesapalResponse.error && <p role="alert" style={{ color: 'var(--color-danger)', fontSize: 12 }}>Unable to load Pesapal setup status.</p>}
-      </Card>
-
-      <Card padding="md">
-        <CardHeader title="Manual subscription payment review" />
-        {pendingPaymentsError ? (
-          <p style={{ color: 'var(--color-danger)', fontSize: 13 }}>Unable to load pending manual payments.</p>
-        ) : (pendingPayments ?? []).length === 0 ? (
-          <p style={{ color: 'var(--color-text-muted)', fontSize: 13, margin: 0 }}>No manual payments need review.</p>
-        ) : (
-          <div className="flex flex-col gap-3">
-            {(pendingPayments ?? []).map((rawPayment) => {
-              const payment = rawPayment as PendingSubscriptionPaymentRow
-              const joinedBusiness = Array.isArray(payment.businesses) ? payment.businesses[0] : payment.businesses
-
-              return (
-                <div key={payment.id} className="grid grid-cols-1 gap-3 border-b pb-4 md:grid-cols-[1fr_1fr_auto] md:items-center" style={{ borderColor: 'var(--color-border)' }}>
-                  <div>
-                    <p style={{ color: 'var(--color-text-primary)', fontSize: 14, fontWeight: 750, margin: 0 }}>{joinedBusiness?.name ?? payment.business_id}</p>
-                    <p style={{ color: 'var(--color-text-muted)', fontSize: 12, margin: '4px 0 0' }}>
-                      {(payment.plan_key ?? 'Plan pending')} · {payment.billing_interval} · {payment.payment_method.replace(/_/g, ' ')}
-                    </p>
-                    <p style={{ color: 'var(--color-text-muted)', fontSize: 12, margin: '3px 0 0' }}>
-                      Ref {payment.reference_code}{payment.payer_phone ? ` · ${payment.payer_phone}` : ''} · {new Date(payment.submitted_at).toLocaleString()}
-                    </p>
-                  </div>
-                  <strong style={{ color: 'var(--color-text-primary)', fontSize: 14 }}>
-                    {new Intl.NumberFormat(undefined, { style: 'currency', currency: payment.currency }).format(Number(payment.amount))}
-                  </strong>
-                  {payment.payment_method === 'pesapal' ? (
-                    <div className="flex flex-col items-start gap-2">
-                      <span style={{ color: payment.pesapal_tracking_id ? 'var(--color-warning)' : 'var(--color-danger)', fontSize: 12 }}>
-                        {payment.provider_result_description ?? payment.review_note ?? (payment.pesapal_tracking_id ? 'Awaiting provider confirmation' : 'Checkout tracking is not available')}
-                      </span>
-                      {payment.pesapal_tracking_id && <form action={recheckPlatformPesapalSubscription}><input type="hidden" name="paymentRequestId" value={payment.id} /><button type="submit" className="btn-outline" style={{ borderRadius: 8, padding: '8px 12px' }}>Recheck with Pesapal</button></form>}
-                    </div>
-                  ) : (
-                    <div className="flex gap-2">
-                      <form action={reviewSubscriptionPayment}><input type="hidden" name="paymentRequestId" value={payment.id} /><input type="hidden" name="decision" value="approve" /><button type="submit" className="btn-success" style={{ borderRadius: 8, padding: '8px 12px' }}>Approve</button></form>
-                      <form action={reviewSubscriptionPayment}><input type="hidden" name="paymentRequestId" value={payment.id} /><input type="hidden" name="decision" value="reject" /><button type="submit" className="btn-outline" style={{ borderRadius: 8, padding: '8px 12px' }}>Reject</button></form>
-                    </div>
-                  )}
-                </div>
-              )
-            })}
-          </div>
-        )}
       </Card>
 
       <SubscriptionRefundManagement refunds={refundRows ?? []} refundError={Boolean(refundError)} payments={verifiedRows ?? []} paymentError={Boolean(verifiedError)} />
