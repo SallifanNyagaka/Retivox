@@ -6,6 +6,8 @@ import { headers } from 'next/headers'
 import { requestOrigin } from '../../../../lib/requestOrigin'
 import { recordPlatformSubscriptionRefund, requestPlatformSubscriptionRefund, reviewPlatformSubscriptionRefund, reviewSubscriptionPayment, updatePlatformPaymentSettings, savePlatformPesapalSettings, registerPlatformPesapalCallback, recheckPlatformPesapalSubscription, submitPlatformPesapalRefund } from '../actions'
 import BusinessBillingPortfolio, { type BillingPortfolioRow } from './BusinessBillingPortfolio'
+import PlatformSubscriptionPaymentConfigForm from './PlatformSubscriptionPaymentConfigForm'
+import { EMPTY_PLATFORM_SUBSCRIPTION_PAYMENT_CONFIG, parsePlatformSubscriptionPaymentConfig } from '../../../../lib/subscriptions/platformPaymentConfig'
 
 export const dynamic = 'force-dynamic'
 
@@ -36,6 +38,7 @@ type PendingSubscriptionPaymentRow = {
   pesapal_tracking_id: string | null
   provider_result_description: string | null
   review_note: string | null
+  platform_payment_option_snapshot: Record<string, unknown> | null
   businesses: { name: string } | { name: string }[] | null
 }
 
@@ -64,8 +67,9 @@ type PortfolioPaymentRow = {
 export default async function PlatformPaymentsPage() {
   const serviceClient = createServiceRoleClient()
   const origin = requestOrigin(await headers())
-  const [configStatus, pesapalResponse] = await Promise.all([
+  const [configStatus, pesapalResponse, subscriptionPaymentConfigResponse] = await Promise.all([
     getDarajaConfigurationStatus(), serviceClient.rpc('platform_get_pesapal_status'),
+    serviceClient.from('platform_subscription_payment_config').select('*').eq('id', true).maybeSingle(),
   ])
   const pesapalSettings = Array.isArray(pesapalResponse.data) ? pesapalResponse.data[0] as { environment: string; callback_url: string; credentials_set: boolean; ipn_id: string | null; updated_at: string } | undefined : undefined
   const { data, error } = await serviceClient
@@ -79,7 +83,7 @@ export default async function PlatformPaymentsPage() {
 
   const { data: pendingPayments, error: pendingPaymentsError } = await serviceClient
     .from('subscription_payment_requests')
-    .select('id, business_id, amount, currency, payment_method, reference_code, payer_phone, plan_key, billing_interval, submitted_at, provider, pesapal_tracking_id, provider_result_description, review_note, businesses(name)')
+    .select('id, business_id, amount, currency, payment_method, reference_code, payer_phone, plan_key, billing_interval, submitted_at, provider, pesapal_tracking_id, provider_result_description, review_note, platform_payment_option_snapshot, businesses(name)')
     .eq('status', 'pending')
     .in('payment_method', ['mpesa_manual', 'bank_transfer', 'cash_deposit', 'other', 'pesapal'])
     .order('submitted_at', { ascending: true })
@@ -137,15 +141,18 @@ export default async function PlatformPaymentsPage() {
   })
 
   const settings = data as PaymentSettingsRow | null
+  const subscriptionPaymentConfig = subscriptionPaymentConfigResponse.error
+    ? EMPTY_PLATFORM_SUBSCRIPTION_PAYMENT_CONFIG
+    : parsePlatformSubscriptionPaymentConfig(subscriptionPaymentConfigResponse.data)
 
   return (
     <div className="flex flex-col gap-6">
       <div>
         <h1 style={{ margin: 0, color: 'var(--color-text-primary)', fontSize: 28, fontWeight: 900 }}>Payments &amp; billing</h1>
-        <p style={{ margin: '6px 0 0', color: 'var(--color-text-muted)', fontSize: 14 }}>Approve subscription payments, track paid status by business, and review scheduled plan changes.</p>
+        <p style={{ margin: '6px 0 0', color: 'var(--color-text-muted)', fontSize: 14 }}>Approve manually reported payments, recheck provider status, track paid status by business, and review scheduled plan changes. Verified M-Pesa and Pesapal payments activate automatically.</p>
       </div>
       <Card padding="md">
-        <CardHeader title="Payment approval queue" action={<Badge variant={(pendingPayments ?? []).length ? 'warning' : 'success'}>{(pendingPayments ?? []).length} awaiting review</Badge>} />
+        <CardHeader title="Manual approvals & provider checks" action={<Badge variant={(pendingPayments ?? []).length ? 'warning' : 'success'}>{(pendingPayments ?? []).length} pending</Badge>} />
         {pendingPaymentsError ? (
           <p style={{ color: 'var(--color-danger)', fontSize: 13 }}>Unable to load pending payments. Refresh the page or check the subscription payment service.</p>
         ) : (pendingPayments ?? []).length === 0 ? (
@@ -160,6 +167,7 @@ export default async function PlatformPaymentsPage() {
                   <p style={{ color: 'var(--color-text-primary)', fontSize: 14, fontWeight: 750, margin: 0 }}>{joinedBusiness?.name ?? payment.business_id}</p>
                   <p style={{ color: 'var(--color-text-muted)', fontSize: 12, margin: '4px 0 0' }}>{payment.plan_key ?? 'Plan pending'} · {payment.billing_interval} · {payment.payment_method.replace(/_/g, ' ')}</p>
                   <p style={{ color: 'var(--color-text-muted)', fontSize: 12, margin: '3px 0 0' }}>Ref {payment.reference_code}{payment.payer_phone ? ` · ${payment.payer_phone}` : ''} · {new Date(payment.submitted_at).toLocaleString()}</p>
+                  {payment.platform_payment_option_snapshot && <p style={{ color: 'var(--color-text-muted)', fontSize: 12, margin: '3px 0 0' }}>Submitted to {(payment.platform_payment_option_snapshot.label as string) ?? 'payment destination'} · {(payment.platform_payment_option_snapshot.destination as string) ?? ''}</p>}
                   {payment.provider_result_description && <p style={{ color: 'var(--color-warning)', fontSize: 12, margin: '4px 0 0' }}>{payment.provider_result_description}</p>}
                 </div>
                 <strong style={{ color: 'var(--color-text-primary)', fontSize: 14 }}>{new Intl.NumberFormat(undefined, { style: 'currency', currency: payment.currency }).format(Number(payment.amount))}</strong>
@@ -172,6 +180,12 @@ export default async function PlatformPaymentsPage() {
         )}
       </Card>
       <BusinessBillingPortfolio rows={billingRows} loadError={Boolean(businessResponse.error || subscriptionResponse.error || billingPaymentResponse.error)} />
+      <Card padding="md">
+        <CardHeader title="Retivox subscription payment options and support" action={<Badge variant={subscriptionPaymentConfigResponse.error ? 'danger' : 'success'}>{subscriptionPaymentConfigResponse.error ? 'Configuration unavailable' : 'Platform managed'}</Badge>} />
+        {subscriptionPaymentConfigResponse.error
+          ? <p role="alert" style={{ color: 'var(--color-danger)', fontSize: 13 }}>Unable to load platform payment options. Apply migration 135, then refresh this page.</p>
+          : <PlatformSubscriptionPaymentConfigForm config={subscriptionPaymentConfig} />}
+      </Card>
       {error && <p role="alert" style={{ margin: 0, color: 'var(--color-warning)', fontSize: 13 }}>The platform receiving account settings could not be loaded. Subscription approval and business billing remain available above. Apply migration 049 to restore platform M-Pesa settings.</p>}
       <section
         className="rounded-3xl"

@@ -404,7 +404,7 @@ class _ProductFormDialogState extends State<ProductFormDialog> {
         context: context,
         builder: (context) => Dialog.fullscreen(
           child: MobileBarcodeScannerScreen(
-            onBarcode: (value) => value.trim().isNotEmpty,
+            onBarcode: (value) async => value.trim().isNotEmpty,
           ),
         ),
       );

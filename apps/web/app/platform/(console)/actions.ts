@@ -6,6 +6,7 @@ import { requirePlatformUser } from '../../../lib/platform/auth'
 import logger from '../../../lib/logger'
 import { registerPlatformPesapalIpn, processPlatformPesapalNotification, getPlatformPesapalSetup, requestPesapalRefund } from '../../../lib/payments/pesapal'
 import type { PlatformLicenseAdjustmentState } from './businesses/license-adjustment-types'
+import { z } from 'zod'
 
 function getString(formData: FormData, key: string): string {
   const value = formData.get(key)
@@ -117,6 +118,7 @@ export async function updatePlatformEmailSettings(formData: FormData): Promise<v
 export async function updatePlatformRuntimeSettings(formData: FormData): Promise<void> {
   const user = await requireDeveloper()
   const rawUrl = getString(formData, 'webAppUrl')
+  const registrationPath = getString(formData, 'accountRegistrationPath')
   let parsedUrl: URL
   try {
     parsedUrl = new URL(rawUrl)
@@ -128,20 +130,24 @@ export async function updatePlatformRuntimeSettings(formData: FormData): Promise
       || (parsedUrl.protocol === 'http:' && !['localhost', '127.0.0.1'].includes(parsedUrl.hostname))) {
     throw new Error('Use an HTTPS URL without a path, query, or credentials')
   }
+  if (!/^\/[A-Za-z0-9/_-]*$/.test(registrationPath) || registrationPath.includes('//')) {
+    throw new Error('Enter a valid same-site registration path, such as /register')
+  }
 
   const serviceClient = createServiceRoleClient()
   const { error } = await serviceClient.rpc('platform_save_runtime_settings', {
     p_web_app_url: parsedUrl.origin,
+    p_account_registration_path: registrationPath,
     p_updated_by: user.id,
   })
-  if (error) throw new Error('Could not save the application URL. Apply migration 077 and try again.')
+  if (error) throw new Error('Could not save the application URL. Apply migration 136 and try again.')
 
   await serviceClient.from('platform_audit_logs').insert({
     platform_user_id: user.id,
     entity_type: 'platform_runtime_settings',
     action: 'updated_web_app_url',
     old_value: null,
-    new_value: { web_app_url: parsedUrl.origin },
+    new_value: { web_app_url: parsedUrl.origin, account_registration_path: registrationPath },
   })
   revalidatePath('/platform/settings')
 }
@@ -386,6 +392,72 @@ export async function reviewSubscriptionPayment(formData: FormData): Promise<voi
   revalidatePath('/platform/payments')
   revalidatePath('/platform')
   revalidatePath('/dashboard/owner/settings')
+}
+
+const platformSubscriptionPaymentConfigSchema = z.object({
+  manual_payment_options: z.array(z.object({
+    id: z.string().uuid(),
+    method: z.enum(['mpesa_manual', 'bank_transfer', 'cash_deposit', 'other']),
+    label: z.string().trim().min(2).max(80),
+    destination: z.string().trim().min(2).max(120),
+    accountName: z.string().trim().max(120).default(''),
+    accountReference: z.string().trim().max(120).default(''),
+    instructions: z.string().trim().max(600).default(''),
+    active: z.boolean().default(true),
+  })).max(12),
+  support_phone: z.string().trim().max(32).default(''),
+  support_email: z.string().trim().max(254).email().or(z.literal('')).default(''),
+  support_whatsapp: z.string().trim().max(32).default(''),
+  support_website: z.string().trim().max(500).refine((value) => {
+    if (!value) return true
+    try {
+      return ['https:', 'http:'].includes(new URL(value).protocol)
+    } catch {
+      return false
+    }
+  }, 'Enter a valid http or https support website.').default(''),
+  support_message: z.string().trim().max(300).default('Need help with your subscription payment? Call or message us.'),
+})
+
+export async function savePlatformSubscriptionPaymentConfig(formData: FormData): Promise<{ success: boolean; error?: string }> {
+  const user = await requireDeveloper()
+  let input: unknown
+  try {
+    input = JSON.parse(getString(formData, 'config'))
+  } catch {
+    return { success: false, error: 'Payment settings could not be read.' }
+  }
+  const parsed = platformSubscriptionPaymentConfigSchema.safeParse(input)
+  if (!parsed.success) return { success: false, error: parsed.error.issues[0]?.message ?? 'Invalid payment settings.' }
+
+  const serviceClient = createServiceRoleClient()
+  const config = parsed.data
+  const { error } = await serviceClient.from('platform_subscription_payment_config').upsert({
+    id: true,
+    manual_payment_options: config.manual_payment_options,
+    support_phone: config.support_phone || null,
+    support_email: config.support_email || null,
+    support_whatsapp: config.support_whatsapp || null,
+    support_website: config.support_website || null,
+    support_message: config.support_message || 'Need help with your subscription payment? Call or message us.',
+    updated_by: user.id,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: 'id' })
+  if (error) {
+    logger.error('Platform subscription payment configuration save failed', { error })
+    return { success: false, error: 'Unable to save payment settings.' }
+  }
+  const { error: auditError } = await serviceClient.from('platform_audit_logs').insert({
+    platform_user_id: user.id,
+    entity_type: 'platform_subscription_payment_config',
+    entity_id: 'true',
+    action: 'updated',
+    new_value: { option_count: config.manual_payment_options.length, active_option_count: config.manual_payment_options.filter((option) => option.active).length, support_channels: ['phone', 'email', 'whatsapp', 'website'].filter((channel) => Boolean(config[`support_${channel}` as keyof typeof config])) },
+  })
+  if (auditError) logger.error('Platform subscription payment configuration audit failed', { error: auditError })
+  revalidatePath('/platform/payments')
+  revalidatePath('/dashboard/owner/settings')
+  return { success: true }
 }
 
 export async function recheckPlatformPesapalSubscription(formData: FormData): Promise<void> {

@@ -156,14 +156,28 @@ export default function RegisterPage() {
   const [country, setCountry] = useState('')
   const [currency, setCurrency] = useState('')
   const [timezone, setTimezone] = useState('')
+  const [nativeState, setNativeState] = useState('')
+  const [codeChallenge, setCodeChallenge] = useState('')
   const currentYear = new Date().getFullYear()
 
-  // Redirect to owner dashboard after successful registration
+  // Native registration returns only a short-lived, one-use authorization code.
   useEffect(() => {
     if (state.success) {
-      router.push('/dashboard/owner')
+      if (state.nativeReturnUrl) {
+        window.location.assign(state.nativeReturnUrl)
+      } else if (!state.notice) {
+        router.push('/dashboard/owner')
+      }
     }
-  }, [state.success, router])
+  }, [state.success, state.nativeReturnUrl, state.notice, router])
+
+  useEffect(() => {
+    const query = new URLSearchParams(window.location.search)
+    if (query.get('native') === '1') {
+      setNativeState(query.get('state') ?? '')
+      setCodeChallenge(query.get('code_challenge') ?? '')
+    }
+  }, [])
 
   return (
     <div className="min-h-screen w-full flex">
@@ -317,6 +331,13 @@ export default function RegisterPage() {
   </div>
 
   <form action={formAction}>
+    {nativeState && codeChallenge ? (
+      <>
+        <input type="hidden" name="nativeApp" value="1" />
+        <input type="hidden" name="nativeState" value={nativeState} />
+        <input type="hidden" name="codeChallenge" value={codeChallenge} />
+      </>
+    ) : null}
     {/* Two column grid — personal left, business right */}
     <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
 
@@ -546,7 +567,7 @@ export default function RegisterPage() {
     )}
     {state.success && (
       <div className="px-4 py-3 text-sm mb-4" style={{ backgroundColor: 'var(--color-success-light)', border: '1px solid var(--color-success)', color: 'var(--color-success)', borderRadius: '8px' }}>
-        Account created! Redirecting...
+        {state.notice ?? 'Account created! Redirecting...'}
       </div>
     )}
 

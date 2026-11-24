@@ -15,6 +15,7 @@ import { Card } from '../../../../components/ui/Card'
 import Link from 'next/link'
 import SettingsPageClient from './SettingsPageClient'
 import type { BusinessSettingsRow, LoginReviewRow, SubscriptionPaymentRequestRow, SubscriptionPlanOption, SubscriptionRow, UserProfileRow } from './types'
+import { EMPTY_PLATFORM_SUBSCRIPTION_PAYMENT_CONFIG, parsePlatformSubscriptionPaymentConfig, type PlatformSubscriptionPaymentConfig } from '../../../../lib/subscriptions/platformPaymentConfig'
 
 /**
  * Owner settings page server component.
@@ -31,6 +32,7 @@ export default async function SettingsPage() {
   let ownerProfile: UserProfileRow | null = null
   let subscription: SubscriptionRow | null = null
   let subscriptionPlans: SubscriptionPlanOption[] = []
+  let subscriptionPaymentConfig: PlatformSubscriptionPaymentConfig = EMPTY_PLATFORM_SUBSCRIPTION_PAYMENT_CONFIG
   let subscriptionPaymentRequests: SubscriptionPaymentRequestRow[] = []
   let loginReviews: LoginReviewRow[] = []
   let pageError: string | null = null
@@ -39,7 +41,7 @@ export default async function SettingsPage() {
     const supabase = await createClient()
     const serviceClient = createServiceRoleClient()
 
-    const [businessResponse, ownerResponse, subscriptionResponse, paymentRequestsResponse, reviewsResponse, plansResponse] = await Promise.all([
+    const [businessResponse, ownerResponse, subscriptionResponse, paymentRequestsResponse, reviewsResponse, plansResponse, paymentConfigResponse] = await Promise.all([
       supabase
         .from('businesses')
         .select('id, name, country, currency, timezone, subscription_plan, subscription_status')
@@ -67,6 +69,7 @@ export default async function SettingsPage() {
         .select('id, plan_key, name, description, monthly_amount, annual_discount_percent, yearly_amount, lifetime_amount, monthly_enabled, yearly_enabled, lifetime_enabled, trial_days, features, currency, branch_limit, sort_order')
         .eq('is_active', true)
         .order('sort_order', { ascending: true }),
+      serviceClient.from('platform_subscription_payment_config').select('*').eq('id', true).maybeSingle(),
     ])
 
     if (businessResponse.error) {
@@ -115,6 +118,7 @@ export default async function SettingsPage() {
     subscriptionPaymentRequests = (paymentRequestsResponse.data ?? []) as SubscriptionPaymentRequestRow[]
     loginReviews = (reviewsResponse.data ?? []) as LoginReviewRow[]
     subscriptionPlans = (plansResponse.data ?? []) as SubscriptionPlanOption[]
+    subscriptionPaymentConfig = parsePlatformSubscriptionPaymentConfig(paymentConfigResponse.data)
   } catch (error: unknown) {
     logger.error('SettingsPage data fetch failed', { businessId, error })
     pageError = error instanceof Error ? error.message : 'Unable to load settings'
@@ -169,6 +173,7 @@ export default async function SettingsPage() {
         ownerProfile={ownerProfile}
         subscription={subscription}
         subscriptionPlans={subscriptionPlans}
+        subscriptionPaymentConfig={subscriptionPaymentConfig}
         subscriptionPaymentRequests={subscriptionPaymentRequests}
         loginReviews={loginReviews}
       />

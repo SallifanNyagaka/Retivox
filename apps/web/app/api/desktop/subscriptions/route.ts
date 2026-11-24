@@ -10,6 +10,7 @@ import {
 } from '../../../../lib/payments/daraja'
 import { createServiceRoleClient } from '../../../../lib/supabase/admin'
 import { effectiveSubscriptionStatus } from '../../../../lib/subscriptions/status'
+import { parsePlatformSubscriptionPaymentConfig } from '../../../../lib/subscriptions/platformPaymentConfig'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -19,6 +20,16 @@ const stkSchema = z.object({
   phone: z.string().trim().min(9).max(20),
   planKey: z.string().regex(/^[a-z][a-z0-9_]{1,39}$/),
   billingInterval: z.enum(['monthly', 'yearly']),
+  promotionCode: z.string().trim().max(40).optional(),
+})
+const manualPaymentSchema = z.object({
+  action: z.literal('manual'),
+  planKey: z.string().regex(/^[a-z][a-z0-9_]{1,39}$/),
+  billingInterval: z.enum(['monthly', 'yearly', 'lifetime']),
+  paymentMethod: z.enum(['mpesa_manual', 'bank_transfer', 'cash_deposit', 'other']),
+  paymentOptionId: z.string().uuid(),
+  referenceCode: z.string().trim().min(3).max(80),
+  payerPhone: z.string().trim().max(32).optional(),
   promotionCode: z.string().trim().max(40).optional(),
 })
 
@@ -38,7 +49,7 @@ export async function GET(request: Request) {
   const businessId = profile.business_id
   if (!businessId) return json({ error: 'Business context is missing.' }, 403)
 
-  const [businessResult, subscriptionResult, plansResult, requestsResult] = await Promise.all([
+  const [businessResult, subscriptionResult, plansResult, requestsResult, paymentConfigResult] = await Promise.all([
     supabase.from('businesses')
       .select('subscription_plan, subscription_status')
       .eq('id', businessId)
@@ -56,8 +67,9 @@ export async function GET(request: Request) {
       .eq('business_id', businessId)
       .order('submitted_at', { ascending: false })
       .limit(10),
+    supabase.from('platform_subscription_payment_config').select('*').eq('id', true).maybeSingle(),
   ])
-  const error = businessResult.error ?? subscriptionResult.error ?? plansResult.error ?? requestsResult.error
+  const error = businessResult.error ?? subscriptionResult.error ?? plansResult.error ?? requestsResult.error ?? paymentConfigResult.error
   if (error) return json({ error: 'Unable to load subscription details.' }, 500)
 
   const effectiveStatus = effectiveSubscriptionStatus(
@@ -81,6 +93,7 @@ export async function GET(request: Request) {
         : null,
       plans: plansResult.data ?? [],
       paymentRequests: requestsResult.data ?? [],
+      paymentConfig: parsePlatformSubscriptionPaymentConfig(paymentConfigResult.data),
     },
   })
 }
@@ -93,6 +106,9 @@ export async function POST(request: Request) {
   if (!profile.business_id) return json({ error: 'Business context is missing.' }, 403)
 
   const body = await readBody(request)
+  const manual = manualPaymentSchema.safeParse(body)
+  if (manual.success) return submitManualPayment(authorized, manual.data)
+
   const parsed = stkSchema.safeParse(body)
   if (!parsed.success) {
     return json({ error: parsed.error.issues[0]?.message ?? 'Invalid payment details.' }, 400)
@@ -229,6 +245,61 @@ export async function POST(request: Request) {
     success: true,
     message: 'M-Pesa prompt sent. Complete it on your phone.',
   })
+}
+
+async function submitManualPayment(
+  authorized: { supabase: ReturnType<typeof createServiceRoleClient>; profile: OwnerProfile; token: string },
+  input: z.infer<typeof manualPaymentSchema>,
+) {
+  const { supabase, profile, token } = authorized
+  const businessId = profile.business_id
+  if (!businessId) return json({ error: 'Business context is missing.' }, 403)
+  const { data: configRow, error: configError } = await supabase.from('platform_subscription_payment_config')
+    .select('manual_payment_options').eq('id', true).maybeSingle()
+  if (configError) return json({ error: 'Platform payment directions are unavailable.' }, 503)
+  const config = parsePlatformSubscriptionPaymentConfig(configRow)
+  const option = config.manual_payment_options.find((item) => item.id === input.paymentOptionId && item.active && item.method === input.paymentMethod)
+  if (!option) return json({ error: 'That payment destination is no longer available. Refresh and choose an active option.' }, 409)
+
+  const userClient = createSupabaseClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!, {
+    global: { headers: { Authorization: `Bearer ${token}` } },
+    auth: { autoRefreshToken: false, persistSession: false },
+  })
+  const { data: requestId, error: submitError } = await userClient.rpc('owner_submit_subscription_payment_v2', {
+    p_plan_key: input.planKey,
+    p_billing_interval: input.billingInterval,
+    p_reference_code: input.referenceCode,
+    p_payment_method: input.paymentMethod,
+    p_payer_phone: input.payerPhone || null,
+  })
+  if (submitError) return json({ error: submitError.message }, 400)
+  if (!requestId) return json({ success: true, message: 'Your eligible subscription credit covered this change. The license is active.' })
+
+  if (input.promotionCode) {
+    const { error: promotionError } = await userClient.rpc('owner_apply_subscription_promotion', {
+      p_payment_request_id: requestId,
+      p_code: input.promotionCode,
+    })
+    if (promotionError) {
+      await supabase.from('subscription_payment_requests').update({
+        status: 'rejected', review_note: `Promotion rejected before payment: ${promotionError.message}`.slice(0, 240),
+        provider_result_description: 'Payment was not verified because the promotion code could not be applied.', reviewed_at: new Date().toISOString(),
+      }).eq('id', requestId).eq('business_id', businessId).eq('status', 'pending')
+      return json({ error: promotionError.message }, 400)
+    }
+  }
+  const { error: snapshotError } = await supabase.from('subscription_payment_requests').update({
+    platform_payment_option_id: option.id,
+    platform_payment_option_snapshot: option,
+  }).eq('id', requestId).eq('business_id', businessId).eq('status', 'pending')
+  if (snapshotError) {
+    await supabase.from('subscription_payment_requests').update({
+      status: 'rejected', review_note: 'Payment destination details could not be attached; submit again after refreshing.',
+      provider_result_description: 'No payment was approved. The payment destination snapshot could not be saved.', reviewed_at: new Date().toISOString(),
+    }).eq('id', requestId).eq('business_id', businessId).eq('status', 'pending')
+    return json({ error: 'The payment request could not be safely recorded. Refresh and try again.' }, 500)
+  }
+  return json({ success: true, message: 'Payment reference submitted for platform review.' })
 }
 
 async function authorizeOwner(request: Request) {

@@ -81,6 +81,8 @@ export type PaymentRow = {
   verified_by: string | null
   verified_at: string | null
   payment_at: string
+  business_payment_method_id?: string | null
+  payment_method_snapshot?: Record<string, unknown> | null
 }
 
 /**

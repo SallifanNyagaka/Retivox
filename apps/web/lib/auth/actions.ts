@@ -14,6 +14,7 @@
 
 import { redirect } from 'next/navigation'
 import { revalidatePath } from 'next/cache'
+import { createHash, randomBytes } from 'node:crypto'
 import { createClient } from '../supabase/server'
 import { createClient as createAdminClient } from '@supabase/supabase-js'
 import {
@@ -34,6 +35,8 @@ export type FormState = {
   error: string | null
   success: boolean
   globalRole?: GlobalRole
+  nativeReturnUrl?: string | null
+  notice?: string | null
 }
 
 /**
@@ -101,6 +104,13 @@ export async function registerBusinessAndOwner(
   const country = getStringValue(formData, 'country')
   const currency = getStringValue(formData, 'currency')
   const timezone = getStringValue(formData, 'timezone')
+  const nativeApp = getStringValue(formData, 'nativeApp') === '1'
+  const nativeState = getStringValue(formData, 'nativeState')
+  const codeChallenge = getStringValue(formData, 'codeChallenge')
+
+  if (nativeApp && (!/^[A-Za-z0-9_-]{43}$/.test(nativeState) || !/^[A-Za-z0-9_-]{43}$/.test(codeChallenge))) {
+    return { error: 'The app registration session expired. Return to Retivox and try again.', success: false }
+  }
 
   // Validate user fields
   const userSchema = registerUserSchema.pick({ name: true, email: true, password: true })
@@ -278,6 +288,44 @@ export async function registerBusinessAndOwner(
     return { error: 'Unable to finish business registration. Please try again.', success: false }
   }
 
+  if (nativeApp) {
+    if (!signUpData.session?.refresh_token) {
+      return {
+        error: null,
+        success: true,
+        notice: 'Your account is created. Verify your email, then sign in to Retivox to continue.',
+      }
+    }
+
+    const handoffCode = randomBytes(32).toString('base64url')
+    const codeHash = createHash('sha256').update(handoffCode).digest('hex')
+    await adminClient.from('native_app_auth_handoffs').delete().lt('expires_at', new Date().toISOString())
+    const { error: handoffError } = await adminClient
+      .from('native_app_auth_handoffs')
+      .insert({
+        code_hash: codeHash,
+        code_challenge: codeChallenge,
+        user_id: userId,
+        refresh_token: signUpData.session.refresh_token,
+        expires_at: new Date(Date.now() + 3 * 60 * 1000).toISOString(),
+      })
+
+    if (handoffError) {
+      logger.error('Native registration handoff could not be created', { userId, error: handoffError.message })
+      return {
+        error: null,
+        success: true,
+        notice: 'Your account is created. Sign in to Retivox with the email and password you just registered.',
+      }
+    }
+
+    const callback = new URL('retivox://auth/callback')
+    callback.searchParams.set('code', handoffCode)
+    callback.searchParams.set('state', nativeState)
+    logger.info('Business and owner registered successfully', { userId, businessId, nativeHandoff: true })
+    return { error: null, success: true, nativeReturnUrl: callback.toString() }
+  }
+
   logger.info('Business and owner registered successfully', { userId, businessId })
 
   return { error: null, success: true }
@@ -325,7 +373,7 @@ export async function loginUser(
       success: false,
       failureReason: 'Invalid email or password',
     })
-    return { error: 'Invalid email or password', success: false }
+    return { error: 'We could not sign you in. Check your email and password, or if you are new to Retivox, create an account with us first.', success: false }
   }
 
   // Fetch user profile to get role and active status

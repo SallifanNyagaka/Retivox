@@ -30,6 +30,8 @@ class RetivoxApp extends StatefulWidget {
 }
 
 class _RetivoxAppState extends State<RetivoxApp> {
+  // A cached profile is only a credential candidate. It must not bypass the
+  // online password or explicit offline PIN form when the app starts.
   RetivoxUser? _user;
   bool _darkMode = false;
 

@@ -23,6 +23,8 @@ export type OfflineEmployeeSaleInput = {
   customerEmail: string | null
   dueDate: string | null
   mpesaRefCode: string | null
+  manualPaymentMethodId?: string | null
+  manualPaymentMethodVersion?: number | null
   recordedAt: string
 }
 
@@ -237,7 +239,7 @@ export async function syncOfflineEmployeeSales(
     if (!claimed) continue
 
     try {
-      const response = await supabase.rpc('employee_record_transaction_offline_v2', {
+      const response = await supabase.rpc('employee_record_transaction_offline_with_payment_method_v1', {
         p_items: claimed.items,
         p_payment_method: claimed.paymentMethod,
         p_amount_paid: claimed.amountPaid ?? null,
@@ -251,6 +253,8 @@ export async function syncOfflineEmployeeSales(
         p_reference_code: claimed.mpesaRefCode,
         p_recorded_at: claimed.recordedAt,
         p_local_id: claimed.id,
+        p_manual_payment_method_id: claimed.manualPaymentMethodId ?? null,
+        p_manual_payment_method_version: claimed.manualPaymentMethodVersion ?? null,
       })
 
       if (response.error) {

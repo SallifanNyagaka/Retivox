@@ -14,6 +14,7 @@ class OfflineAccountVault {
   }) : _secureStorage = secureStorage ?? const FlutterSecureStorage();
 
   static const _accountsKey = 'retivox.offline.accounts.v1';
+  static const _activeAccountKey = 'retivox.active.account.v1';
   static const _dataKeyPrefix = 'retivox.offline.data-key.';
   static const _pinIterations = 210000;
   final AppDatabase database;
@@ -49,6 +50,7 @@ class OfflineAccountVault {
       );
     }
     await _saveProfile(user, dataKey);
+    await _secureStorage.write(key: _activeAccountKey, value: user.id);
   }
 
   Future<RetivoxUser> unlockOffline(String email, String pin) async {
@@ -114,7 +116,7 @@ class OfflineAccountVault {
       );
     }
     final dataKey = await _readDataKey(accountId);
-    return RetivoxUser.fromJson(
+    final user = RetivoxUser.fromJson(
       jsonDecode(
         await _open(
           profile,
@@ -123,6 +125,56 @@ class OfflineAccountVault {
         ),
       ) as Map<String, dynamic>,
     );
+    await _secureStorage.write(key: _activeAccountKey, value: accountId);
+    return user;
+  }
+
+  Future<bool> hasOfflineAccessForEmail(String email) async {
+    final normalizedEmail = email.trim().toLowerCase();
+    if (normalizedEmail.isEmpty) return false;
+
+    final accounts = await _readAccounts();
+    return accounts.values.any((record) {
+      return record['email'] == normalizedEmail &&
+          record['salt'] is String &&
+          (record['salt'] as String).isNotEmpty &&
+          record['verifier'] is String &&
+          (record['verifier'] as String).isNotEmpty;
+    });
+  }
+
+  /// Restores the most recently authenticated account after Android recreates
+  /// the process. The marker is stored in platform secure storage; no PIN or
+  /// password is persisted for this purpose.
+  Future<RetivoxUser?> loadActiveAccount() async {
+    final accountId = await _secureStorage.read(key: _activeAccountKey);
+    if (accountId == null || accountId.isEmpty) return null;
+    final profile = await database.readAccount(accountId);
+    if (profile == null) {
+      await clearActiveAccount(accountId);
+      return null;
+    }
+    final user = RetivoxUser.fromJson(
+      jsonDecode(
+        await _open(
+          profile,
+          await _readDataKey(accountId),
+          dataDescription: 'active account profile',
+        ),
+      ) as Map<String, dynamic>,
+    );
+    if (user.id != accountId) {
+      await clearActiveAccount(accountId);
+      return null;
+    }
+    return user;
+  }
+
+  Future<void> clearActiveAccount([String? accountId]) async {
+    final activeAccountId = await _secureStorage.read(key: _activeAccountKey);
+    if (accountId == null || activeAccountId == accountId) {
+      await _secureStorage.delete(key: _activeAccountKey);
+    }
   }
 
   Future<RetivoxUser?> loadAuthorizedAccount(String accountId) async {
@@ -207,6 +259,7 @@ class OfflineAccountVault {
     final accounts = await _readAccounts();
     accounts.remove(accountId);
     await _secureStorage.write(key: _accountsKey, value: jsonEncode(accounts));
+    await clearActiveAccount(accountId);
   }
 
   Future<void> _saveProfile(RetivoxUser user, SecretKey dataKey) async {

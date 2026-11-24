@@ -15,6 +15,7 @@ import logger from '../../../../lib/logger'
 import { createClient } from '../../../../lib/supabase/server'
 import PrintReceiptButton from './PrintReceiptButton'
 import OfflineSalesQueuePanel from './OfflineSalesQueuePanel'
+import PaymentProgressButton from '../../../../components/payments/PaymentProgressButton'
 
 /**
  * Number of employee transactions shown per page.
@@ -86,6 +87,7 @@ type EmployeeTransactionRow = {
  * Payment row visible for an employee-owned transaction.
  */
 type EmployeePaymentRow = {
+  id: string
   transaction_id: string
   payment_method: string
   amount: number
@@ -129,6 +131,8 @@ type ProductBaseUomRow = {
 type EmployeeTransactionView = Omit<EmployeeTransactionRow, 'branches'> & {
   branchName: string
   payment: EmployeePaymentRow | null
+  verifiedPaidAmount: number
+  hasPendingManualPayment: boolean
   itemSummary: EmployeeTransactionItemSummary[]
 }
 
@@ -348,7 +352,7 @@ export default async function EmployeeTransactionsPage({
       transactionIds.length > 0
         ? supabase
             .from('payments')
-            .select('transaction_id, payment_method, amount, status, payment_at')
+            .select('id, transaction_id, payment_method, amount, status, payment_at')
             .eq('business_id', employeeProfile.businessId)
             .in('transaction_id', transactionIds)
             .order('payment_at', { ascending: false })
@@ -372,9 +376,21 @@ export default async function EmployeeTransactionsPage({
     }
 
     const paymentsByTransaction = new Map<string, EmployeePaymentRow>()
+    const verifiedAmountsByTransaction = new Map<string, number>()
+    const pendingManualByTransaction = new Set<string>()
     ;((paymentResponse.data ?? []) as EmployeePaymentRow[]).forEach((payment) => {
-      if (!paymentsByTransaction.has(payment.transaction_id)) {
+      const existing = paymentsByTransaction.get(payment.transaction_id)
+      if (!existing || (payment.payment_method === 'mpesa_stk' && payment.status === 'pending_verify')) {
         paymentsByTransaction.set(payment.transaction_id, payment)
+      }
+      if (payment.status === 'verified') {
+        verifiedAmountsByTransaction.set(
+          payment.transaction_id,
+          (verifiedAmountsByTransaction.get(payment.transaction_id) ?? 0) + Number(payment.amount),
+        )
+      }
+      if (payment.payment_method === 'mpesa_manual' && payment.status === 'pending_verify') {
+        pendingManualByTransaction.add(payment.transaction_id)
       }
     })
 
@@ -431,6 +447,8 @@ export default async function EmployeeTransactionsPage({
         ...transaction,
         branchName: branch?.name ?? 'Former store',
         payment: paymentsByTransaction.get(transaction.id) ?? null,
+        verifiedPaidAmount: verifiedAmountsByTransaction.get(transaction.id) ?? 0,
+        hasPendingManualPayment: pendingManualByTransaction.has(transaction.id),
         itemSummary: itemsByTransaction.get(transaction.id) ?? [],
       }
     })
@@ -614,6 +632,9 @@ export default async function EmployeeTransactionsPage({
                             <Badge variant={getStatusVariant(transaction.payment.status)}>
                               {formatStatusLabel(transaction.payment.status)}
                             </Badge>
+                              {transaction.payment.payment_method === 'mpesa_stk' && transaction.payment.status === 'pending_verify' && (
+                                <PaymentProgressButton paymentId={transaction.payment.id} currency={currency} />
+                              )}
                           </span>
                         ) : (
                           '-'
@@ -639,6 +660,8 @@ export default async function EmployeeTransactionsPage({
                           subtotal={Number(transaction.subtotal)}
                           discount={Number(transaction.discount_amount)}
                           total={Number(transaction.total_amount)}
+                          paid={transaction.verifiedPaidAmount}
+                          paymentPending={transaction.hasPendingManualPayment}
                         />
                       </td>
                     </tr>

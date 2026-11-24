@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/auth/retivox_user.dart';
 import '../../features/dashboard/dashboard_repository.dart';
@@ -27,6 +28,7 @@ class _SubscriptionManagementCardState
   String? _selectedPlanKey;
   String? _billingInterval;
   String _paymentMethod = 'mpesa_stk';
+  String _paymentOptionId = '';
   bool _saving = false;
 
   @override
@@ -86,16 +88,31 @@ class _SubscriptionManagementCardState
       );
       return;
     }
-    final paymentMethod =
-        billingInterval == 'lifetime' && _paymentMethod == 'mpesa_stk'
-        ? 'mpesa_manual'
+    final paymentConfig = _map(snapshot['paymentConfig']) ?? const <String, dynamic>{};
+    final options = _rows(paymentConfig['manual_payment_options'])
+        .where((item) => item['active'] == true).toList();
+    final features = _map(selectedPlan['features']) ?? const <String, dynamic>{};
+    final paymentMethods = features['payment_methods'];
+    final canPrompt = billingInterval != 'lifetime' && paymentMethods is List &&
+        (paymentMethods.contains('daraja_stk') || paymentMethods.contains('mpesa_stk'));
+    final selectedOption = options.where((item) => item['id'] == _paymentOptionId).firstOrNull;
+    final fallbackPaymentMethod = selectedOption?['method']?.toString() ??
+        options.firstOrNull?['method']?.toString() ?? '';
+    final paymentMethod = _paymentMethod == 'mpesa_stk' && !canPrompt
+        ? fallbackPaymentMethod
         : _paymentMethod;
+    final paymentOptionId = selectedOption?['id']?.toString() ??
+        (paymentMethod == 'mpesa_stk' ? '' : options.firstWhere((item) => item['method'] == paymentMethod, orElse: () => const {})['id']?.toString() ?? '');
     if (paymentMethod == 'mpesa_stk' && _phone.text.trim().isEmpty) {
       _notify('Enter the Safaricom phone number for the M-Pesa prompt.');
       return;
     }
     if (paymentMethod != 'mpesa_stk' && _reference.text.trim().length < 3) {
       _notify('Enter a payment reference of at least 3 characters.');
+      return;
+    }
+    if (paymentMethod != 'mpesa_stk' && paymentOptionId.isEmpty) {
+      _notify('No manual subscription payment option is available. Contact Retivox support.');
       return;
     }
 
@@ -115,6 +132,7 @@ class _SubscriptionManagementCardState
           planKey: planKey,
           billingInterval: billingInterval,
           paymentMethod: paymentMethod,
+          paymentOptionId: paymentOptionId,
           referenceCode: _reference.text,
           payerPhone: _phone.text,
         );
@@ -133,6 +151,40 @@ class _SubscriptionManagementCardState
     if (!mounted) return;
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  static List<(Uri, String, IconData)> _supportLinks(Map<String, dynamic> config) {
+    final links = <(Uri, String, IconData)>[];
+    final phone = config['support_phone']?.toString().trim() ?? '';
+    final email = config['support_email']?.toString().trim() ?? '';
+    final whatsapp = config['support_whatsapp']?.toString().trim() ?? '';
+    final website = config['support_website']?.toString().trim() ?? '';
+    if (phone.isNotEmpty) {
+      final dial = phone.replaceAll(RegExp(r'[^+\d]'), '');
+      links.add((Uri(scheme: 'tel', path: dial), 'Call', Icons.call_outlined));
+      links.add((Uri(scheme: 'sms', path: dial), 'Text', Icons.sms_outlined));
+    }
+    if (email.isNotEmpty) links.add((Uri(scheme: 'mailto', path: email), 'Email support', Icons.email_outlined));
+    if (whatsapp.isNotEmpty) {
+      var digits = whatsapp.replaceAll(RegExp(r'\D'), '');
+      if (digits.startsWith('0')) digits = '254${digits.substring(1)}';
+      if (digits.isNotEmpty) links.add((Uri.parse('https://wa.me/$digits'), 'WhatsApp', Icons.chat_outlined));
+    }
+    if (website.isNotEmpty) {
+      final uri = Uri.tryParse(website);
+      if (uri != null && (uri.scheme == 'https' || uri.scheme == 'http')) links.add((uri, 'Support website', Icons.open_in_new));
+    }
+    return links;
+  }
+
+  Future<void> _openSupportLink(Uri uri) async {
+    try {
+      if (!await launchUrl(uri, mode: LaunchMode.platformDefault)) {
+        _notify('Could not open the support contact.');
+      }
+    } catch (_) {
+      _notify('Could not open the support contact.');
+    }
   }
 
   @override
@@ -180,6 +232,10 @@ class _SubscriptionManagementCardState
         final subscription = _map(snapshot['subscription']);
         final plans = _rows(snapshot['plans']);
         final payments = _rows(snapshot['paymentRequests']);
+        final paymentConfig = _map(snapshot['paymentConfig']) ?? const <String, dynamic>{};
+        final support = _supportLinks(paymentConfig);
+        final manualOptions = _rows(paymentConfig['manual_payment_options'])
+            .where((item) => item['active'] == true).toList();
         final activePlan =
             subscription?['plan']?.toString() ??
             business?['subscription_plan']?.toString() ??
@@ -191,10 +247,6 @@ class _SubscriptionManagementCardState
             'monthly';
         final lifetimeLicense =
             subscription?['license_type']?.toString() == 'lifetime';
-        final effectivePaymentMethod =
-            billingInterval == 'lifetime' && _paymentMethod == 'mpesa_stk'
-            ? 'mpesa_manual'
-            : _paymentMethod;
         final selectedPlanKey =
             _selectedPlanKey ??
             subscription?['next_plan_key']?.toString() ??
@@ -203,6 +255,22 @@ class _SubscriptionManagementCardState
           (plan) => plan['plan_key'] == selectedPlanKey,
         );
         final selected = selectedPlan.isEmpty ? null : selectedPlan.first;
+        final selectedFeatures = _map(selected?['features']) ?? const <String, dynamic>{};
+        final allowedMethods = selectedFeatures['payment_methods'];
+        final canPrompt = billingInterval != 'lifetime' && allowedMethods is List &&
+            (allowedMethods.contains('daraja_stk') || allowedMethods.contains('mpesa_stk'));
+        final selectedOption = manualOptions.where((item) => item['id'] == _paymentOptionId).firstOrNull;
+        final fallbackPaymentMethod = selectedOption?['method']?.toString() ??
+            manualOptions.firstOrNull?['method']?.toString() ?? '';
+        final effectivePaymentMethod = _paymentMethod == 'mpesa_stk' && !canPrompt
+            ? fallbackPaymentMethod
+            : _paymentMethod;
+        final selectedOptionForMethod = selectedOption != null && selectedOption['method'] == effectivePaymentMethod
+            ? selectedOption
+            : manualOptions.where((item) => item['method'] == effectivePaymentMethod).firstOrNull;
+        final paymentSelectorValue = effectivePaymentMethod == 'mpesa_stk'
+            ? 'mpesa_stk'
+            : selectedOptionForMethod?['id']?.toString();
         final unroundedAmount = selected == null
             ? 0.0
             : billingInterval == 'yearly'
@@ -424,35 +492,37 @@ class _SubscriptionManagementCardState
                 ),
                 const SizedBox(height: 12),
                 DropdownButtonFormField<String>(
-                  initialValue: effectivePaymentMethod,
+                  initialValue: paymentSelectorValue,
                   decoration: const InputDecoration(
                     labelText: 'Payment method',
                   ),
                   items: [
-                    if (billingInterval != 'lifetime')
+                    if (canPrompt)
                       const DropdownMenuItem(
                         value: 'mpesa_stk',
                         child: Text('M-Pesa prompt'),
                       ),
-                    DropdownMenuItem(
-                      value: 'mpesa_manual',
-                      child: Text('M-Pesa reference'),
-                    ),
-                    DropdownMenuItem(
-                      value: 'bank_transfer',
-                      child: Text('Bank transfer'),
-                    ),
-                    DropdownMenuItem(
-                      value: 'cash_deposit',
-                      child: Text('Cash deposit'),
-                    ),
-                    DropdownMenuItem(value: 'other', child: Text('Other')),
+                    ...manualOptions.map((option) => DropdownMenuItem(
+                      value: option['id']?.toString(),
+                      child: Text(option['label']?.toString() ?? option['method']?.toString() ?? 'Manual payment'),
+                    )),
                   ],
                   onChanged: _saving
                       ? null
                       : (value) {
                           if (value != null) {
-                            setState(() => _paymentMethod = value);
+                            setState(() {
+                              if (value == 'mpesa_stk') {
+                                _paymentMethod = 'mpesa_stk';
+                                _paymentOptionId = '';
+                              } else {
+                                final option = manualOptions.where((item) => item['id'] == value).firstOrNull;
+                                if (option != null) {
+                                  _paymentMethod = option['method']?.toString() ?? 'other';
+                                  _paymentOptionId = value;
+                                }
+                              }
+                            });
                           }
                         },
                 ),
@@ -468,6 +538,25 @@ class _SubscriptionManagementCardState
                   ),
                 ],
                 if (effectivePaymentMethod != 'mpesa_stk') ...[
+                  if (selectedOptionForMethod != null) ...[
+                    const SizedBox(height: 12),
+                    Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Text(selectedOptionForMethod['label']?.toString() ?? 'Payment details', style: Theme.of(context).textTheme.titleSmall),
+                          const SizedBox(height: 6),
+                          SelectableText('Pay to: ${selectedOptionForMethod['destination'] ?? ''}'),
+                          if ((selectedOptionForMethod['accountName']?.toString() ?? '').isNotEmpty) Text('Account name: ${selectedOptionForMethod['accountName']}'),
+                          if ((selectedOptionForMethod['accountReference']?.toString() ?? '').isNotEmpty) SelectableText('Reference: ${selectedOptionForMethod['accountReference']}'),
+                          if ((selectedOptionForMethod['instructions']?.toString() ?? '').isNotEmpty) Text(selectedOptionForMethod['instructions'].toString()),
+                        ]),
+                      ),
+                    ),
+                  ] else if (effectivePaymentMethod != 'mpesa_stk') ...[
+                    const SizedBox(height: 8),
+                    const Text('No manual payment options are configured. Contact Retivox support.'),
+                  ],
                   const SizedBox(height: 12),
                   TextField(
                     controller: _reference,
@@ -485,6 +574,22 @@ class _SubscriptionManagementCardState
                       : 'Amount due: ${_formatMoney(amountDue, currency)}',
                   style: Theme.of(context).textTheme.titleSmall,
                 ),
+                if ((paymentConfig['support_message']?.toString() ?? '').isNotEmpty || support.isNotEmpty) ...[
+                  const SizedBox(height: 14),
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text(paymentConfig['support_message']?.toString() ?? 'Need help with your subscription payment? Call or message us.'),
+                        if (support.isNotEmpty) Wrap(spacing: 8, runSpacing: 4, children: support.map((entry) => TextButton.icon(
+                          onPressed: () => _openSupportLink(entry.$1),
+                          icon: Icon(entry.$3, size: 16),
+                          label: Text(entry.$2),
+                        )).toList()),
+                      ]),
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 12),
                 Align(
                   alignment: Alignment.centerLeft,

@@ -1,6 +1,8 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../core/auth/retivox_user.dart';
 import '../../features/dashboard/dashboard_repository.dart';
@@ -43,6 +45,8 @@ class DashboardShell extends StatefulWidget {
 class _DashboardShellState extends State<DashboardShell> {
   Timer? _connectionTimer;
   String _selectedSection = 'overview';
+  final List<String> _sectionHistory = [];
+  bool _exitPromptOpen = false;
   bool _isConnected = false;
   int _overviewRefreshVersion = 0;
   int _pendingSales = 0;
@@ -66,6 +70,7 @@ class _DashboardShellState extends State<DashboardShell> {
   @override
   void initState() {
     super.initState();
+    unawaited(_restoreLastSection());
     unawaited(_refreshStatus());
     _connectionTimer = Timer.periodic(
       const Duration(seconds: 15),
@@ -132,11 +137,12 @@ class _DashboardShellState extends State<DashboardShell> {
       final pending = await widget.saleRepository.database.countSalesForAccount(
         widget.user.id,
       );
-      if (mounted)
+      if (mounted) {
         setState(() {
           _pendingSales = pending;
           _overviewRefreshVersion++;
         });
+      }
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -156,14 +162,14 @@ class _DashboardShellState extends State<DashboardShell> {
       failures.add('stores: $error');
     }
     try {
-      await widget.saleRepository.syncPending(widget.user);
-    } catch (error) {
-      failures.add('sales: $error');
-    }
-    try {
       await widget.dashboardRepository.syncPendingDashboardActions(widget.user);
     } catch (error) {
       failures.add('dashboard changes: $error');
+    }
+    try {
+      await widget.saleRepository.syncPending(widget.user);
+    } catch (error) {
+      failures.add('sales: $error');
     }
     if (failures.isNotEmpty && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -190,7 +196,75 @@ class _DashboardShellState extends State<DashboardShell> {
   }
 
   void _selectSection(_NavItem item) {
-    setState(() => _selectedSection = item.id);
+    _navigateToSection(item.id);
+  }
+
+  void _navigateToSection(String section) {
+    if (section == _selectedSection) return;
+    setState(() {
+      _sectionHistory.add(_selectedSection);
+      _selectedSection = section;
+    });
+    unawaited(
+      widget.dashboardRepository.vault.cacheValue(
+        widget.user,
+        'mobile:last-section:v1',
+        section,
+      ),
+    );
+  }
+
+  Future<void> _restoreLastSection() async {
+    try {
+      final saved = await widget.dashboardRepository.vault
+          .readCachedValue<String>(widget.user, 'mobile:last-section:v1');
+      final allowed = _groups
+          .expand((group) => group.items)
+          .any((item) => item.id == saved);
+      if (mounted && _selectedSection == 'overview' && allowed) {
+        setState(() => _selectedSection = saved!);
+      }
+    } catch (_) {
+      // The saved navigation hint is optional; continue at the overview.
+    }
+  }
+
+  Future<void> _handleSystemBack() async {
+    if (!mounted) return;
+    if (_sectionHistory.isNotEmpty) {
+      setState(() {
+        _selectedSection = _sectionHistory.removeLast();
+      });
+      return;
+    }
+    if (_selectedSection != 'overview') {
+      setState(() => _selectedSection = 'overview');
+      return;
+    }
+    if (_exitPromptOpen) return;
+    _exitPromptOpen = true;
+    try {
+      final shouldExit = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Exit Retivox?'),
+          content: const Text('Are you sure you want to exit Retivox?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Exit'),
+            ),
+          ],
+        ),
+      );
+      if (shouldExit == true && mounted) await SystemNavigator.pop();
+    } finally {
+      _exitPromptOpen = false;
+    }
   }
 
   Future<void> _showMoreSections() async {
@@ -255,162 +329,177 @@ class _DashboardShellState extends State<DashboardShell> {
     final bg = isDark
         ? RetivoxTheme.backgroundDark
         : RetivoxTheme.backgroundLight;
+    final handlesSystemBack =
+        defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS;
 
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final isMobileLayout = constraints.maxWidth < 760;
-        final content = ColoredBox(
-          color: bg,
-          child: _selectedSection == 'sales'
-              ? PosScreen(
-                  key: ValueKey('pos-${widget.user.id}'),
-                  user: widget.user,
-                  repository: widget.saleRepository,
-                  onSignOut: widget.onSignOut,
-                  embedded: true,
-                )
-              : _selectedSection == 'overview'
-              ? OverviewSection(
-                  user: widget.user,
-                  repository: widget.dashboardRepository,
-                  refreshVersion: _overviewRefreshVersion,
-                  onRefresh: _refreshAndSync,
-                  onNavigate: (section) =>
-                      setState(() => _selectedSection = section),
-                )
-              : _selectedSection == 'analytics'
-              ? AnalyticsScreen(
-                  user: widget.user,
-                  repository: widget.dashboardRepository,
-                )
-              : _selectedSection == 'transfers'
-              ? TransfersScreen(
-                  user: widget.user,
-                  repository: widget.dashboardRepository,
-                )
-              : _selectedSection == 'admins'
-              ? AdminDirectoryScreen(
-                  user: widget.user,
-                  repository: widget.dashboardRepository,
-                )
-              : _selectedSection == 'finances'
-              ? FinanceScreen(
-                  user: widget.user,
-                  repository: widget.dashboardRepository,
-                )
-              : _selectedSection == 'audit'
-              ? AuditLogScreen(
-                  user: widget.user,
-                  repository: widget.dashboardRepository,
-                )
-              : _selectedSection == 'settings'
-              ? AccountSettingsScreen(
-                  user: widget.user,
-                  repository: widget.dashboardRepository,
-                  darkMode: widget.darkMode,
-                  onDarkModeChanged: widget.onDarkModeChanged,
-                  onSignOut: widget.onSignOut,
-                )
-              : DashboardDataScreen(
-                  user: widget.user,
-                  section: _selectedSection,
-                  repository: widget.dashboardRepository,
-                  refreshVersion: _overviewRefreshVersion,
-                ),
-        );
-
-        if (isMobileLayout) {
-          final primaryItems = _mobileItems;
-          final moreIndex = primaryItems.length;
-          final selectedIndex = primaryItems.indexWhere(
-            (item) => item.id == _selectedSection,
+    return PopScope<Object?>(
+      canPop: !handlesSystemBack,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && handlesSystemBack) {
+          unawaited(_handleSystemBack());
+        }
+      },
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final isMobileLayout = constraints.maxWidth < 760;
+          final content = ColoredBox(
+            color: bg,
+            child: _selectedSection == 'sales'
+                ? PosScreen(
+                    key: ValueKey('pos-${widget.user.id}'),
+                    user: widget.user,
+                    repository: widget.saleRepository,
+                    dashboardRepository: widget.dashboardRepository,
+                    onSignOut: widget.onSignOut,
+                    embedded: true,
+                  )
+                : _selectedSection == 'overview'
+                ? OverviewSection(
+                    user: widget.user,
+                    repository: widget.dashboardRepository,
+                    saleRepository: widget.saleRepository,
+                    isOnline: _isConnected,
+                    onViewOfflineSales: _showPendingSales,
+                    onSyncNow: _refreshAndSync,
+                    refreshVersion: _overviewRefreshVersion,
+                    onRefresh: _refreshAndSync,
+                    onNavigate: _navigateToSection,
+                  )
+                : _selectedSection == 'analytics'
+                ? AnalyticsScreen(
+                    user: widget.user,
+                    repository: widget.dashboardRepository,
+                  )
+                : _selectedSection == 'transfers'
+                ? TransfersScreen(
+                    user: widget.user,
+                    repository: widget.dashboardRepository,
+                  )
+                : _selectedSection == 'admins'
+                ? AdminDirectoryScreen(
+                    user: widget.user,
+                    repository: widget.dashboardRepository,
+                  )
+                : _selectedSection == 'finances'
+                ? FinanceScreen(
+                    user: widget.user,
+                    repository: widget.dashboardRepository,
+                  )
+                : _selectedSection == 'audit'
+                ? AuditLogScreen(
+                    user: widget.user,
+                    repository: widget.dashboardRepository,
+                  )
+                : _selectedSection == 'settings'
+                ? AccountSettingsScreen(
+                    user: widget.user,
+                    repository: widget.dashboardRepository,
+                    darkMode: widget.darkMode,
+                    onDarkModeChanged: widget.onDarkModeChanged,
+                    onSignOut: widget.onSignOut,
+                  )
+                : DashboardDataScreen(
+                    user: widget.user,
+                    section: _selectedSection,
+                    repository: widget.dashboardRepository,
+                    refreshVersion: _overviewRefreshVersion,
+                  ),
           );
-          final selectedDestination = selectedIndex < 0
-              ? moreIndex
-              : selectedIndex;
+
+          if (isMobileLayout) {
+            final primaryItems = _mobileItems;
+            final moreIndex = primaryItems.length;
+            final selectedIndex = primaryItems.indexWhere(
+              (item) => item.id == _selectedSection,
+            );
+            final selectedDestination = selectedIndex < 0
+                ? moreIndex
+                : selectedIndex;
+            return Scaffold(
+              backgroundColor: bg,
+              body: SafeArea(
+                child: Column(
+                  children: [
+                    _TopPanel(
+                      user: widget.user,
+                      repository: widget.dashboardRepository,
+                      isConnected: _isConnected,
+                      pendingSales: _pendingSales,
+                      isRefreshing: _isRefreshing,
+                      darkMode: widget.darkMode,
+                      onDarkModeChanged: widget.onDarkModeChanged,
+                      onRefresh: _refreshAndSync,
+                      onSignOut: widget.onSignOut,
+                      onOpenPendingSales: _showPendingSales,
+                      compact: true,
+                    ),
+                    Expanded(child: content),
+                  ],
+                ),
+              ),
+              bottomNavigationBar: NavigationBar(
+                selectedIndex: selectedDestination,
+                onDestinationSelected: (index) {
+                  if (index == moreIndex) {
+                    _showMoreSections();
+                  } else if (index < primaryItems.length) {
+                    _selectSection(primaryItems[index]);
+                  }
+                },
+                destinations: [
+                  for (final item in primaryItems)
+                    NavigationDestination(
+                      icon: Icon(item.icon),
+                      label: item.id == 'sales' ? 'POS' : item.label,
+                    ),
+                  const NavigationDestination(
+                    icon: Icon(Icons.grid_view_rounded),
+                    label: 'More',
+                  ),
+                ],
+              ),
+            );
+          }
+
           return Scaffold(
             backgroundColor: bg,
             body: SafeArea(
-              child: Column(
+              child: Row(
                 children: [
-                  _TopPanel(
+                  _RoleSidebar(
+                    businessName: widget.user.businessName,
                     user: widget.user,
-                    repository: widget.dashboardRepository,
-                    isConnected: _isConnected,
-                    pendingSales: _pendingSales,
-                    isRefreshing: _isRefreshing,
-                    darkMode: widget.darkMode,
-                    onDarkModeChanged: widget.onDarkModeChanged,
-                    onRefresh: _refreshAndSync,
+                    groups: _groups,
+                    selectedSection: _selectedSection,
+                    onSelect: _selectSection,
                     onSignOut: widget.onSignOut,
-                    onOpenPendingSales: _showPendingSales,
-                    compact: true,
                   ),
-                  Expanded(child: content),
+                  Expanded(
+                    child: Column(
+                      children: [
+                        _TopPanel(
+                          user: widget.user,
+                          repository: widget.dashboardRepository,
+                          isConnected: _isConnected,
+                          pendingSales: _pendingSales,
+                          isRefreshing: _isRefreshing,
+                          darkMode: widget.darkMode,
+                          onDarkModeChanged: widget.onDarkModeChanged,
+                          onRefresh: _refreshAndSync,
+                          onSignOut: widget.onSignOut,
+                          onOpenPendingSales: _showPendingSales,
+                        ),
+                        Expanded(child: content),
+                      ],
+                    ),
+                  ),
                 ],
               ),
             ),
-            bottomNavigationBar: NavigationBar(
-              selectedIndex: selectedDestination,
-              onDestinationSelected: (index) {
-                if (index == moreIndex) {
-                  _showMoreSections();
-                } else if (index < primaryItems.length) {
-                  _selectSection(primaryItems[index]);
-                }
-              },
-              destinations: [
-                for (final item in primaryItems)
-                  NavigationDestination(
-                    icon: Icon(item.icon),
-                    label: item.id == 'sales' ? 'POS' : item.label,
-                  ),
-                const NavigationDestination(
-                  icon: Icon(Icons.grid_view_rounded),
-                  label: 'More',
-                ),
-              ],
-            ),
           );
-        }
-
-        return Scaffold(
-          backgroundColor: bg,
-          body: SafeArea(
-            child: Row(
-              children: [
-                _RoleSidebar(
-                  businessName: widget.user.businessName,
-                  user: widget.user,
-                  groups: _groups,
-                  selectedSection: _selectedSection,
-                  onSelect: _selectSection,
-                  onSignOut: widget.onSignOut,
-                ),
-                Expanded(
-                  child: Column(
-                    children: [
-                      _TopPanel(
-                        user: widget.user,
-                        repository: widget.dashboardRepository,
-                        isConnected: _isConnected,
-                        pendingSales: _pendingSales,
-                        isRefreshing: _isRefreshing,
-                        darkMode: widget.darkMode,
-                        onDarkModeChanged: widget.onDarkModeChanged,
-                        onRefresh: _refreshAndSync,
-                        onSignOut: widget.onSignOut,
-                        onOpenPendingSales: _showPendingSales,
-                      ),
-                      Expanded(child: content),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
+        },
+      ),
     );
   }
 }
@@ -790,10 +879,11 @@ class _TopPanel extends StatelessWidget {
         ),
       );
     } catch (error) {
-      if (context.mounted)
+      if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Could not load notifications: $error')),
         );
+      }
     }
   }
 }

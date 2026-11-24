@@ -20,6 +20,7 @@ import { getDarajaPromptConfiguration, initiateDarajaStkPush, normalizeKenyanPho
 import { startPlatformSubscriptionPesapalCheckout } from '../../../../lib/payments/pesapal'
 import { requestOrigin } from '../../../../lib/requestOrigin'
 import type { BusinessSettingsRow, FormState, UserProfileRow } from './types'
+import { parsePlatformManualPaymentOptions } from '../../../../lib/subscriptions/platformPaymentConfig'
 
 /**
  * Validates password change fields with strength and match checks.
@@ -50,6 +51,7 @@ const subscriptionPaymentSchema = z.object({
   planKey: z.string().regex(/^[a-z][a-z0-9_]{1,39}$/),
   billingInterval: z.enum(['monthly', 'yearly', 'lifetime']),
   paymentMethod: z.enum(['mpesa_manual', 'bank_transfer', 'cash_deposit', 'other']),
+  manualPaymentOptionId: z.string().uuid('Choose a configured payment destination.'),
   referenceCode: z.string().min(3, 'Payment reference must be at least 3 characters').max(80, 'Payment reference is too long'),
   payerPhone: z.string().max(32, 'Phone number is too long').optional(),
   promotionCode: z.string().max(40, 'Promotion code is too long').optional(),
@@ -305,6 +307,7 @@ export async function submitSubscriptionPayment(_prevState: FormState, formData:
     planKey: getString(formData, 'planKey'),
     billingInterval: getString(formData, 'billingInterval'),
     paymentMethod: getString(formData, 'paymentMethod') || 'mpesa_manual',
+    manualPaymentOptionId: getString(formData, 'manualPaymentOptionId'),
     referenceCode: getString(formData, 'referenceCode'),
     payerPhone: getString(formData, 'payerPhone') || undefined,
     promotionCode: getString(formData, 'promotionCode') || undefined,
@@ -323,6 +326,14 @@ export async function submitSubscriptionPayment(_prevState: FormState, formData:
   }
 
   try {
+    const serviceClient = createServiceRoleClient()
+    const { data: configRow, error: configError } = await serviceClient
+      .from('platform_subscription_payment_config').select('manual_payment_options').eq('id', true).maybeSingle()
+    if (configError) throw new Error('Platform payment directions are unavailable. Please try again later.')
+    const selectedOption = parsePlatformManualPaymentOptions(configRow?.manual_payment_options)
+      .find((option) => option.id === validation.data.manualPaymentOptionId && option.active && option.method === validation.data.paymentMethod)
+    if (!selectedOption) return { success: false, error: 'That payment destination is no longer available. Refresh and select an active option.' }
+
     const supabase = await createClient()
     const { data: requestId, error } = await supabase.rpc('owner_submit_subscription_payment_v2', {
       p_plan_key: validation.data.planKey,
@@ -352,9 +363,26 @@ export async function submitSubscriptionPayment(_prevState: FormState, formData:
       }
     }
 
+    if (requestId) {
+      const { error: snapshotError } = await serviceClient.from('subscription_payment_requests').update({
+        platform_payment_option_id: selectedOption.id,
+        platform_payment_option_snapshot: selectedOption,
+      }).eq('id', requestId).eq('business_id', businessId).eq('status', 'pending')
+      if (snapshotError) {
+        await serviceClient.from('subscription_payment_requests').update({
+          status: 'rejected',
+          review_note: 'Payment destination details could not be attached; submit again after refreshing.',
+          provider_result_description: 'No payment was approved. The payment destination snapshot could not be saved.',
+          reviewed_at: new Date().toISOString(),
+        }).eq('id', requestId).eq('business_id', businessId).eq('status', 'pending')
+        logger.error('submitSubscriptionPayment: payment option snapshot failed', { businessId, userId: profile.id, requestId, error: snapshotError })
+        return { success: false, error: 'Your request was not submitted because the payment destination could not be recorded. Refresh and try again.' }
+      }
+    }
+
     revalidatePath('/dashboard/owner/settings')
     logger.info('Subscription payment request submitted', { businessId, userId: profile.id })
-    return { success: true, error: null, message: requestId ? 'Payment request submitted for review' : 'Subscription credit covered this plan change; license updated' }
+    return { success: true, error: null, message: requestId ? 'Payment reference submitted. Your plan activates after the payment is verified.' : 'Subscription credit covered this plan change; license updated' }
   } catch (error: unknown) {
     logger.error('submitSubscriptionPayment: unexpected error', { businessId, userId: profile.id, error })
     return { success: false, error: error instanceof Error ? error.message : 'Server error' }

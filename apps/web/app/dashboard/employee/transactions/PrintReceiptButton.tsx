@@ -18,6 +18,8 @@ export default function PrintReceiptButton({
   subtotal,
   discount,
   total,
+  paid,
+  paymentPending,
 }: {
   receiptNumber: string
   store: string
@@ -27,6 +29,8 @@ export default function PrintReceiptButton({
   subtotal: number
   discount: number
   total: number
+  paid: number
+  paymentPending: boolean
 }) {
   const [printing, setPrinting] = useState(false)
   const money = (value: number) => `${currency} ${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
@@ -57,7 +61,10 @@ export default function PrintReceiptButton({
         <hr />
         <div className="receipt-total"><span>Subtotal</span><span>{money(subtotal)}</span></div>
         {discount > 0 && <div className="receipt-total"><span>Discount</span><span>-{money(discount)}</span></div>}
-        <div className="receipt-total receipt-grand-total"><span>Total paid</span><span>{money(total)}</span></div>
+        <div className="receipt-total receipt-grand-total"><span>Total</span><span>{money(total)}</span></div>
+        <div className="receipt-total"><span>Confirmed paid</span><span>{money(paid)}</span></div>
+        {paymentPending && <p role="status">M-PESA payment reference awaiting verification. This receipt does not confirm payment.</p>}
+        {paid < total && <div className="receipt-total"><span>Balance due</span><span>{money(Math.max(0, total - paid))}</span></div>}
         <p className="receipt-thanks">Thank you for shopping with us.</p>
       </article>
       <style>{`

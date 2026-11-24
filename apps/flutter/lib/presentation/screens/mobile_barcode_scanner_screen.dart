@@ -4,7 +4,7 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 class MobileBarcodeScannerScreen extends StatefulWidget {
   const MobileBarcodeScannerScreen({required this.onBarcode, super.key});
 
-  final bool Function(String value) onBarcode;
+  final Future<bool> Function(String value) onBarcode;
 
   @override
   State<MobileBarcodeScannerScreen> createState() =>
@@ -26,6 +26,18 @@ class _MobileBarcodeScannerScreenState
     _controller = MobileScannerController(
       detectionSpeed: DetectionSpeed.noDuplicates,
       facing: CameraFacing.back,
+      cameraResolution: const Size(1280, 720),
+      formats: const [
+        BarcodeFormat.ean13,
+        BarcodeFormat.ean8,
+        BarcodeFormat.upcA,
+        BarcodeFormat.upcE,
+        BarcodeFormat.code128,
+        BarcodeFormat.code39,
+        BarcodeFormat.code93,
+        BarcodeFormat.itf14,
+      ],
+      autoZoom: true,
       torchEnabled: false,
     );
   }
@@ -56,28 +68,35 @@ class _MobileBarcodeScannerScreenState
     }
   }
 
-  void _processCode(String value) {
+  Future<void> _processCode(String value) async {
     if (_processing) return;
     _processing = true;
-    final added = widget.onBarcode(value);
-    if (!mounted) return;
-    if (added) {
-      _controller.stop();
-      Navigator.of(context).pop(value);
-      return;
+    try {
+      final accepted = await widget.onBarcode(value);
+      if (!mounted) return;
+      if (accepted) {
+        await _controller.stop();
+        if (mounted) Navigator.of(context).pop(value);
+        return;
+      }
+      setState(() {
+        _feedback =
+            'Product Not Found: no product matches $value. Scan again or enter a barcode below.';
+      });
+    } catch (error) {
+      if (mounted) {
+        setState(() => _feedback = 'Could not check barcode: $error');
+      }
+    } finally {
+      _processing = false;
     }
-    _processing = false;
-    setState(() {
-      _feedback =
-          'No product matches $value. Scan again or enter a barcode below.';
-    });
   }
 
   void _submitManualCode() {
     final value = _manualCode.text.trim();
     if (value.isEmpty) return;
-    _processCode(value);
     _manualCode.clear();
+    _processCode(value);
   }
 
   @override

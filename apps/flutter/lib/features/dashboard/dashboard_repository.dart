@@ -564,9 +564,10 @@ class DashboardRepository {
     required String billingInterval,
     required String paymentMethod,
     required String referenceCode,
+    required String paymentOptionId,
     String? payerPhone,
   }) async {
-    final supabase = await _requireOnlineRole(user, [RetivoxRole.owner]);
+    await _requireOnlineRole(user, [RetivoxRole.owner]);
     if (!RegExp(r'^[a-z][a-z0-9_]{1,39}$').hasMatch(planKey) ||
         !['monthly', 'yearly', 'lifetime'].contains(billingInterval) ||
         ![
@@ -582,19 +583,16 @@ class DashboardRepository {
       );
     }
     try {
-      await supabase.rpc(
-        'owner_submit_subscription_payment_v2',
-        params: {
-          'p_plan_key': planKey,
-          'p_billing_interval': billingInterval,
-          'p_reference_code': referenceCode.trim(),
-          'p_payment_method': paymentMethod,
-          'p_payer_phone': payerPhone?.trim().isEmpty == true
-              ? null
-              : payerPhone?.trim(),
-        },
-      );
-    } on PostgrestException catch (error) {
+      await _postSubscriptionAction({
+        'action': 'manual',
+        'planKey': planKey,
+        'billingInterval': billingInterval,
+        'paymentMethod': paymentMethod,
+        'paymentOptionId': paymentOptionId,
+        'referenceCode': referenceCode.trim(),
+        'payerPhone': payerPhone?.trim().isEmpty == true ? null : payerPhone?.trim(),
+      });
+    } on WebApiException catch (error) {
       throw DashboardRepositoryException(error.message);
     }
   }

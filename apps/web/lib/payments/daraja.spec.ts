@@ -93,6 +93,35 @@ test.describe('Daraja Buy Goods STK request', () => {
       globalThis.fetch = originalFetch
     }
   })
+
+  test('deduplicates concurrent OAuth calls and reuses the short-lived token', async () => {
+    const originalFetch = globalThis.fetch
+    let oauthCalls = 0
+    let stkCalls = 0
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/oauth/v1/generate')) {
+        oauthCalls += 1
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        return new Response(JSON.stringify({ access_token: 'cache-test-token', expires_in: 3600 }), { status: 200 })
+      }
+      stkCalls += 1
+      return new Response(JSON.stringify({ ResponseCode: '0', CheckoutRequestID: `ws_CO_${stkCalls}`, MerchantRequestID: `merchant-${stkCalls}` }), { status: 200 })
+    }) as typeof fetch
+    try {
+      const config = { ...productionBuyGoodsConfig, consumerKey: 'cache-test-key', consumerSecret: 'cache-test-secret' }
+      const request = { phone: '0712345678', amount: 10, transactionDescription: 'Cache test' }
+      await Promise.all([
+        initiateDarajaStkPushWithConfig(request, config),
+        initiateDarajaStkPushWithConfig(request, config),
+      ])
+      await initiateDarajaStkPushWithConfig(request, config)
+      expect(oauthCalls).toBe(1)
+      expect(stkCalls).toBe(3)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
 })
 
 test.describe('Daraja callback finality', () => {

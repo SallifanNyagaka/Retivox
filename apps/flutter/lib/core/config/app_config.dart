@@ -5,6 +5,7 @@ const _supabaseKeyFromBuild = String.fromEnvironment(
   'SUPABASE_PUBLISHABLE_KEY',
 );
 const _webApiUrlFromBuild = String.fromEnvironment('RETIVOX_WEB_API_URL');
+const _defaultWebApiUrl = 'https://retivox.vercel.app';
 
 class AppConfig {
   const AppConfig({
@@ -52,6 +53,7 @@ class AppConfig {
         fileValues['RETIVOX_WEB_API_URL'],
         processValues['RETIVOX_WEB_API_URL'],
         buildWebApiBaseUrl ?? _webApiUrlFromBuild,
+        _defaultWebApiUrl,
       ]),
     );
   }

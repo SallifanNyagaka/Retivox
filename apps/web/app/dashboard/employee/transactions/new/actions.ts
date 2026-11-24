@@ -26,6 +26,7 @@ export type EmployeeTransactionFormState = {
   error: string | null
   message?: string
   transactionId?: string
+  paymentId?: string
   checkoutUrl?: string
 }
 
@@ -97,6 +98,8 @@ const transactionSchema = z
     customerEmail: z.string().trim().email().max(254).optional().or(z.literal('')),
     dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
     mpesaRefCode: z.string().trim().max(80).optional(),
+    manualPaymentMethodId: z.string().uuid().optional(),
+    manualPaymentMethodVersion: z.coerce.number().int().positive().optional(),
     paymentPhone: z.string().trim().max(40).optional().transform((value, context) => {
       if (!value) return undefined
       try { return normalizeKenyanPhoneNumber(value) } catch {
@@ -254,6 +257,8 @@ export async function recordEmployeeTransaction(
     customerName: getString(formData, 'customerName') || undefined,
     customerPhone: getString(formData, 'customerPhone') || undefined,
     mpesaRefCode: getString(formData, 'mpesaRefCode') || undefined,
+    manualPaymentMethodId: getString(formData, 'manualPaymentMethodId') || undefined,
+    manualPaymentMethodVersion: getString(formData, 'manualPaymentMethodVersion') || undefined,
     paymentPhone: getString(formData, 'paymentPhone') || undefined,
     splitPayments,
     customerEmail: getString(formData, 'customerEmail') || undefined,
@@ -301,7 +306,7 @@ export async function recordEmployeeTransaction(
     if (needsPesapal && !pesapalSetup?.config.ipnId) {
       return { success: false, error: 'The owner needs to configure Pesapal and register its IPN before checkout can be used.' }
     }
-    const response = await supabase.rpc('employee_record_transaction_idempotent_v1', {
+    const response = await supabase.rpc('employee_record_transaction_with_payment_method_v1', {
       p_request_id: requestId.data,
       p_items: validation.data.items.map((item) => ({
         productId: item.productId,
@@ -319,6 +324,14 @@ export async function recordEmployeeTransaction(
       p_reference_code: validation.data.paymentMethod === 'mpesa_stk' ? `STK-PENDING:${requestId.data}` : validation.data.paymentMethod === 'pesapal' ? `PESAPAL-PENDING:${requestId.data}` : validation.data.mpesaRefCode ?? null,
       p_due_date: validation.data.dueDate || null,
       p_is_credit: validation.data.isCredit,
+      p_manual_payment_method_id: (
+        (!validation.data.splitPayments && validation.data.paymentMethod === 'mpesa_manual') ||
+        validation.data.splitPayments?.some((payment) => payment.paymentMethod === 'mpesa_manual')
+      ) ? validation.data.manualPaymentMethodId ?? null : null,
+      p_manual_payment_method_version: (
+        (!validation.data.splitPayments && validation.data.paymentMethod === 'mpesa_manual') ||
+        validation.data.splitPayments?.some((payment) => payment.paymentMethod === 'mpesa_manual')
+      ) ? validation.data.manualPaymentMethodVersion ?? null : null,
       p_split_payments: validation.data.splitPayments?.map((payment) => ({
         paymentMethod: payment.paymentMethod === 'mpesa_stk' || payment.paymentMethod === 'pesapal' ? 'mpesa_manual' : payment.paymentMethod,
         amount: payment.amount,
@@ -352,6 +365,7 @@ export async function recordEmployeeTransaction(
 
     let successMessage = 'Transaction recorded successfully'
     let checkoutUrl: string | undefined
+    let initiatedPaymentId: string | undefined
     if (splitProviderPayment && result?.transaction_id && splitProviderReference) {
       const { data: payment, error: paymentError } = await supabase.from('payments').select('id')
         .eq('business_id', employeeProfile.businessId).eq('transaction_id', result.transaction_id).eq('mpesa_ref_code', splitProviderReference).maybeSingle()
@@ -359,6 +373,7 @@ export async function recordEmployeeTransaction(
         successMessage = 'Sale saved, but its online payment could not be linked. Do not record it again; contact the owner to review the pending payment.'
       } else if (splitProviderPayment.paymentMethod === 'mpesa_stk' && darajaSetup && validation.data.paymentPhone) {
         try {
+          initiatedPaymentId = payment.id
           await startBusinessDarajaCheckout({ businessId: employeeProfile.businessId, paymentId: payment.id, phone: validation.data.paymentPhone, setup: darajaSetup })
           successMessage = 'Sale recorded. An M-Pesa prompt was sent for the split amount; the payment will be confirmed automatically.'
         } catch (checkoutError) {
@@ -384,6 +399,7 @@ export async function recordEmployeeTransaction(
         successMessage = 'Sale saved, but its M-Pesa prompt could not be started. Do not record it again; contact the owner to review this pending payment.'
       } else {
         try {
+          initiatedPaymentId = payment.id
           await startBusinessDarajaCheckout({ businessId: employeeProfile.businessId, paymentId: payment.id, phone: validation.data.paymentPhone, setup: darajaSetup })
           successMessage = 'Sale recorded. An M-Pesa prompt was sent; the payment will be confirmed automatically after Safaricom verifies it.'
         } catch (checkoutError) {
@@ -433,6 +449,7 @@ export async function recordEmployeeTransaction(
       error: null,
       message: successMessage,
       transactionId: result?.transaction_id,
+      paymentId: initiatedPaymentId,
       checkoutUrl,
     }
   } catch (error: unknown) {

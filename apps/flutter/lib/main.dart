@@ -115,6 +115,7 @@ Future<void> main(List<String> arguments) async {
         vault: offlineVault,
         client: supabaseClient,
         backendHealthCheck: backendHealthCheck,
+        database: database,
       ),
       isOnlineSignInConfigured: supabaseClient != null,
       dashboardRepository: DashboardRepository(

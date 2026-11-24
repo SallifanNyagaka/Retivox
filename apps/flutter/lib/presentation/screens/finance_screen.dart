@@ -413,7 +413,7 @@ class _FinanceScreenState extends State<FinanceScreen> {
                 SizedBox(
                   width: 190,
                   child: DropdownButtonFormField<String>(
-                    value: _receivableStatus,
+                    initialValue: _receivableStatus,
                     isExpanded: true,
                     decoration: const InputDecoration(
                       labelText: 'Filter accounts',
@@ -631,7 +631,7 @@ class _FinanceScreenState extends State<FinanceScreen> {
                   ),
                   const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
-                    value: method,
+                    initialValue: method,
                     decoration: const InputDecoration(
                       labelText: 'Payment method',
                     ),
@@ -741,8 +741,9 @@ class _FinanceScreenState extends State<FinanceScreen> {
                               currentBalance: balance,
                               branchId: account['branch_id']?.toString() ?? '',
                             );
-                        if (dialogContext.mounted)
+                        if (dialogContext.mounted) {
                           Navigator.pop(dialogContext, true);
+                        }
                       } catch (e) {
                         setDialogState(() {
                           saving = false;
@@ -1003,63 +1004,83 @@ class _FinanceScreenState extends State<FinanceScreen> {
           child: ListView(
             padding: const EdgeInsets.all(28),
             children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('Finances', style: theme.textTheme.headlineSmall),
-                        const SizedBox(height: 6),
-                        Text(
-                          'Revenue, costs, operating expenses, and inventory losses.',
-                          style: theme.textTheme.bodyMedium?.copyWith(
-                            color: theme.colorScheme.onSurfaceVariant,
-                          ),
-                        ),
-                      ],
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final actions = <Widget>[
+                    if (widget.user.role == RetivoxRole.owner && result.hasData)
+                      FilledButton.icon(
+                        onPressed:
+                            result.connectionState == ConnectionState.waiting
+                            ? null
+                            : () =>
+                                  _showExpenseDialog(result.data!.rows.single),
+                        icon: const Icon(Icons.add),
+                        label: const Text('Record expense'),
+                      ),
+                    if (widget.user.role == RetivoxRole.owner && result.hasData)
+                      OutlinedButton.icon(
+                        onPressed:
+                            result.connectionState == ConnectionState.waiting
+                            ? null
+                            : _showInventoryLossDialog,
+                        icon: const Icon(Icons.warning_amber_outlined),
+                        label: const Text('Record inventory loss'),
+                      ),
+                    if (widget.user.role == RetivoxRole.owner && result.hasData)
+                      OutlinedButton.icon(
+                        onPressed:
+                            result.connectionState == ConnectionState.waiting
+                            ? null
+                            : _showCashDepositDialog,
+                        icon: const Icon(Icons.account_balance_outlined),
+                        label: const Text('Record cash deposit'),
+                      ),
+                    IconButton(
+                      tooltip: 'Refresh from server',
+                      onPressed:
+                          result.connectionState == ConnectionState.waiting
+                          ? null
+                          : _refresh,
+                      icon: const Icon(Icons.refresh),
                     ),
-                  ),
-                  if (widget.user.role == RetivoxRole.owner && result.hasData)
-                    Wrap(
-                      spacing: 8,
+                  ];
+                  final title = Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Finances', style: theme.textTheme.headlineSmall),
+                      const SizedBox(height: 6),
+                      Text(
+                        'Revenue, costs, operating expenses, and inventory losses.',
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  );
+                  if (constraints.maxWidth < 760) {
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        FilledButton.icon(
-                          onPressed:
-                              result.connectionState == ConnectionState.waiting
-                              ? null
-                              : () => _showExpenseDialog(
-                                  result.data!.rows.single,
-                                ),
-                          icon: const Icon(Icons.add),
-                          label: const Text('Record expense'),
-                        ),
-                        OutlinedButton.icon(
-                          onPressed:
-                              result.connectionState == ConnectionState.waiting
-                              ? null
-                              : _showInventoryLossDialog,
-                          icon: const Icon(Icons.warning_amber_outlined),
-                          label: const Text('Record inventory loss'),
-                        ),
-                        OutlinedButton.icon(
-                          onPressed:
-                              result.connectionState == ConnectionState.waiting
-                              ? null
-                              : _showCashDepositDialog,
-                          icon: const Icon(Icons.account_balance_outlined),
-                          label: const Text('Record cash deposit'),
-                        ),
+                        title,
+                        const SizedBox(height: 12),
+                        Wrap(spacing: 8, runSpacing: 8, children: actions),
                       ],
-                    ),
-                  IconButton(
-                    tooltip: 'Refresh from server',
-                    onPressed: result.connectionState == ConnectionState.waiting
-                        ? null
-                        : _refresh,
-                    icon: const Icon(Icons.refresh),
-                  ),
-                ],
+                    );
+                  }
+                  return Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(child: title),
+                      Flexible(
+                        child: Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: actions,
+                        ),
+                      ),
+                    ],
+                  );
+                },
               ),
               const SizedBox(height: 16),
               Wrap(
@@ -1250,7 +1271,7 @@ class _FinanceScreenState extends State<FinanceScreen> {
     return Align(
       alignment: Alignment.centerLeft,
       child: SizedBox(
-        width: 320,
+        width: MediaQuery.sizeOf(context).width < 400 ? double.infinity : 320,
         child: DropdownButtonFormField<String>(
           initialValue: _branchId,
           decoration: const InputDecoration(labelText: 'Branch', isDense: true),
@@ -1329,7 +1350,11 @@ class _FinanceScreenState extends State<FinanceScreen> {
                     '${deposit['review_note'] == null ? '' : ' Â· ${deposit['review_note']}'}',
                   ),
                   isThreeLine: true,
-                  trailing: const ['pending', 'pending_owner'].contains(deposit['status'])
+                  trailing:
+                      const [
+                        'pending',
+                        'pending_owner',
+                      ].contains(deposit['status'])
                       ? Wrap(
                           spacing: 4,
                           children: [
@@ -2141,8 +2166,9 @@ class _MetricCard extends StatelessWidget {
       _ => (Icons.analytics_rounded, const Color(0xFF2563EB)),
     };
     final isDark = theme.brightness == Brightness.dark;
+    final viewportWidth = MediaQuery.sizeOf(context).width;
     return SizedBox(
-      width: 232,
+      width: viewportWidth < 520 ? viewportWidth - 56 : 232,
       child: Card(
         clipBehavior: Clip.antiAlias,
         child: IntrinsicHeight(

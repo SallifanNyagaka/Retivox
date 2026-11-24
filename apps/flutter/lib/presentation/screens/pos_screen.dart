@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
@@ -11,17 +12,20 @@ import 'package:printing/printing.dart';
 
 import '../../core/auth/retivox_user.dart';
 import '../../features/sales/sale_repository.dart';
+import '../../features/dashboard/dashboard_repository.dart';
 import '../../features/dashboard/barcode_similarity.dart';
 import '../theme/retivox_theme.dart';
 import '../widgets/retivox_badge.dart';
 import '../widgets/retivox_button.dart';
 import '../widgets/retivox_card.dart';
 import 'mobile_barcode_scanner_screen.dart';
+import '../widgets/payment_progress_dialog.dart';
 
 class PosScreen extends StatefulWidget {
   const PosScreen({
     required this.user,
     required this.repository,
+    required this.dashboardRepository,
     required this.onSignOut,
     this.embedded = false,
     super.key,
@@ -29,6 +33,7 @@ class PosScreen extends StatefulWidget {
 
   final RetivoxUser user;
   final SaleRepository repository;
+  final DashboardRepository dashboardRepository;
   final VoidCallback onSignOut;
   final bool embedded;
 
@@ -44,6 +49,7 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
   final _creditPaidController = TextEditingController();
   final _customerNameController = TextEditingController();
   final _customerPhoneController = TextEditingController();
+  final _paymentPhoneController = TextEditingController();
   final _customerEmailController = TextEditingController();
   final _creditDueDateController = TextEditingController();
   final _connectivity = Connectivity();
@@ -51,11 +57,13 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
 
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
   Timer? _syncTimer;
+  Timer? _draftSaveTimer;
+  final Set<String> _restoredDraftBranches = {};
 
   String? _branchId;
   String _search = '';
   String _activeTab = 'normal'; // 'normal' | 'damaged'
-  String _paymentMethod = 'cash'; // 'cash' | 'mpesa_manual'
+  String _paymentMethod = 'cash'; // cash, mobile manual, or online M-PESA STK
   bool _isCredit = false;
   bool _scannerEnabled = false;
   String? _catalogError;
@@ -65,11 +73,14 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
   bool _isSavingSale = false;
   bool _handlingBarcode = false;
   bool _isConnected = false;
+  bool _restoringDraft = false;
   DateTime? _catalogUpdatedAt;
 
   List<SaleProduct> _products = [];
   final List<_CartLine> _cart = [];
   List<LocalSale> _sales = [];
+  List<Map<String, dynamic>> _manualPaymentOptions = [];
+  bool _loadingManualPaymentOptions = false;
 
   double get _cartTotal => _cart.fold(0, (total, line) => total + line.total);
 
@@ -80,10 +91,22 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    for (final controller in [
+      _mpesaReferenceController,
+      _cashTenderedController,
+      _creditPaidController,
+      _customerNameController,
+      _customerPhoneController,
+      _customerEmailController,
+      _creditDueDateController,
+    ]) {
+      controller.addListener(_scheduleDraftSave);
+    }
     if (widget.user.branches.isNotEmpty) {
       _branchId = widget.user.branches.first.id;
       unawaited(_loadBranchData());
     }
+    unawaited(_loadManualPaymentInstructions());
     _connectivitySubscription = _connectivity.onConnectivityChanged.listen(
       (results) {
         final networkAvailable = results.any(
@@ -123,15 +146,22 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
     _creditPaidController.dispose();
     _customerNameController.dispose();
     _customerPhoneController.dispose();
+    _paymentPhoneController.dispose();
     _customerEmailController.dispose();
     _creditDueDateController.dispose();
     _connectivitySubscription?.cancel();
     _syncTimer?.cancel();
+    _draftSaveTimer?.cancel();
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      unawaited(_saveDraftNow());
+    }
     if (state == AppLifecycleState.resumed) {
       unawaited(_loadBranchData());
       unawaited(_syncPending());
@@ -142,6 +172,7 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
     try {
       final connected = await widget.repository.isBackendReachable();
       if (mounted) {
+        final cameOnline = connected && !_isConnected;
         setState(() {
           _isConnected = connected;
           if (!connected &&
@@ -149,6 +180,7 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
             _paymentMethod = 'cash';
           }
         });
+        if (cameOnline) unawaited(_loadManualPaymentInstructions());
       }
       return connected;
     } catch (error) {
@@ -158,6 +190,79 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
         );
       }
       return false;
+    }
+  }
+
+  Future<void> _loadManualPaymentInstructions() async {
+    if (_loadingManualPaymentOptions) return;
+    _loadingManualPaymentOptions = true;
+    try {
+      final options = await widget.dashboardRepository
+          .loadBusinessPaymentInstructions(widget.user);
+      if (!mounted) return;
+      setState(() {
+        _manualPaymentOptions = options;
+      });
+    } catch (error) {
+      if (mounted && _manualPaymentOptions.isEmpty) {
+        setState(
+          () =>
+              _actionError = 'Payment instructions could not be loaded: $error',
+        );
+      }
+    } finally {
+      _loadingManualPaymentOptions = false;
+    }
+  }
+
+  String? get _selectedManualPaymentMethodId {
+    if (_manualPaymentOptions.isEmpty) return null;
+    final selected = _manualPaymentOptions.firstWhere(
+      (method) => method['is_default'] == true,
+      orElse: () => _manualPaymentOptions.first,
+    );
+    final id = selected['id']?.toString().trim();
+    return id == null || id.isEmpty ? null : id;
+  }
+
+  int? get _selectedManualPaymentMethodVersion {
+    if (_manualPaymentOptions.isEmpty) return null;
+    final selected = _manualPaymentOptions.firstWhere(
+      (method) => method['is_default'] == true,
+      orElse: () => _manualPaymentOptions.first,
+    );
+    return int.tryParse(selected['configuration_version']?.toString() ?? '');
+  }
+
+  Future<void> _copyManualPaymentDetails(Map<String, dynamic> method) async {
+    final accountType = method['account_type']?.toString() ?? '';
+    final accountLabel = switch (accountType) {
+      'buy_goods' => 'Buy Goods Till',
+      'paybill' => 'Paybill',
+      'pochi' => 'Pochi la Biashara',
+      _ => 'Payment number',
+    };
+    final details = [
+      method['display_name']?.toString() ?? 'Payment details',
+      '$accountLabel: ${method['merchant_number'] ?? ''}',
+      if (accountType == 'paybill')
+        'Account/reference: ${method['account_reference'] ?? ''}',
+      if ((method['instructions']?.toString() ?? '').trim().isNotEmpty)
+        method['instructions'].toString(),
+    ].join('\n');
+    try {
+      await Clipboard.setData(ClipboardData(text: details));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Payment details copied.')),
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not copy payment details.')),
+        );
+      }
     }
   }
 
@@ -182,6 +287,7 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
           _products = products;
           _catalogUpdatedAt = updatedAt;
         });
+        await _restoreDraft(branchId, products);
       }
     } catch (error) {
       if (mounted) setState(() => _catalogError = error.toString());
@@ -224,6 +330,9 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
 
   Future<void> _changeBranch(String? branchId) async {
     if (branchId == null || branchId == _branchId) return;
+    _draftSaveTimer?.cancel();
+    await _saveDraftNow();
+    if (!mounted) return;
     setState(() {
       _branchId = branchId;
       _products = [];
@@ -232,6 +341,108 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
       _actionError = null;
     });
     await _loadBranchData();
+  }
+
+  void _scheduleDraftSave() {
+    if (_restoringDraft || _branchId == null || !mounted) return;
+    _draftSaveTimer?.cancel();
+    _draftSaveTimer = Timer(
+      const Duration(milliseconds: 300),
+      () => unawaited(_saveDraftNow()),
+    );
+  }
+
+  Future<void> _saveDraftNow() async {
+    final branchId = _branchId;
+    if (_restoringDraft || branchId == null) return;
+    _draftSaveTimer?.cancel();
+    try {
+      await widget.repository.savePosDraft(widget.user, branchId, {
+        'version': 1,
+        'cart': _cart.map((line) => line.toJson()).toList(),
+        'paymentMethod': _paymentMethod,
+        'isCredit': _isCredit,
+        'activeTab': _activeTab,
+        'mpesaReference': _mpesaReferenceController.text,
+        'cashTendered': _cashTenderedController.text,
+        'creditPaid': _creditPaidController.text,
+        'customerName': _customerNameController.text,
+        'customerPhone': _customerPhoneController.text,
+        'customerEmail': _customerEmailController.text,
+        'creditDueDate': _creditDueDateController.text,
+      });
+    } catch (error) {
+      debugPrint('Could not save the encrypted POS draft: $error');
+    }
+  }
+
+  Future<void> _restoreDraft(
+    String branchId,
+    List<SaleProduct> products,
+  ) async {
+    if (!_restoredDraftBranches.add(branchId)) return;
+    _restoringDraft = true;
+    try {
+      final draft = await widget.repository.loadPosDraft(widget.user, branchId);
+      if (!mounted || branchId != _branchId || draft == null) return;
+      final byOptionId = {
+        for (final product in products) product.optionId: product,
+      };
+      final restoredCart = <_CartLine>[];
+      for (final raw in (draft['cart'] as List? ?? const [])) {
+        if (raw is! Map<String, dynamic>) continue;
+        final snapshot = raw['productSnapshot'];
+        final product = snapshot is Map<String, dynamic>
+            ? SaleProduct.fromCachedJson(snapshot)
+            : byOptionId[raw['productId']?.toString()];
+        final uom = raw['uomSnapshot'];
+        if (product == null || uom is! Map<String, dynamic>) continue;
+        final quantity = double.tryParse(raw['quantity']?.toString() ?? '');
+        final total = double.tryParse(
+          raw['previewLineTotal']?.toString() ?? '',
+        );
+        final uomId = uom['id']?.toString() ?? '';
+        if (quantity == null ||
+            quantity <= 0 ||
+            total == null ||
+            uomId.isEmpty) {
+          continue;
+        }
+        restoredCart.add(
+          _CartLine(
+            key: '${product.optionId}:$uomId',
+            product: byOptionId[product.optionId] ?? product,
+            uom: uom,
+            quantity: quantity,
+            total: total,
+          ),
+        );
+      }
+      setState(() {
+        _cart
+          ..clear()
+          ..addAll(restoredCart);
+        _paymentMethod = (draft['paymentMethod'] as String?) ?? 'cash';
+        _isCredit = draft['isCredit'] == true;
+        _activeTab = draft['activeTab'] == 'damaged' ? 'damaged' : 'normal';
+        _mpesaReferenceController.text =
+            draft['mpesaReference']?.toString() ?? '';
+        _cashTenderedController.text = draft['cashTendered']?.toString() ?? '';
+        _creditPaidController.text = draft['creditPaid']?.toString() ?? '';
+        _customerNameController.text = draft['customerName']?.toString() ?? '';
+        _customerPhoneController.text =
+            draft['customerPhone']?.toString() ?? '';
+        _customerEmailController.text =
+            draft['customerEmail']?.toString() ?? '';
+        _creditDueDateController.text =
+            draft['creditDueDate']?.toString() ?? '';
+      });
+    } catch (error) {
+      debugPrint('Could not restore the encrypted POS draft: $error');
+      _restoredDraftBranches.remove(branchId);
+    } finally {
+      _restoringDraft = false;
+    }
   }
 
   Future<bool> _addProduct(
@@ -273,6 +484,7 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
           ),
         ),
       );
+      _scheduleDraftSave();
       return true;
     }
 
@@ -294,6 +506,7 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
       existing.quantity = newQuantity;
       existing.total = price;
     });
+    _scheduleDraftSave();
     return true;
   }
 
@@ -304,14 +517,17 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
       setState(() => _scannerEnabled = false);
       _productSearchFocus.unfocus();
     }
-    final added = await _handleBarcode(value, fromExternalScanner: true);
-    if (!mounted) return;
-    _handlingBarcode = false;
-    if (!added) {
-      _activateScanner();
-      return;
+    try {
+      final added = await _handleBarcode(value, fromExternalScanner: true);
+      if (!mounted) return;
+      if (!added) {
+        _activateScanner();
+        return;
+      }
+      if (await _askScanAnother() && mounted) _activateScanner();
+    } finally {
+      _handlingBarcode = false;
     }
-    if (await _askScanAnother() && mounted) _activateScanner();
   }
 
   Future<bool> _handleBarcode(
@@ -321,7 +537,15 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
   }) async {
     final code = value.trim().toUpperCase();
     if (code.isEmpty) return false;
-    final product = findSaleProductByBarcode(_products, code);
+    final branchId = _branchId;
+    final product = branchId == null
+        ? null
+        : await widget.repository.findProductByBarcode(
+            user: widget.user,
+            branchId: branchId,
+            products: _products,
+            barcode: code,
+          );
     _searchController.clear();
     if (mounted) setState(() => _search = '');
     if (product == null) {
@@ -353,9 +577,18 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
         context: context,
         builder: (context) => Dialog.fullscreen(
           child: MobileBarcodeScannerScreen(
-            onBarcode: (value) {
+            onBarcode: (value) async {
               final code = normalizeBarcode(value);
-              return findSaleProductByBarcode(_products, value) != null ||
+              final branchId = _branchId;
+              final product = branchId == null
+                  ? null
+                  : await widget.repository.findProductByBarcode(
+                      user: widget.user,
+                      branchId: branchId,
+                      products: _products,
+                      barcode: value,
+                    );
+              return product != null ||
                   _products.any(
                     (product) => product.barcodes.any(
                       (barcode) =>
@@ -370,7 +603,8 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
       );
       if (code == null || !mounted) return;
       final added = await _handleBarcode(code, focusSearch: false);
-      if (!added || !mounted) return;
+      if (!mounted) return;
+      if (!added) continue;
       if (!await _askScanAnother() || !mounted) return;
     }
   }
@@ -454,6 +688,7 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
   void _changeCartQuantity(_CartLine line, double nextQuantity) {
     if (nextQuantity <= 0) {
       setState(() => _cart.remove(line));
+      _scheduleDraftSave();
       return;
     }
     final baseQuantity =
@@ -475,13 +710,18 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
       line.quantity = nextQuantity;
       line.total = price;
     });
+    _scheduleDraftSave();
   }
 
   Future<void> _checkout() async {
     final branchId = _branchId;
     if (branchId == null || _cart.isEmpty) return;
+    final checkoutPaymentMethod = _paymentMethod;
 
-    final onlineOnlyMethod = !{'cash', 'mpesa_manual'}.contains(_paymentMethod);
+    final onlineOnlyMethod = !{
+      'cash',
+      'mpesa_manual',
+    }.contains(checkoutPaymentMethod);
     if (onlineOnlyMethod && !await _checkConnectivity()) {
       _showMessage(
         'This payment method needs a live internet connection. Use cash or mobile manual while offline.',
@@ -493,10 +733,10 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
     final amountPaid = _isCredit
         ? (double.tryParse(_creditPaidController.text.trim()) ?? 0)
         : _cartTotal;
-    final amountTendered = _paymentMethod == 'cash'
+    final amountTendered = checkoutPaymentMethod == 'cash'
         ? (double.tryParse(_cashTenderedController.text.trim()) ?? amountPaid)
         : amountPaid;
-    if (_paymentMethod == 'mpesa_manual' &&
+    if (checkoutPaymentMethod == 'mpesa_manual' &&
         (!_isCredit || amountPaid > 0) &&
         mpesaRef.length < 5) {
       _showMessage('Enter a valid M-Pesa reference code (e.g. SBF92JK12).');
@@ -515,8 +755,14 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
       _showMessage('Amount paid must be between zero and the sale total.');
       return;
     }
-    if (_paymentMethod == 'cash' && amountTendered < amountPaid) {
+    if (checkoutPaymentMethod == 'cash' && amountTendered < amountPaid) {
       _showMessage('Cash received must cover the amount being paid.');
+      return;
+    }
+    final paymentPhone = _paymentPhoneController.text.trim();
+    if (checkoutPaymentMethod == 'mpesa_stk' &&
+        !RegExp(r'^(?:\+?254|0)?[17]\d{8}$').hasMatch(paymentPhone)) {
+      _showMessage('Enter a valid Kenyan phone number for the M-PESA prompt.');
       return;
     }
 
@@ -526,12 +772,21 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
     });
 
     try {
-      await widget.repository.recordSale(
+      final localId = await widget.repository.recordSale(
         user: widget.user,
         branchId: branchId,
         items: _cart.map((line) => line.toJson()).toList(),
-        paymentMethod: _paymentMethod,
-        mpesaReference: _paymentMethod == 'mpesa_manual' ? mpesaRef : '',
+        paymentMethod: checkoutPaymentMethod,
+        mpesaReference: checkoutPaymentMethod == 'mpesa_manual' ? mpesaRef : '',
+        paymentPhone: checkoutPaymentMethod == 'mpesa_stk'
+            ? paymentPhone
+            : null,
+        manualPaymentMethodId: checkoutPaymentMethod == 'mpesa_manual'
+            ? _selectedManualPaymentMethodId
+            : null,
+        manualPaymentMethodVersion: checkoutPaymentMethod == 'mpesa_manual'
+            ? _selectedManualPaymentMethodVersion
+            : null,
         previewTotal: _cartTotal,
         amountPaid: amountPaid,
         amountTendered: amountTendered,
@@ -542,6 +797,26 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
         dueDate: _creditDueDateController.text.trim(),
       );
       if (!mounted) return;
+      if (checkoutPaymentMethod == 'mpesa_stk') {
+        final attempt = await widget.repository.paymentAttemptForLocalSale(
+          widget.user,
+          localId,
+        );
+        if (attempt == null) {
+          _showMessage(
+            'The sale is saved, but its M-PESA payment is not synced yet. No prompt was sent. Do not record the sale again.',
+          );
+        } else {
+          final sale = (await widget.repository.listSales(widget.user.id))
+              .where((item) => item.localId == localId)
+              .firstOrNull;
+          if (sale != null) {
+            await _showSalePaymentProgress(sale, attempt: attempt);
+          }
+        }
+      }
+      if (!mounted) return;
+      _restoringDraft = true;
       setState(() {
         _cart.clear();
         _mpesaReferenceController.clear();
@@ -549,11 +824,20 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
         _creditPaidController.clear();
         _customerNameController.clear();
         _customerPhoneController.clear();
+        _paymentPhoneController.clear();
         _customerEmailController.clear();
         _creditDueDateController.clear();
         _isCredit = false;
       });
-      await _loadSales();
+      _draftSaveTimer?.cancel();
+      try {
+        await widget.repository.clearPosDraft(widget.user, branchId);
+      } catch (error) {
+        debugPrint('Could not clear the completed POS draft: $error');
+      } finally {
+        _restoringDraft = false;
+      }
+      await _loadBranchData();
       if (!mounted) return;
       _showMessage(
         'Sale recorded successfully. Saved locally and queued for sync.',
@@ -563,6 +847,49 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
     } finally {
       if (mounted) setState(() => _isSavingSale = false);
     }
+  }
+
+  Future<void> _showSalePaymentProgress(
+    LocalSale sale, {
+    Map<String, dynamic>? attempt,
+  }) async {
+    if (!mounted) return;
+    final savedAttempt =
+        attempt ??
+        await widget.repository.paymentAttemptForLocalSale(
+          widget.user,
+          sale.localId,
+        );
+    if (!mounted) return;
+    final paymentId = savedAttempt?['id']?.toString();
+    if (paymentId == null || paymentId.isEmpty) {
+      _showMessage(
+        'This sale does not have a synced M-PESA payment attempt yet.',
+      );
+      return;
+    }
+    final promptAlreadyStarted =
+        savedAttempt?['provider_checkout_started_at'] != null;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (dialogContext) => PaymentProgressDialog(
+        user: widget.user,
+        repository: widget.repository,
+        paymentId: paymentId,
+        onStartPrompt: promptAlreadyStarted
+            ? null
+            : () => widget.dashboardRepository.startBusinessSalePrompt(
+                user: widget.user,
+                paymentId: paymentId,
+                phone: sale.paymentPhone ?? '',
+              ),
+        onPrintReceipt: () {
+          Navigator.of(dialogContext).pop();
+          unawaited(_printReceipt(sale));
+        },
+      ),
+    );
   }
 
   Future<void> _cancelSale(LocalSale sale) async {
@@ -591,7 +918,7 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
       widget.user.id,
       sale.localId,
     );
-    await _loadSales();
+    await _loadBranchData();
     if (mounted && !cancelled) {
       _showMessage('This sale is already syncing or has been synced.');
     }
@@ -775,7 +1102,7 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
         widget.user.id,
         correctedItems,
       );
-      await _loadSales();
+      await _loadBranchData();
       if (await _checkConnectivity()) await _syncPending();
       if (mounted) {
         _showMessage('Sale correction saved; sync has been retried.');
@@ -898,10 +1225,20 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
           pw.Align(
             alignment: pw.Alignment.centerRight,
             child: pw.Text(
-              'TOTAL  ${widget.user.currency} ${_money.format(sale.totalAmount)}',
+              'SALE TOTAL  ${widget.user.currency} ${_money.format(sale.totalAmount)}',
               style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold),
             ),
           ),
+          if (sale.paymentMethod == 'mpesa_manual') ...[
+            pw.SizedBox(height: 6),
+            pw.Center(
+              child: pw.Text(
+                'Manual M-PESA references are not payment confirmation. Check verification status in Retivox.',
+                textAlign: pw.TextAlign.center,
+                style: const pw.TextStyle(fontSize: 8),
+              ),
+            ),
+          ],
           pw.SizedBox(height: 12),
           pw.Center(child: pw.Text('Thank you for shopping with us.')),
           if (sale.status != 'synced') ...[
@@ -1131,7 +1468,10 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
                       variant: _activeTab == 'normal'
                           ? RetivoxButtonVariant.primary
                           : RetivoxButtonVariant.outline,
-                      onPressed: () => setState(() => _activeTab = 'normal'),
+                      onPressed: () {
+                        setState(() => _activeTab = 'normal');
+                        _scheduleDraftSave();
+                      },
                     ),
                     if (showDamagedTab) ...[
                       const SizedBox(width: 8),
@@ -1140,7 +1480,10 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
                         variant: _activeTab == 'damaged'
                             ? RetivoxButtonVariant.primary
                             : RetivoxButtonVariant.outline,
-                        onPressed: () => setState(() => _activeTab = 'damaged'),
+                        onPressed: () {
+                          setState(() => _activeTab = 'damaged');
+                          _scheduleDraftSave();
+                        },
                       ),
                     ],
                   ],
@@ -1421,8 +1764,10 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
                                           '${_cart.length} item(s) selected',
                                       action: _cart.isNotEmpty
                                           ? TextButton(
-                                              onPressed: () =>
-                                                  setState(() => _cart.clear()),
+                                              onPressed: () {
+                                                setState(_cart.clear);
+                                                _scheduleDraftSave();
+                                              },
                                               child: const Text(
                                                 'Clear all',
                                                 style: TextStyle(
@@ -1539,9 +1884,13 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
                                                     ),
                                                     visualDensity:
                                                         VisualDensity.compact,
-                                                    onPressed: () => setState(
-                                                      () => _cart.remove(line),
-                                                    ),
+                                                    onPressed: () {
+                                                      setState(
+                                                        () =>
+                                                            _cart.remove(line),
+                                                      );
+                                                      _scheduleDraftSave();
+                                                    },
                                                   ),
                                                 ],
                                               ),
@@ -1630,16 +1979,195 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
                                           value: 'mpesa_manual',
                                           child: Text('Mobile manual'),
                                         ),
+                                        if (_isConnected)
+                                          const DropdownMenuItem(
+                                            value: 'mpesa_stk',
+                                            child: Text(
+                                              'M-PESA prompt (online)',
+                                            ),
+                                          ),
                                       ],
-                                      onChanged: (value) => setState(
-                                        () => _paymentMethod = value ?? 'cash',
-                                      ),
+                                      onChanged: (value) {
+                                        setState(
+                                          () =>
+                                              _paymentMethod = value ?? 'cash',
+                                        );
+                                        _scheduleDraftSave();
+                                      },
                                     ),
 
+                                    if (_paymentMethod == 'mpesa_manual' &&
+                                        (!_isCredit ||
+                                            (double.tryParse(
+                                                      _creditPaidController
+                                                          .text,
+                                                    ) ??
+                                                    0) >
+                                                0)) ...[
+                                      const SizedBox(height: 12),
+                                      if (_manualPaymentOptions.isEmpty)
+                                        Container(
+                                          padding: const EdgeInsets.all(12),
+                                          decoration: BoxDecoration(
+                                            color: isDark
+                                                ? RetivoxTheme.surfaceDark
+                                                : RetivoxTheme.surfaceLight,
+                                            borderRadius: BorderRadius.circular(
+                                              10,
+                                            ),
+                                            border: Border.all(
+                                              color: RetivoxTheme.accent,
+                                            ),
+                                          ),
+                                          child: const Text(
+                                            'No active manual M-PESA instructions are configured. Ask the business owner before accepting this payment.',
+                                            style: TextStyle(fontSize: 12),
+                                          ),
+                                        )
+                                      else ...[
+                                        Builder(
+                                          builder: (context) {
+                                            final selected =
+                                                _manualPaymentOptions.firstWhere(
+                                                  (method) =>
+                                                      method['is_default'] ==
+                                                      true,
+                                                  orElse: () =>
+                                                      _manualPaymentOptions
+                                                          .first,
+                                                );
+                                            final accountType =
+                                                selected['account_type']
+                                                    ?.toString();
+                                            final accountLabel =
+                                                switch (accountType) {
+                                                  'buy_goods' =>
+                                                    'Buy Goods Till',
+                                                  'paybill' => 'Paybill',
+                                                  'pochi' =>
+                                                    'Pochi la Biashara',
+                                                  _ => 'Payment number',
+                                                };
+                                            return Container(
+                                              padding: const EdgeInsets.all(12),
+                                              decoration: BoxDecoration(
+                                                color: isDark
+                                                    ? RetivoxTheme.surfaceDark
+                                                    : RetivoxTheme.surfaceLight,
+                                                borderRadius:
+                                                    BorderRadius.circular(10),
+                                                border: Border.all(
+                                                  color: isDark
+                                                      ? RetivoxTheme.borderDark
+                                                      : RetivoxTheme
+                                                            .borderLight,
+                                                ),
+                                              ),
+                                              child: Column(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
+                                                children: [
+                                                  Row(
+                                                    children: [
+                                                      Expanded(
+                                                        child: Text(
+                                                          selected['display_name']
+                                                                  ?.toString() ??
+                                                              'Payment details',
+                                                          style:
+                                                              const TextStyle(
+                                                                fontWeight:
+                                                                    FontWeight
+                                                                        .w700,
+                                                              ),
+                                                        ),
+                                                      ),
+                                                      IconButton(
+                                                        tooltip: 'Copy payment details',
+                                                        onPressed: () =>
+                                                            _copyManualPaymentDetails(
+                                                              selected,
+                                                            ),
+                                                        icon: const Icon(
+                                                          Icons.copy_outlined,
+                                                          size: 18,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                  Text(
+                                                    '$accountLabel: ${selected['merchant_number'] ?? 'Not set'}',
+                                                    style: const TextStyle(
+                                                      fontSize: 12,
+                                                    ),
+                                                  ),
+                                                  if (accountType == 'paybill')
+                                                    Padding(
+                                                      padding:
+                                                          const EdgeInsets.only(
+                                                            top: 4,
+                                                          ),
+                                                      child: Text(
+                                                        'Account/reference: ${selected['account_reference'] ?? 'Not set'}',
+                                                        style: const TextStyle(
+                                                          fontSize: 12,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                  if ((selected['instructions']
+                                                              ?.toString() ??
+                                                          '')
+                                                      .trim()
+                                                      .isNotEmpty)
+                                                    Padding(
+                                                      padding:
+                                                          const EdgeInsets.only(
+                                                            top: 6,
+                                                          ),
+                                                      child: Text(
+                                                        selected['instructions']
+                                                            .toString(),
+                                                        style: const TextStyle(
+                                                          fontSize: 12,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                  const Padding(
+                                                    padding: EdgeInsets.only(
+                                                      top: 8,
+                                                    ),
+                                                    child: Text(
+                                                      'A reference code is not proof of payment. An authorized user must verify that the funds were received.',
+                                                      style: TextStyle(
+                                                        fontSize: 11,
+                                                        color: Colors.orange,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            );
+                                          },
+                                        ),
+                                      ],
+                                    ],
+
+                                    if (_paymentMethod == 'mpesa_stk') ...[
+                                      const SizedBox(height: 12),
+                                      TextField(
+                                        controller: _paymentPhoneController,
+                                        keyboardType: TextInputType.phone,
+                                        decoration: const InputDecoration(
+                                          labelText: 'Customer phone for M-PESA prompt',
+                                          hintText: '0712345678',
+                                          helperText: 'The sale stays unverified until Safaricom confirms payment.',
+                                        ),
+                                      ),
+                                    ],
+
                                     // M-Pesa Reference Field when M-Pesa chosen
-                                    if (_paymentMethod != 'cash' &&
-                                        (_paymentMethod != 'mpesa_manual' ||
-                                            !_isCredit ||
+                                    if (_paymentMethod == 'mpesa_manual' &&
+                                        (!_isCredit ||
                                             (double.tryParse(
                                                       _creditPaidController
                                                           .text,
@@ -1702,8 +2230,10 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
                                       contentPadding: EdgeInsets.zero,
                                       title: const Text('Credit sale'),
                                       value: _isCredit,
-                                      onChanged: (value) =>
-                                          setState(() => _isCredit = value),
+                                      onChanged: (value) {
+                                        setState(() => _isCredit = value);
+                                        _scheduleDraftSave();
+                                      },
                                     ),
                                     if (_isCredit) ...[
                                       TextField(
@@ -1983,6 +2513,30 @@ class _PosScreenState extends State<PosScreen> with WidgetsBindingObserver {
                                                     ),
                                                   ),
                                                   const SizedBox(width: 5),
+                                                  if (sale.payloadReadable &&
+                                                      sale.paymentMethod ==
+                                                          'mpesa_stk' &&
+                                                      sale.status == 'synced')
+                                                    IconButton(
+                                                      icon: const Icon(
+                                                        Icons
+                                                            .phone_android_rounded,
+                                                        size: 15,
+                                                      ),
+                                                      tooltip: 'Check M-PESA payment',
+                                                      visualDensity:
+                                                          VisualDensity.compact,
+                                                      padding: EdgeInsets.zero,
+                                                      constraints:
+                                                          const BoxConstraints(
+                                                            minWidth: 28,
+                                                            minHeight: 28,
+                                                          ),
+                                                      onPressed: () =>
+                                                          _showSalePaymentProgress(
+                                                            sale,
+                                                          ),
+                                                    ),
                                                   IconButton(
                                                     icon: const Icon(
                                                       Icons.print_outlined,

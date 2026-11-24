@@ -7,6 +7,7 @@ environment:
   sdk: ^3.13.7
 
 dependencies:
+  app_links: ^7.2.2
   hive: ^2.2.3
   hive_flutter: ^1.1.0
   connectivity_plus: ^7.3.2
@@ -22,6 +23,7 @@ dependencies:
   pdf: ^3.11.3
   printing: ^5.15.1
   supabase_flutter: ^2.18.3
+  url_launcher: ^6.3.3
   uuid: ^4.6.0
 
 dev_dependencies:

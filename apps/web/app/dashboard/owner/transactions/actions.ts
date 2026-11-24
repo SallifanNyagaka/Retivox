@@ -21,6 +21,8 @@ import type { FormState, TransactionLineItemProduct, TransactionLineItemUOM, Tra
 const verifyPaymentSchema = z.object({
   paymentId: z.string().uuid(),
   action: z.enum(['approve', 'reject']),
+  evidenceSource: z.enum(['mpesa_statement', 'merchant_portal', 'provider_callback', 'other_evidence']).optional(),
+  evidenceNote: z.string().trim().max(1000).optional(),
 })
 
 /**
@@ -83,7 +85,9 @@ export async function verifyPayment(_prevState: FormState, formData: FormData): 
   const profile = await requireRole([GlobalRole.Owner])
   const paymentId = getString(formData, 'paymentId')
   const requestedAction = getString(formData, 'action')
-  const validation = verifyPaymentSchema.safeParse({ paymentId, action: requestedAction })
+  const evidenceSource = getString(formData, 'evidenceSource')
+  const evidenceNote = getString(formData, 'evidenceNote')
+  const validation = verifyPaymentSchema.safeParse({ paymentId, action: requestedAction, evidenceSource: evidenceSource || undefined, evidenceNote })
 
   if (!validation.success) {
     return { success: false, error: validation.error.errors[0]?.message ?? 'Invalid payment action' }
@@ -98,9 +102,11 @@ export async function verifyPayment(_prevState: FormState, formData: FormData): 
 
   try {
     const supabase = await createClient()
-    const { error } = await supabase.rpc('owner_verify_payment', {
+    const { error } = await supabase.rpc('owner_verify_payment_v2', {
       p_payment_id: validation.data.paymentId,
       p_action: validation.data.action,
+      p_evidence_source: validation.data.evidenceSource ?? null,
+      p_evidence_note: validation.data.evidenceNote || null,
     })
 
     if (error) {

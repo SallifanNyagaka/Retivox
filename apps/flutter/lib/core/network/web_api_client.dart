@@ -94,10 +94,12 @@ class WebApiClient {
     } on SocketException {
       throw const WebApiException(
         'Unable to reach the Retivox web service. Check your connection and try again.',
+        allowCachedFallback: true,
       );
     } on HttpException {
       throw const WebApiException(
         'Unable to reach the Retivox web service. Check your connection and try again.',
+        allowCachedFallback: true,
       );
     } on FormatException {
       throw const WebApiException(
@@ -106,10 +108,12 @@ class WebApiClient {
     } on HandshakeException {
       throw const WebApiException(
         'A secure connection to the Retivox web service could not be established.',
+        allowCachedFallback: true,
       );
     } on TimeoutException {
       throw const WebApiException(
         'The Retivox web service took too long to respond. Try again.',
+        allowCachedFallback: true,
       );
     } finally {
       client.close(force: true);
@@ -118,9 +122,10 @@ class WebApiClient {
 }
 
 class WebApiException implements Exception {
-  const WebApiException(this.message);
+  const WebApiException(this.message, {this.allowCachedFallback = false});
 
   final String message;
+  final bool allowCachedFallback;
 
   @override
   String toString() => message;

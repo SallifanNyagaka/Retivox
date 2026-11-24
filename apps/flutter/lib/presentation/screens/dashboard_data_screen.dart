@@ -3632,6 +3632,138 @@ class _TransactionDetailsDialogState extends State<_TransactionDetailsDialog> {
     }
   }
 
+  Future<void> _verifyPayment({
+    required Map<String, dynamic> payment,
+    required String action,
+  }) async {
+    final isManualMpesa = payment['payment_method'] == 'mpesa_manual';
+    String? evidenceSource;
+    String? evidenceNote;
+
+    if (isManualMpesa) {
+      final noteController = TextEditingController();
+      var source = 'mpesa_statement';
+      final evidence = await showDialog<Map<String, String>>(
+        context: context,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (context, setDialogState) => AlertDialog(
+            title: Text(
+              action == 'approve'
+                  ? 'Verify M-PESA payment'
+                  : 'Reject M-PESA payment',
+            ),
+            content: SizedBox(
+              width: 440,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    action == 'approve'
+                        ? 'Check independently that the funds reached this business. The customer reference alone is not proof of payment.'
+                        : 'Record why this M-PESA reference could not be verified.',
+                  ),
+                  if (action == 'approve') ...[
+                    const SizedBox(height: 16),
+                    DropdownButtonFormField<String>(
+                      initialValue: source,
+                      decoration: const InputDecoration(
+                        labelText: 'Evidence source',
+                      ),
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'mpesa_statement',
+                          child: Text('M-PESA statement'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'merchant_portal',
+                          child: Text('Merchant portal'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'provider_callback',
+                          child: Text('Verified provider callback'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'other_evidence',
+                          child: Text('Other independent evidence'),
+                        ),
+                      ],
+                      onChanged: (value) {
+                        if (value != null) setDialogState(() => source = value);
+                      },
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: noteController,
+                    minLines: 3,
+                    maxLines: 5,
+                    maxLength: 1000,
+                    decoration: InputDecoration(
+                      labelText: action == 'approve'
+                          ? 'Evidence checked'
+                          : 'Rejection reason',
+                      hintText: action == 'approve'
+                          ? 'Describe how you confirmed receipt of funds.'
+                          : 'Explain why the reference was not confirmed.',
+                      border: const OutlineInputBorder(),
+                    ),
+                    onChanged: (_) => setDialogState(() {}),
+                  ),
+                  if (noteController.text.trim().length < 10)
+                    const Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'Enter at least 10 characters.',
+                        style: TextStyle(color: Colors.red),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: noteController.text.trim().length < 10
+                    ? null
+                    : () => Navigator.pop(dialogContext, {
+                        'source': source,
+                        'note': noteController.text.trim(),
+                      }),
+                child: Text(
+                  action == 'approve'
+                      ? 'Confirm verification'
+                      : 'Confirm rejection',
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+      noteController.dispose();
+      if (evidence == null || !mounted) return;
+      evidenceSource = action == 'approve' ? evidence['source'] : null;
+      evidenceNote = evidence['note'];
+    }
+
+    await _runAction(
+      title: action == 'approve' ? 'Approve payment' : 'Reject payment',
+      message: action == 'approve'
+          ? 'Approve this pending payment and update the transaction status?'
+          : 'Reject this pending payment? This action is recorded in the audit log.',
+      action: () => widget.repository.verifyPayment(
+        widget.user,
+        paymentId: payment['id'].toString(),
+        action: action,
+        evidenceSource: evidenceSource,
+        evidenceNote: evidenceNote,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final transaction = widget.transaction;
@@ -3704,15 +3836,9 @@ class _TransactionDetailsDialogState extends State<_TransactionDetailsDialog> {
                           TextButton.icon(
                             onPressed: _isSaving
                                 ? null
-                                : () => _runAction(
-                                    title: 'Approve payment',
-                                    message: 'Confirm that this payment has been received and should be verified?',
-                                    action: () =>
-                                        widget.repository.verifyPayment(
-                                          widget.user,
-                                          paymentId: payment['id'].toString(),
-                                          action: 'approve',
-                                        ),
+                                : () => _verifyPayment(
+                                    payment: payment,
+                                    action: 'approve',
                                   ),
                             icon: const Icon(Icons.check_circle_outline),
                             label: const Text('Approve payment'),
@@ -3720,15 +3846,9 @@ class _TransactionDetailsDialogState extends State<_TransactionDetailsDialog> {
                           TextButton.icon(
                             onPressed: _isSaving
                                 ? null
-                                : () => _runAction(
-                                    title: 'Reject payment',
-                                    message: 'Reject this payment verification request?',
-                                    action: () =>
-                                        widget.repository.verifyPayment(
-                                          widget.user,
-                                          paymentId: payment['id'].toString(),
-                                          action: 'reject',
-                                        ),
+                                : () => _verifyPayment(
+                                    payment: payment,
+                                    action: 'reject',
                                   ),
                             icon: const Icon(Icons.cancel_outlined),
                             label: const Text('Reject payment'),

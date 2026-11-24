@@ -8,8 +8,9 @@ import { GlobalRole } from '@smartretail/shared'
 import { requireRole } from '../../../../../lib/auth/helpers'
 import { getDashboardSalePageData } from '../../../../../lib/dashboard/recordTransactionPage'
 import { recordOwnerTransaction } from '../../../../../lib/dashboard/recordTransactionAction'
+import { createClient } from '../../../../../lib/supabase/server'
 import { Card, CardHeader } from '../../../../../components/ui/Card'
-import RecordEmployeeTransactionForm from '../../../employee/transactions/new/RecordEmployeeTransactionForm'
+import RecordEmployeeTransactionForm, { type ManualPaymentInstruction } from '../../../employee/transactions/new/RecordEmployeeTransactionForm'
 
 type SearchParams = Promise<{
   branch?: string
@@ -25,6 +26,11 @@ export default async function OwnerNewTransactionPage({ searchParams }: { search
 
   const params = await searchParams
   const data = await getDashboardSalePageData(profile.id, businessId, 'owner', params.branch, 'owner_record_transaction')
+  const supabase = await createClient()
+  const manualMethods = await supabase.rpc('business_public_payment_methods')
+  const manualPaymentOptions = !manualMethods.error && Array.isArray(manualMethods.data)
+    ? manualMethods.data as ManualPaymentInstruction[]
+    : []
   const selectedBranch = data.branches.find((branch) => branch.id === data.selectedBranchId) ?? null
 
   return (
@@ -35,7 +41,7 @@ export default async function OwnerNewTransactionPage({ searchParams }: { search
             Record owner transaction
           </h1>
           <p style={{ fontSize: 14, color: 'var(--color-text-muted)', marginTop: 4 }}>
-            Record a sale for any active store. Owner sales are verified immediately.
+            Record a sale for any active store. Manual M-PESA references remain pending until independently verified.
           </p>
         </div>
         <Link href="/dashboard/owner/transactions" className="btn-outline" style={{ padding: '8px 16px', borderRadius: 8 }}>
@@ -105,8 +111,10 @@ export default async function OwnerNewTransactionPage({ searchParams }: { search
                 branchId={data.selectedBranchId}
                 redirectPath="/dashboard/owner/transactions"
                 stayOnSuccess
-                submitLabel="Record verified transaction"
+                submitLabel="Record transaction"
                 pendingMessage="Recording verified transaction..."
+                manualPaymentOptions={manualPaymentOptions}
+                paymentConfigCacheKey={`${profile.id}:${businessId}`}
               />
             )}
           </Card>

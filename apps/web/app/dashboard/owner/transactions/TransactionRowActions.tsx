@@ -12,6 +12,7 @@ import { useRouter } from 'next/navigation'
 import Modal from '../../../../components/ui/Modal'
 import Toast from '../../../../components/ui/Toast'
 import LoadingOverlay from '../../../../components/ui/LoadingOverlay'
+import PaymentProgressButton from '../../../../components/payments/PaymentProgressButton'
 import { Badge } from '../../../../components/ui/Badge'
 import { useToast } from '../../../../lib/hooks/useToast'
 import { getTransactionLineItems, verifyPayment, voidTransaction } from './actions'
@@ -113,6 +114,8 @@ export default function TransactionRowActions({ transaction, currency, canManage
   const [lineItemsError, setLineItemsError] = useState<string | null>(null)
   const [verifyOpen, setVerifyOpen] = useState(false)
   const [verifyIntent, setVerifyIntent] = useState<'approve' | 'reject'>('approve')
+  const [verificationSource, setVerificationSource] = useState('mpesa_statement')
+  const [verificationNote, setVerificationNote] = useState('')
   const [voidOpen, setVoidOpen] = useState(false)
   const { toast, toastState, dismiss } = useToast()
   const [verifyState, verifyAction, verifyPending] = useActionState<FormState, FormData>(verifyPayment, {
@@ -125,7 +128,8 @@ export default function TransactionRowActions({ transaction, currency, canManage
   })
   const previousVerifyPending = useRef(verifyPending)
   const previousVoidPending = useRef(voidPending)
-  const pendingPayment = transaction.payments.find((payment) => payment.status === 'pending_verify') ?? null
+  const pendingPayment = transaction.payments.find((payment) => payment.status === 'pending_verify' && payment.payment_method === 'mpesa_manual') ?? null
+  const pendingStkPayment = transaction.payments.find((payment) => payment.status === 'pending_verify' && payment.payment_method === 'mpesa_stk') ?? null
 
   /**
    * Opens the detail modal and lazy-loads line items separately from the list query.
@@ -214,6 +218,8 @@ export default function TransactionRowActions({ transaction, currency, canManage
    */
   const openVerifyModal = (intent: 'approve' | 'reject') => {
     setVerifyIntent(intent)
+    setVerificationSource('mpesa_statement')
+    setVerificationNote('')
     setVerifyOpen(true)
   }
 
@@ -226,9 +232,18 @@ export default function TransactionRowActions({ transaction, currency, canManage
       return
     }
 
+    if (pendingPayment.payment_method === 'mpesa_manual' && verificationNote.trim().length < 10) {
+      toast.error('Enter at least 10 characters describing the evidence checked or rejection reason')
+      return
+    }
+
     const formData = new FormData()
     formData.set('paymentId', pendingPayment.id)
     formData.set('action', verifyIntent)
+    if (pendingPayment.payment_method === 'mpesa_manual') {
+      formData.set('evidenceSource', verificationSource)
+      formData.set('evidenceNote', verificationNote.trim())
+    }
 
     startTransition(() => {
       verifyAction(formData)
@@ -300,6 +315,7 @@ export default function TransactionRowActions({ transaction, currency, canManage
             </button>
           </>
         )}
+        {pendingStkPayment && <PaymentProgressButton paymentId={pendingStkPayment.id} currency={currency} />}
         {canManage && (
           <button
             type="button"
@@ -448,9 +464,47 @@ export default function TransactionRowActions({ transaction, currency, canManage
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <p style={{ fontSize: 13, color: 'var(--color-text-muted)', margin: 0 }}>
             {verifyIntent === 'approve'
-              ? 'Approve this pending payment and mark the transaction as verified?'
-              : 'Reject this pending payment and mark the transaction as rejected?'}
+              ? pendingPayment?.payment_method === 'mpesa_manual'
+                ? 'Confirm you independently checked that the funds reached this business. The customer reference alone is not proof of payment.'
+                : 'Approve this pending payment and mark the transaction as verified?'
+              : 'Reject this pending payment. Add a reason so the audit trail is clear.'}
           </p>
+
+          {pendingPayment?.payment_method === 'mpesa_manual' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {verifyIntent === 'approve' && (
+                <label style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13 }}>
+                  Evidence source
+                  <select
+                    value={verificationSource}
+                    onChange={(event) => setVerificationSource(event.target.value)}
+                    disabled={verifyPending}
+                    required
+                    style={{ minHeight: 40, border: '1px solid var(--color-border)', borderRadius: 8, padding: '8px 10px' }}
+                  >
+                    <option value="mpesa_statement">M-PESA statement</option>
+                    <option value="merchant_portal">Merchant portal</option>
+                    <option value="provider_callback">Verified provider callback</option>
+                    <option value="other_evidence">Other independent evidence</option>
+                  </select>
+                </label>
+              )}
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13 }}>
+                {verifyIntent === 'approve' ? 'Evidence checked' : 'Rejection reason'}
+                <textarea
+                  value={verificationNote}
+                  onChange={(event) => setVerificationNote(event.target.value)}
+                  disabled={verifyPending}
+                  required
+                  minLength={10}
+                  maxLength={1000}
+                  rows={3}
+                  placeholder={verifyIntent === 'approve' ? 'Describe where and how you confirmed receipt of funds.' : 'Explain why this payment reference could not be verified.'}
+                  style={{ border: '1px solid var(--color-border)', borderRadius: 8, padding: 10, resize: 'vertical' }}
+                />
+              </label>
+            </div>
+          )}
 
           {verifyState.error && (
             <div

@@ -12,6 +12,7 @@ import { useRouter } from 'next/navigation'
 import { Camera, ScanBarcode } from 'lucide-react'
 import LoadingOverlay from '../../../../../components/ui/LoadingOverlay'
 import Toast from '../../../../../components/ui/Toast'
+import BusinessPaymentProgressDialog from '../../../../../components/payments/BusinessPaymentProgressDialog'
 import BarcodeCameraDialog from '../../../../../components/barcode/BarcodeCameraDialog'
 import { useToast } from '../../../../../lib/hooks/useToast'
 import { queueOfflineEmployeeSale } from '../../../../../lib/pwa/offlineEmployeeSales'
@@ -75,6 +76,58 @@ type LineItemDraft = {
 
 type SplitPaymentMethod = 'cash' | 'mpesa_manual' | 'mpesa_stk' | 'pesapal'
 
+export type ManualPaymentInstruction = {
+  id: string
+  method_code: string
+  account_type: string
+  display_name: string
+  merchant_number: string | null
+  account_reference: string | null
+  instructions: string | null
+  is_default: boolean
+  configuration_version: number
+}
+
+function ManualPaymentInstructions({
+  option,
+  onCopy,
+}: {
+  option: ManualPaymentInstruction | null
+  onCopy: () => void
+}) {
+  if (!option) {
+    return (
+      <div role="status" className="rounded-xl border text-left" style={{ borderColor: 'var(--color-warning)', background: 'var(--color-surface)', color: 'var(--color-text-muted)', padding: 12, fontSize: 12 }}>
+        No active manual M-PESA instructions are configured. Ask the business owner before accepting a manual payment.
+      </div>
+    )
+  }
+
+  const accountLabel = option.account_type === 'buy_goods'
+    ? 'Buy Goods Till'
+    : option.account_type === 'paybill'
+      ? 'Paybill'
+      : option.account_type === 'pochi'
+        ? 'Pochi la Biashara'
+        : option.account_type.replaceAll('_', ' ')
+
+  return (
+    <div className="rounded-xl border text-left" style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)', color: 'var(--color-text-primary)', padding: 14 }}>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p style={{ margin: 0, fontSize: 13, fontWeight: 750 }}>{option.display_name}</p>
+          <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--color-text-muted)' }}>{accountLabel}</p>
+        </div>
+        <button type="button" className="btn-outline" onClick={onCopy} style={{ borderRadius: 8, padding: '6px 10px', fontSize: 12 }}>Copy payment details</button>
+      </div>
+      <p style={{ margin: '12px 0 0', fontSize: 12 }}><strong>{accountLabel}:</strong> {option.merchant_number || 'Not set'}</p>
+      {option.account_type === 'paybill' && <p style={{ margin: '5px 0 0', fontSize: 12 }}><strong>Account/reference:</strong> {option.account_reference || 'Ask the business owner'}</p>}
+      {option.instructions && <p style={{ margin: '8px 0 0', whiteSpace: 'pre-wrap', fontSize: 12, lineHeight: 1.5, color: 'var(--color-text-muted)' }}>{option.instructions}</p>}
+      <p style={{ margin: '10px 0 0', fontSize: 11, color: 'var(--color-warning)' }}>This reference is not payment confirmation. The transaction stays unverified until an authorized user checks the received funds.</p>
+    </div>
+  )
+}
+
 /**
  * Props for the record transaction form.
  */
@@ -89,6 +142,8 @@ type Props = {
   submitLabel?: string
   pendingMessage?: string
   offlineQueueEnabled?: boolean
+  manualPaymentOptions?: ManualPaymentInstruction[]
+  paymentConfigCacheKey?: string
 }
 
 type PreviewPricing = {
@@ -368,6 +423,8 @@ export default function RecordEmployeeTransactionForm({
   submitLabel = 'Record transaction',
   pendingMessage = 'Recording transaction...',
   offlineQueueEnabled = false,
+  manualPaymentOptions: initialManualPaymentOptions = [],
+  paymentConfigCacheKey,
 }: Props) {
   const router = useRouter()
   const previousPending = useRef(false)
@@ -400,6 +457,8 @@ export default function RecordEmployeeTransactionForm({
   const [customerPhone, setCustomerPhone] = useState('')
   const [mpesaRefCode, setMpesaRefCode] = useState('')
   const [paymentPhone, setPaymentPhone] = useState('')
+  const [manualPaymentOptions, setManualPaymentOptions] = useState(initialManualPaymentOptions)
+  const [activePaymentId, setActivePaymentId] = useState<string | null>(null)
   const [isOfflineSubmitting, setIsOfflineSubmitting] = useState(false)
   const [isBackendOnline, setIsBackendOnline] = useState(false)
   const [offlineDeductedByOption, setOfflineDeductedByOption] = useState<Map<string, number>>(() => new Map())
@@ -408,9 +467,53 @@ export default function RecordEmployeeTransactionForm({
     error: null,
   })
   const { toast, toastState, dismiss } = useToast()
+  const selectedManualPaymentOption = manualPaymentOptions.find((option) => option.is_default)
+    ?? manualPaymentOptions[0]
+    ?? null
   const hasAdvancedPricing = products.some(
     (product) => product.pricingMethod !== 'fixed_price' || product.pricingOptions.length > 0,
   )
+
+  const copyManualPaymentDetails = async () => {
+    if (!selectedManualPaymentOption) return
+    const option = selectedManualPaymentOption
+    const accountLabel = option.account_type === 'buy_goods' ? 'Till' : option.account_type === 'paybill' ? 'Paybill' : 'Pochi'
+    const details = [
+      option.display_name,
+      `${accountLabel}: ${option.merchant_number ?? ''}`,
+      option.account_type === 'paybill' ? `Account/reference: ${option.account_reference ?? ''}` : '',
+      option.instructions ?? '',
+    ].filter(Boolean).join('\n')
+    try {
+      await navigator.clipboard.writeText(details)
+      toast.success('Payment details copied')
+    } catch {
+      toast.error('Could not copy payment details on this device')
+    }
+  }
+
+  useEffect(() => {
+    if (!paymentConfigCacheKey) return
+    const key = `retivox:payment-instructions:${paymentConfigCacheKey}`
+    if (initialManualPaymentOptions.length > 0) {
+      setManualPaymentOptions(initialManualPaymentOptions)
+      try {
+        window.localStorage.setItem(key, JSON.stringify(initialManualPaymentOptions))
+      } catch {
+        // Browser storage may be unavailable; live instructions still render.
+      }
+      return
+    }
+    try {
+      const cached = window.localStorage.getItem(key)
+      if (cached) {
+        const parsed: unknown = JSON.parse(cached)
+        if (Array.isArray(parsed)) setManualPaymentOptions(parsed as ManualPaymentInstruction[])
+      }
+    } catch {
+      // Ignore an invalid or unavailable public-configuration cache.
+    }
+  }, [initialManualPaymentOptions, paymentConfigCacheKey])
 
   useEffect(() => {
     let active = true
@@ -524,6 +627,10 @@ export default function RecordEmployeeTransactionForm({
     !outOfStockSummary &&
     !discountInvalid &&
     !discountTooHigh
+  const isStkCheckoutSubmitting = isPending && (
+    (!splitPaymentMode && paymentMethod === 'mpesa_stk') ||
+    (splitPaymentMode && splitPayments.some((payment) => payment.paymentMethod === 'mpesa_stk'))
+  )
 
   /**
    * Handles completed submissions and redirects back to transaction history.
@@ -535,6 +642,11 @@ export default function RecordEmployeeTransactionForm({
       if (state.success) {
         if (state.checkoutUrl) {
           window.location.assign(state.checkoutUrl)
+          previousPending.current = isPending
+          return
+        }
+        if (state.paymentId) {
+          setActivePaymentId(state.paymentId)
           previousPending.current = isPending
           return
         }
@@ -567,7 +679,7 @@ export default function RecordEmployeeTransactionForm({
         clearTimeout(redirectTimer)
       }
     }
-  }, [isPending, products, redirectPath, router, state.checkoutUrl, state.error, state.message, state.success, stayOnSuccess, toast])
+  }, [isPending, products, redirectPath, router, state.checkoutUrl, state.error, state.message, state.paymentId, state.success, stayOnSuccess, toast])
 
   useEffect(() => {
     const refreshAfterSync = () => router.refresh()
@@ -788,6 +900,12 @@ export default function RecordEmployeeTransactionForm({
             customerEmail: customerEmail.trim() || null,
             dueDate: dueDate || null,
             mpesaRefCode: mpesaRefCode.trim() || null,
+            manualPaymentMethodId: paymentMethod === 'mpesa_manual'
+              ? selectedManualPaymentOption?.id ?? null
+              : null,
+            manualPaymentMethodVersion: paymentMethod === 'mpesa_manual'
+              ? selectedManualPaymentOption?.configuration_version ?? null
+              : null,
             recordedAt: new Date().toISOString(),
           })
 
@@ -835,6 +953,8 @@ export default function RecordEmployeeTransactionForm({
     formData.set('customerEmail', customerEmail)
     formData.set('dueDate', dueDate)
     formData.set('mpesaRefCode', mpesaRefCode)
+    formData.set('manualPaymentMethodId', selectedManualPaymentOption?.id ?? '')
+    formData.set('manualPaymentMethodVersion', String(selectedManualPaymentOption?.configuration_version ?? ''))
     formData.set('paymentPhone', paymentPhone)
     formData.set('idempotencyKey', requestIdRef.current)
     formData.set('splitPaymentsJson', splitPaymentMode ? JSON.stringify(splitPayments.map((payment) => ({
@@ -851,7 +971,25 @@ export default function RecordEmployeeTransactionForm({
 
   return (
     <>
-      {(isPending || isOfflineSubmitting) && <LoadingOverlay message={isOfflineSubmitting ? 'Saving sale offline...' : pendingMessage} />}
+      {isStkCheckoutSubmitting ? (
+        <BusinessPaymentProgressDialog
+          open
+          initializing
+          currency={currency}
+          onClose={() => {}}
+          onViewTransactions={() => {}}
+        />
+      ) : (isPending || isOfflineSubmitting) && <LoadingOverlay message={isOfflineSubmitting ? 'Saving sale offline...' : pendingMessage} />}
+      <BusinessPaymentProgressDialog
+        open={Boolean(activePaymentId)}
+        paymentId={activePaymentId}
+        currency={currency}
+        onClose={() => setActivePaymentId(null)}
+        onViewTransactions={() => {
+          setActivePaymentId(null)
+          router.push(redirectPath)
+        }}
+      />
       {toastState && (
         <Toast
           message={toastState.message}
@@ -1223,6 +1361,7 @@ export default function RecordEmployeeTransactionForm({
               <button type="button" className="btn-outline" aria-label={`Remove payment ${index + 1}`} disabled={splitPayments.length === 1 && !isCredit} onClick={() => setSplitPayments((current) => current.filter((row) => row.id !== payment.id))} style={{ alignSelf: 'end', borderRadius: 8, padding: '8px 10px' }}>Remove</button>
             </div>)}
             {splitPayments.some((payment) => payment.paymentMethod === 'mpesa_stk') && <label className="flex flex-col gap-1" style={splitLabelStyle}>Customer phone for M-Pesa prompt<input type="tel" inputMode="tel" value={paymentPhone} onChange={(event) => setPaymentPhone(event.target.value)} required pattern="^(?:\\+?254|0)?[17]\\d{8}$" placeholder="0712345678" style={inputStyle} /></label>}
+            {splitPayments.some((payment) => payment.paymentMethod === 'mpesa_manual') && <ManualPaymentInstructions option={selectedManualPaymentOption} onCopy={() => { void copyManualPaymentDetails() }} />}
             <div className="flex flex-wrap items-center justify-between gap-2"><button type="button" className="btn-outline" disabled={splitPayments.length >= 8} onClick={() => setSplitPayments((current) => [...current, { id: `tender-${Date.now()}-${current.length}`, paymentMethod: 'cash', amount: '', amountTendered: '', referenceCode: '' }])} style={{ borderRadius: 8, padding: '8px 12px' }}>Add payment method</button><span style={{ color: 'var(--color-text-primary)', fontSize: 13, fontWeight: 750 }}>Applied {formatMoney(splitPaidTotal, currency)} · Outstanding {formatMoney(Math.max(0, totalPreview - splitPaidTotal), currency)}</span></div>
             {!isCredit && splitPaidTotal !== totalPreview && <p style={{ margin: 0, color: 'var(--color-warning)', fontSize: 12 }}>A non-credit sale must be paid in full. Adjust the tender amounts or record a credit sale.</p>}
             {!isBackendOnline && <p style={{ margin: 0, color: 'var(--color-danger)', fontSize: 12 }}>Split payments require an active Retivox connection. Use a single tender while offline.</p>}
@@ -1279,6 +1418,10 @@ export default function RecordEmployeeTransactionForm({
             </select>
           </label>}
         </div>}
+
+        {!splitPaymentMode && paymentMethod === 'mpesa_manual' && (!isCredit || Number(amountPaid) > 0) && (
+          <ManualPaymentInstructions option={selectedManualPaymentOption} onCopy={() => { void copyManualPaymentDetails() }} />
+        )}
 
         <label className="flex items-center gap-2" style={{ fontSize: 13, color: 'var(--color-text-primary)' }}>
           <input type="checkbox" checked={isCredit} onChange={(event) => setIsCredit(event.target.checked)} />

@@ -561,13 +561,13 @@ export default function LoginPage() {
 
             {/* Register link */}
             <p className="text-center text-sm" style={{ color: 'var(--color-text-muted)' }}>
-              Don&apos;t have an account?{' '}
+              Looks like you&apos;re new here? Create an account with us first.{' '}
               <Link
                 href="/register"
                 className="font-semibold transition-opacity hover:opacity-75"
                 style={{ color: 'var(--color-primary)' }}
               >
-                Sign Up
+                Create account
               </Link>
             </p>
           </form>

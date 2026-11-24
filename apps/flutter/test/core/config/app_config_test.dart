@@ -55,4 +55,23 @@ void main() {
     expect(config.supabasePublishableKey, 'environment-key');
     expect(config.webApiBaseUrl, 'https://environment.example.com');
   });
+
+  test(
+    'accepts explicit release build values when runtime config is absent',
+    () async {
+      final config = await AppConfig.load(
+        envFile: envFile,
+        environment: const {},
+        buildUrl: 'https://build.supabase.co',
+        buildPublishableKey: 'build-publishable-key',
+        buildWebApiBaseUrl: 'https://build.example.com',
+      );
+
+      expect(config.hasSupabase, isTrue);
+      expect(config.supabaseUrl, 'https://build.supabase.co');
+      expect(config.supabasePublishableKey, 'build-publishable-key');
+      expect(config.webApiBaseUrl, 'https://build.example.com');
+    },
+  );
+
 }

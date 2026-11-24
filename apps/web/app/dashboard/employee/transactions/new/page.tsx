@@ -13,7 +13,7 @@ import { requireAuth } from '../../../../../lib/auth/helpers'
 import { getEmployeeProfile } from '../../../../../lib/employee/auth'
 import logger from '../../../../../lib/logger'
 import { createClient } from '../../../../../lib/supabase/server'
-import RecordEmployeeTransactionForm, { type EmployeeProductOption } from './RecordEmployeeTransactionForm'
+import RecordEmployeeTransactionForm, { type EmployeeProductOption, type ManualPaymentInstruction } from './RecordEmployeeTransactionForm'
 import { mapEmployeeProductOption, type EmployeeAvailableProductRow } from './productOptions'
 
 /**
@@ -44,6 +44,7 @@ export default async function EmployeeNewTransactionPage() {
 
   let products: EmployeeProductOption[] = []
   let currency = 'USD'
+  let manualPaymentOptions: ManualPaymentInstruction[] = []
   let pageError: string | null = null
 
   try {
@@ -54,6 +55,10 @@ export default async function EmployeeNewTransactionPage() {
         p_branch_id: employeeProfile.branchId,
       }),
     ])
+    const paymentMethodsResponse = await supabase.rpc('business_public_payment_methods')
+    if (!paymentMethodsResponse.error && Array.isArray(paymentMethodsResponse.data)) {
+      manualPaymentOptions = paymentMethodsResponse.data as ManualPaymentInstruction[]
+    }
 
     if (businessResponse.error) {
       throw businessResponse.error
@@ -142,7 +147,14 @@ export default async function EmployeeNewTransactionPage() {
               </p>
             </div>
           ) : (
-            <RecordEmployeeTransactionForm products={products} currency={currency} initialRequestId={randomUUID()} offlineQueueEnabled />
+            <RecordEmployeeTransactionForm
+              products={products}
+              currency={currency}
+              initialRequestId={randomUUID()}
+              offlineQueueEnabled
+              manualPaymentOptions={manualPaymentOptions}
+              paymentConfigCacheKey={`${user.id}:${employeeProfile.businessId}`}
+            />
           )}
         </Card>
       </div>

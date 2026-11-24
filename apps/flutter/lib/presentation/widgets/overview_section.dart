@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 
 import '../../core/auth/retivox_user.dart';
 import '../../features/dashboard/dashboard_repository.dart';
+import '../../features/sales/sale_repository.dart';
 import '../models/overview_snapshot.dart';
 import '../theme/retivox_theme.dart';
 import 'retivox_card.dart';
@@ -14,6 +15,10 @@ class OverviewSection extends StatefulWidget {
   const OverviewSection({
     required this.user,
     required this.repository,
+    required this.saleRepository,
+    required this.isOnline,
+    required this.onViewOfflineSales,
+    required this.onSyncNow,
     this.refreshVersion = 0,
     this.onRefresh,
     this.onNavigate,
@@ -22,6 +27,10 @@ class OverviewSection extends StatefulWidget {
 
   final RetivoxUser user;
   final DashboardRepository repository;
+  final SaleRepository saleRepository;
+  final bool isOnline;
+  final VoidCallback onViewOfflineSales;
+  final Future<void> Function() onSyncNow;
   final int refreshVersion;
   final Future<void> Function()? onRefresh;
   final ValueChanged<String>? onNavigate;
@@ -32,6 +41,7 @@ class OverviewSection extends StatefulWidget {
 
 class _OverviewSectionState extends State<OverviewSection> {
   OverviewSnapshot? _snapshot;
+  OfflineSalesSummary? _offlineSales;
   bool _loading = true;
   String? _error;
   final _money = NumberFormat('#,##0.00', 'en_KE');
@@ -67,14 +77,29 @@ class _OverviewSectionState extends State<OverviewSection> {
         _error = null;
       });
     }
+    OfflineSalesSummary? localSales;
+    OverviewSnapshot? data;
+    Object? overviewError;
     try {
-      final data = await widget.repository.loadOverview(widget.user);
-      if (mounted) setState(() => _snapshot = data);
-    } catch (error) {
-      if (mounted) setState(() => _error = error.toString());
-    } finally {
-      if (mounted) setState(() => _loading = false);
+      localSales = await widget.saleRepository.offlineSalesSummary(
+        widget.user.id,
+      );
+    } catch (_) {
+      // Dashboard data should remain usable if local queue inspection fails.
     }
+    try {
+      data = await widget.repository.loadOverview(widget.user);
+    } catch (error) {
+      overviewError = error;
+    }
+    if (mounted) {
+      setState(() {
+        if (data != null) _snapshot = data;
+        if (localSales != null) _offlineSales = localSales;
+        _error = overviewError?.toString();
+      });
+    }
+    if (mounted) setState(() => _loading = false);
   }
 
   Future<void> _refresh() async {
@@ -83,6 +108,94 @@ class _OverviewSectionState extends State<OverviewSection> {
   }
 
   String _amount(Object? value) => _money.format(_number(value));
+
+  String _syncTime(DateTime? value) => value == null
+      ? 'No confirmed sync yet'
+      : DateFormat('MMM d, h:mm a').format(value.toLocal());
+
+  Widget _offlineSalesCard() {
+    final summary = _offlineSales;
+    final theme = Theme.of(context);
+    final muted = theme.brightness == Brightness.dark
+        ? RetivoxTheme.textMutedDark
+        : RetivoxTheme.textMutedLight;
+    final metrics = summary == null
+        ? const <(String, String)>[]
+        : <(String, String)>[
+            (
+              'Awaiting cloud sync',
+              '${summary.pendingCount} · ${widget.user.currency} ${_amount(summary.pendingValue)}',
+            ),
+            (
+              'Needs correction',
+              '${summary.failedCount} · ${widget.user.currency} ${_amount(summary.failedValue)}',
+            ),
+            ('Synced from local queue', '${summary.syncedCount}'),
+            ('Last successful sale sync', _syncTime(summary.lastSyncedAt)),
+          ];
+    return RetivoxCard(
+      padding: RetivoxCardPadding.md,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          RetivoxCardHeader(
+            title: 'Offline sales and synchronization',
+            subtitle: widget.isOnline
+                ? 'Backend reachable · local queue is account-scoped'
+                : 'Offline · showing the latest saved queue data',
+            action: TextButton.icon(
+              onPressed: widget.onViewOfflineSales,
+              icon: const Icon(Icons.list_alt_rounded, size: 18),
+              label: const Text('View queue'),
+            ),
+          ),
+          if (summary == null)
+            Text(
+              'Local synchronization summary is unavailable.',
+              style: TextStyle(color: muted),
+            )
+          else
+            Wrap(
+              spacing: 18,
+              runSpacing: 12,
+              children: [
+                for (final metric in metrics)
+                  SizedBox(
+                    width: 200,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(metric.$1, style: TextStyle(color: muted)),
+                        const SizedBox(height: 4),
+                        Text(
+                          metric.$2,
+                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          const SizedBox(height: 8),
+          Text(
+            'Sales are saved locally first, whether online or offline. Cloud sync status is separate from payment verification; a synced sale is not proof that an electronic payment has settled.',
+            style: TextStyle(color: muted, fontSize: 12),
+          ),
+          if (summary != null && summary.pendingCount > 0) ...[
+            const SizedBox(height: 10),
+            Align(
+              alignment: Alignment.centerRight,
+              child: FilledButton.icon(
+                onPressed: widget.isOnline ? widget.onSyncNow : null,
+                icon: const Icon(Icons.sync_rounded),
+                label: const Text('Sync now'),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 
   String? _timeText(Object? value) {
     final parsed = DateTime.tryParse(value?.toString() ?? '');
@@ -443,6 +556,26 @@ class _OverviewSectionState extends State<OverviewSection> {
     if (_loading && snapshot == null) {
       return const Center(child: CircularProgressIndicator());
     }
+    if (snapshot == null && _offlineSales != null) {
+      return RefreshIndicator(
+        onRefresh: _refresh,
+        child: ListView(
+          padding: const EdgeInsets.all(24),
+          children: [
+            Text('Business overview', style: theme.textTheme.headlineSmall),
+            if (_error != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                'The saved dashboard summary is unavailable. $_error',
+                style: TextStyle(color: muted),
+              ),
+            ],
+            const SizedBox(height: 16),
+            _offlineSalesCard(),
+          ],
+        ),
+      );
+    }
     if (snapshot == null) {
       return Center(
         child: Column(
@@ -523,6 +656,8 @@ class _OverviewSectionState extends State<OverviewSection> {
           ],
           const SizedBox(height: 16),
           _metricGrid(overview),
+          const SizedBox(height: 16),
+          _offlineSalesCard(),
           const SizedBox(height: 16),
           _alerts(overview.operationalAlerts, overview.creditDueAlerts),
           const SizedBox(height: 16),

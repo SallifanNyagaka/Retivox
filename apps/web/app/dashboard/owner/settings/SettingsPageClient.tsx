@@ -19,6 +19,7 @@ import { applyDashboardTheme, getDashboardThemeKey } from '../../../../component
 import { useToast } from '../../../../lib/hooks/useToast'
 import { changePassword, initiateSubscriptionStkPush, initiateSubscriptionPesapalCheckout, logoutFromSettings, requestPesapalAutoRenewCancellation, confirmPesapalAutoRenewCancellation, submitOwnerLoginReview, submitSubscriptionPayment, updateBusinessProfile } from './actions'
 import type { BusinessSettingsRow, FormState, LoginReviewRow, SubscriptionPaymentRequestRow, SubscriptionPlanOption, SubscriptionRow, UserProfileRow } from './types'
+import type { PlatformSubscriptionPaymentConfig } from '../../../../lib/subscriptions/platformPaymentConfig'
 
 /**
  * Props for the settings page client.
@@ -30,6 +31,7 @@ type Props = {
   subscription: SubscriptionRow | null
   subscriptionPlans: SubscriptionPlanOption[]
   subscriptionPaymentRequests: SubscriptionPaymentRequestRow[]
+  subscriptionPaymentConfig: PlatformSubscriptionPaymentConfig
   loginReviews: LoginReviewRow[]
 }
 
@@ -100,6 +102,27 @@ function getPaymentStatusVariant(status: SubscriptionPaymentRequestRow['status']
   return 'warning'
 }
 
+function SubscriptionSupportContacts({ config }: { config: PlatformSubscriptionPaymentConfig }) {
+  const links: { label: string; href: string }[] = []
+  if (config.support_phone) {
+    const dial = config.support_phone.replace(/[^+\d]/g, '')
+    links.push({ label: `Call ${config.support_phone}`, href: `tel:${dial}` })
+    links.push({ label: `Text ${config.support_phone}`, href: `sms:${dial}` })
+  }
+  if (config.support_email) links.push({ label: `Email ${config.support_email}`, href: `mailto:${config.support_email}` })
+  if (config.support_whatsapp) {
+    const digits = config.support_whatsapp.replace(/\D/g, '').replace(/^0/, '254')
+    if (digits) links.push({ label: `WhatsApp ${config.support_whatsapp}`, href: `https://wa.me/${digits}` })
+  }
+  if (config.support_website) links.push({ label: 'Support website', href: config.support_website })
+  return <div style={{ marginTop: 16, padding: 13, borderRadius: 9, background: 'var(--color-surface)', border: '1px solid var(--color-border)' }}>
+    <p style={{ margin: 0, color: 'var(--color-text-primary)', fontSize: 13, fontWeight: 700 }}>{config.support_message}</p>
+    {links.length > 0 && <div className="flex flex-wrap gap-x-4 gap-y-2" style={{ marginTop: 8 }}>
+      {links.map((link) => <a key={link.href} href={link.href} target={link.href.startsWith('https:') ? '_blank' : undefined} rel={link.href.startsWith('https:') ? 'noreferrer' : undefined} style={{ color: 'var(--color-primary)', fontSize: 13, fontWeight: 700 }}>{link.label}</a>)}
+    </div>}
+  </div>
+}
+
 /**
  * Business profile editing form.
  */
@@ -139,7 +162,7 @@ function BusinessProfileSection({ business }: { business: BusinessSettingsRow })
         clearTimeout(refreshTimer)
       }
     }
-  }, [isPending, router, state.error, state.success, toast])
+  }, [isPending, router, state.error, state.message, state.success, toast])
 
   /**
    * Submits the business profile update.
@@ -466,7 +489,7 @@ function LoginReviewsSection({ reviews }: { reviews: LoginReviewRow[] }) {
         clearTimeout(refreshTimer)
       }
     }
-  }, [isPending, router, state.error, state.success, toast])
+  }, [isPending, router, state.error, state.message, state.success, toast])
 
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -638,15 +661,18 @@ function SubscriptionSection({
   subscription,
   plans,
   paymentRequests,
+  paymentConfig,
 }: {
   billingAsOf: string
   business: BusinessSettingsRow
   subscription: SubscriptionRow | null
   plans: SubscriptionPlanOption[]
   paymentRequests: SubscriptionPaymentRequestRow[]
+  paymentConfig: PlatformSubscriptionPaymentConfig
 }) {
   const router = useRouter()
   const [paymentMethod, setPaymentMethod] = useState<SubscriptionPaymentRequestRow['payment_method'] | 'pesapal'>('mpesa_stk')
+  const [paymentOptionId, setPaymentOptionId] = useState('')
   const [billingInterval, setBillingInterval] = useState<'monthly' | 'yearly' | 'lifetime'>(subscription?.billing_interval === 'lifetime' ? 'lifetime' : subscription?.next_billing_interval ?? subscription?.billing_interval ?? 'monthly')
   const activePlan = subscription?.plan ?? business.subscription_plan
   const [selectedPlanKey, setSelectedPlanKey] = useState(subscription?.next_plan_key ?? (activePlan === 'trial' ? '' : activePlan))
@@ -676,6 +702,17 @@ function SubscriptionSection({
   const displayPlanKey = verifiedPlanIsDue ? subscription?.next_plan_key ?? activePlan : activePlan
   const displayBillingInterval = verifiedPlanIsDue ? subscription?.next_billing_interval ?? 'monthly' : subscription?.billing_interval ?? 'monthly'
   const selectedPlan = plans.find((plan) => plan.plan_key === selectedPlanKey) ?? null
+  const canUseStk = Boolean(billingInterval !== 'lifetime' && selectedPlan && ['daraja_stk', 'mpesa_stk'].some((method) => {
+    const methods = selectedPlan.features?.payment_methods
+    return Array.isArray(methods) && methods.includes(method)
+  }))
+  const activeManualOptions = paymentConfig.manual_payment_options.filter((option) => option.active)
+  const visiblePaymentMethod = paymentMethod === 'mpesa_stk' && !canUseStk
+    ? activeManualOptions[0]?.method ?? 'pesapal'
+    : paymentMethod
+  const selectedManualOption = activeManualOptions.find((option) => option.id === paymentOptionId && option.method === visiblePaymentMethod)
+    ?? activeManualOptions.find((option) => option.method === visiblePaymentMethod)
+    ?? null
   const selectedAmount = selectedPlan
     ? billingInterval === 'lifetime'
       ? Number(selectedPlan.lifetime_amount ?? 0)
@@ -754,7 +791,7 @@ function SubscriptionSection({
         clearTimeout(refreshTimer)
       }
     }
-  }, [isPending, router, state.error, state.success, toast])
+  }, [isPending, router, state.error, state.message, state.success, toast])
 
   useEffect(() => {
     let refreshTimer: ReturnType<typeof setTimeout> | null = null
@@ -799,10 +836,11 @@ function SubscriptionSection({
     const formData = new FormData()
     formData.set('planKey', selectedPlanKey)
     formData.set('billingInterval', billingInterval)
-    formData.set('paymentMethod', paymentMethod)
+    formData.set('paymentMethod', visiblePaymentMethod)
     formData.set('referenceCode', referenceCode)
     formData.set('payerPhone', payerPhone)
     formData.set('promotionCode', promotionCode)
+    formData.set('manualPaymentOptionId', selectedManualOption?.id ?? '')
 
     startTransition(() => {
       action(formData)
@@ -974,19 +1012,20 @@ function SubscriptionSection({
 
             <div className="flex flex-wrap gap-2" style={{ marginTop: 14 }} role="group" aria-label="Subscription payment method">
               {([
-                ['mpesa_stk', 'M-Pesa prompt'],
-                ['pesapal', 'Card / bank (Pesapal)'],
-                ['mpesa_manual', 'M-Pesa reference'],
-                ['bank_transfer', 'Bank transfer'],
-                ['cash_deposit', 'Cash deposit'],
-                ['other', 'Other'],
-              ] as const).map(([method, label]) => (
+                ...(canUseStk ? [['mpesa_stk', 'M-Pesa prompt'] as const] : []),
+                ['pesapal', 'Card / bank (Pesapal)'] as const,
+                ...activeManualOptions.map((option) => [option.method, option.label] as const),
+              ]).map(([method, label]) => (
                 <button
-                  key={method}
+                  key={`${method}-${label}`}
                   type="button"
-                  aria-pressed={paymentMethod === method}
-                  className={paymentMethod === method ? 'btn-primary' : 'btn-outline'}
-                  onClick={() => setPaymentMethod(method)}
+                  aria-pressed={visiblePaymentMethod === method}
+                  className={visiblePaymentMethod === method ? 'btn-primary' : 'btn-outline'}
+                  onClick={() => {
+                    setPaymentMethod(method)
+                    const matchingOption = activeManualOptions.find((option) => option.method === method && option.label === label)
+                    if (matchingOption) setPaymentOptionId(matchingOption.id)
+                  }}
                   style={{ borderRadius: 8, padding: '8px 11px', fontSize: 12 }}
                 >
                   {label}
@@ -994,7 +1033,7 @@ function SubscriptionSection({
               ))}
             </div>
 
-            {paymentMethod === 'mpesa_stk' ? (
+            {visiblePaymentMethod === 'mpesa_stk' ? (
               <form onSubmit={onSubmitStk} className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto] sm:items-end" style={{ marginTop: 14 }}>
                 <label style={{ fontSize: 13 }}>
                   M-Pesa phone number
@@ -1013,7 +1052,7 @@ function SubscriptionSection({
                   Complete the prompt on your phone. Retivox never asks for or stores your M-Pesa PIN.
                 </p>
               </form>
-            ) : paymentMethod === 'pesapal' ? (
+            ) : visiblePaymentMethod === 'pesapal' ? (
               <form onSubmit={onSubmitPesapal} className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end" style={{ marginTop: 14 }}>
                 <label style={{ fontSize: 13 }}>
                   Customer phone (optional when your account email is available)
@@ -1039,6 +1078,14 @@ function SubscriptionSection({
               </form>
             ) : (
               <form onSubmit={onSubmitPayment} className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_1fr_auto] sm:items-end" style={{ marginTop: 14 }}>
+                {selectedManualOption && <div className="sm:col-span-3 rounded-xl border p-3" style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)' }}>
+                  <strong style={{ color: 'var(--color-text-primary)', fontSize: 14 }}>{selectedManualOption.label}</strong>
+                  <p style={{ margin: '6px 0 0', color: 'var(--color-text-primary)', fontSize: 13 }}>Pay to: <strong>{selectedManualOption.destination}</strong></p>
+                  {selectedManualOption.accountName && <p style={{ margin: '4px 0 0', color: 'var(--color-text-muted)', fontSize: 12 }}>Account name: {selectedManualOption.accountName}</p>}
+                  {selectedManualOption.accountReference && <p style={{ margin: '4px 0 0', color: 'var(--color-text-muted)', fontSize: 12 }}>Account/reference: <strong>{selectedManualOption.accountReference}</strong></p>}
+                  {selectedManualOption.instructions && <p style={{ margin: '6px 0 0', color: 'var(--color-text-muted)', fontSize: 12, whiteSpace: 'pre-wrap' }}>{selectedManualOption.instructions}</p>}
+                </div>}
+                {!selectedManualOption && <p role="alert" className="sm:col-span-3" style={{ margin: 0, color: 'var(--color-warning)', fontSize: 13 }}>Manual payment options are not configured at the moment. Contact Retivox support.</p>}
                 <label style={{ fontSize: 13 }}>
                   Payment reference
                   <input value={referenceCode} onChange={(event) => setReferenceCode(event.target.value.toUpperCase())} placeholder="Transaction or deposit reference" required style={inputStyle} />
@@ -1051,7 +1098,7 @@ function SubscriptionSection({
                   Promotion code
                   <input value={promotionCode} onChange={(event) => setPromotionCode(event.target.value.toUpperCase())} placeholder="Optional" style={inputStyle} />
                 </label>
-                <button type="submit" className="btn-primary" disabled={isPending} style={{ borderRadius: 8, padding: '11px 16px' }}>
+                <button type="submit" className="btn-primary" disabled={isPending || !selectedManualOption} style={{ borderRadius: 8, padding: '11px 16px' }}>
                   {isPending ? 'Submitting...' : 'Submit for review'}
                 </button>
                 {state.error && <p style={{ gridColumn: '1 / -1', margin: 0, fontSize: 13, color: 'var(--color-danger)' }}>{state.error}</p>}
@@ -1060,6 +1107,7 @@ function SubscriptionSection({
                 </p>
               </form>
             )}
+            <SubscriptionSupportContacts config={paymentConfig} />
           </div>
         )}
       </div>
@@ -1301,7 +1349,7 @@ function DangerZoneSection() {
 /**
  * Owner settings dashboard client component.
  */
-export default function SettingsPageClient({ billingAsOf, business, ownerProfile, subscription, subscriptionPlans, subscriptionPaymentRequests, loginReviews }: Props) {
+export default function SettingsPageClient({ billingAsOf, business, ownerProfile, subscription, subscriptionPlans, subscriptionPaymentRequests, subscriptionPaymentConfig, loginReviews }: Props) {
   return (
     <div className="flex flex-col gap-6" data-currency={business.currency}>
       {/* Page header */}
@@ -1324,7 +1372,7 @@ export default function SettingsPageClient({ billingAsOf, business, ownerProfile
       <BusinessProfileSection business={business} />
       <AccountSecuritySection ownerProfile={ownerProfile} />
       <LoginReviewsSection reviews={loginReviews} />
-      <SubscriptionSection billingAsOf={billingAsOf} business={business} subscription={subscription} plans={subscriptionPlans} paymentRequests={subscriptionPaymentRequests} />
+      <SubscriptionSection billingAsOf={billingAsOf} business={business} subscription={subscription} plans={subscriptionPlans} paymentRequests={subscriptionPaymentRequests} paymentConfig={subscriptionPaymentConfig} />
       <AppearanceSection userId={ownerProfile.id} />
       <DangerZoneSection />
     </div>

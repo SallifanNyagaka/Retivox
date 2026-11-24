@@ -6,7 +6,7 @@ class AppDatabase extends GeneratedDatabase {
     : super(executor ?? driftDatabase(name: 'retivox_local'));
 
   @override
-  int get schemaVersion => 3;
+  int get schemaVersion => 4;
 
   @override
   Iterable<TableInfo> get allTables => const [];
@@ -59,6 +59,7 @@ class AppDatabase extends GeneratedDatabase {
               expires_at TEXT NOT NULL
             )
           ''');
+      await _createProductBarcodeIndex();
     },
     onUpgrade: (migrator, from, to) async {
       if (from < 1) {
@@ -112,8 +113,71 @@ class AppDatabase extends GeneratedDatabase {
               )
             ''');
       }
+      if (from < 4) {
+        await _createProductBarcodeIndex();
+      }
     },
   );
+
+  Future<void> _createProductBarcodeIndex() async {
+    await customStatement('''
+      CREATE TABLE product_barcode_index (
+        account_id TEXT NOT NULL,
+        branch_id TEXT NOT NULL,
+        barcode_hash TEXT NOT NULL,
+        product_option_id TEXT NOT NULL,
+        PRIMARY KEY (account_id, branch_id, barcode_hash)
+      )
+    ''');
+  }
+
+  Future<void> replaceProductBarcodeIndex(
+    String accountId,
+    String branchId,
+    List<Map<String, String>> entries,
+  ) async {
+    await transaction(() async {
+      await customStatement(
+        'DELETE FROM product_barcode_index WHERE account_id = ? AND branch_id = ?',
+        [accountId, branchId],
+      );
+      for (final entry in entries) {
+        await customStatement(
+          '''
+          INSERT OR REPLACE INTO product_barcode_index(
+            account_id, branch_id, barcode_hash, product_option_id
+          ) VALUES (?, ?, ?, ?)
+          ''',
+          [
+            accountId,
+            branchId,
+            entry['barcode_hash'],
+            entry['product_option_id'],
+          ],
+        );
+      }
+    });
+  }
+
+  Future<String?> productOptionForBarcodeHash(
+    String accountId,
+    String branchId,
+    String barcodeHash,
+  ) async {
+    final rows = await customSelect(
+      '''
+      SELECT product_option_id FROM product_barcode_index
+      WHERE account_id = ? AND branch_id = ? AND barcode_hash = ?
+      LIMIT 1
+      ''',
+      variables: [
+        Variable.withString(accountId),
+        Variable.withString(branchId),
+        Variable.withString(barcodeHash),
+      ],
+    ).get();
+    return rows.isEmpty ? null : rows.first.read<String>('product_option_id');
+  }
 
   Future<String?> readPreference(String key) async {
     final rows = await customSelect(
@@ -243,6 +307,35 @@ class AppDatabase extends GeneratedDatabase {
         ''',
     variables: [Variable.withString(accountId)],
   ).get();
+
+  /// Returns every unsynced sale whose inventory must remain reserved locally.
+  /// Unlike the activity list, this query has no display pagination limit.
+  Future<List<QueryRow>> inventoryAffectingSales(
+    String accountId,
+    String branchId,
+  ) => customSelect(
+    '''
+        SELECT local_id, branch_id, status, encrypted_payload
+        FROM offline_sales
+        WHERE account_id = ? AND branch_id = ?
+          AND status IN ('pending_sync', 'syncing', 'needs_correction')
+        ORDER BY recorded_at ASC
+        ''',
+    variables: [Variable.withString(accountId), Variable.withString(branchId)],
+  ).get();
+
+  Future<QueryRow> offlineSalesOverviewCounts(String accountId) => customSelect(
+    '''
+      SELECT
+        COUNT(*) FILTER (WHERE status IN ('pending_sync', 'syncing')) AS pending_count,
+        COUNT(*) FILTER (WHERE status = 'needs_correction') AS failed_count,
+        COUNT(*) FILTER (WHERE status = 'synced') AS synced_count,
+        MAX(updated_at) FILTER (WHERE status = 'synced') AS last_synced_at
+      FROM offline_sales
+      WHERE account_id = ?
+      ''',
+    variables: [Variable.withString(accountId)],
+  ).getSingle();
 
   Future<List<QueryRow>> cashSalesNeedingLegacyRetry(String accountId) =>
       customSelect(
