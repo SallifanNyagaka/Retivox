@@ -12,6 +12,8 @@ import '../../core/auth/retivox_user.dart';
 import '../../core/network/web_api_client.dart';
 import '../../core/network/backend_health_check.dart';
 import 'barcode_similarity.dart';
+import '../sales/sale_repository.dart'
+    show SaleRepository, applyPendingProductCatalogActions;
 
 class DashboardSnapshot {
   const DashboardSnapshot({
@@ -4805,6 +4807,7 @@ class DashboardRepository {
               tracksExpiry: payload['tracks_expiry'] == true,
               barcodes: _stringList(payload['barcodes']),
             );
+            await _updateCachedSaleCatalogProduct(user, payload);
             break;
           case 'set_product_active':
             await supabase.rpc(
@@ -4813,6 +4816,11 @@ class DashboardRepository {
                 'p_product_id': payload['product_id'],
                 'p_is_active': payload['is_active'],
               },
+            );
+            await _updateCachedSaleProductAvailability(
+              user,
+              payload['product_id'].toString(),
+              payload['is_active'] == true,
             );
             break;
           case 'save_supplier':
@@ -5118,6 +5126,134 @@ class DashboardRepository {
       };
     }).toList();
     await vault.cacheValue(user, 'dashboard:products', rows);
+  }
+
+  Future<void> _updateCachedSaleCatalogProduct(
+    RetivoxUser user,
+    Map<String, dynamic> payload,
+  ) async {
+    final productOptions = await vault.readCachedValue<List<dynamic>>(
+      user,
+      'dashboard:product-options',
+    );
+    final options = productOptions
+        ?.whereType<Map>()
+        .map(Map<String, dynamic>.from)
+        .firstOrNull;
+    final action = {'type': 'update_product', 'payload': payload};
+    for (final branch in user.branches) {
+      final branchId = branch.id;
+      final serverCacheKey = 'sale-products-server:$branchId';
+      final snapshot = await vault.readCachedValue<Map<String, dynamic>>(
+        user,
+        serverCacheKey,
+      );
+      if (snapshot != null) {
+        final rows = (snapshot['rows'] as List? ?? const [])
+            .whereType<Map>()
+            .map(Map<String, dynamic>.from)
+            .toList();
+        snapshot['rows'] = applyPendingProductCatalogActions(
+          rows,
+          pendingActions: [action],
+          cachedUnits: (options?['units'] as List? ?? const []),
+          branchId: branchId,
+        );
+        await vault.cacheValue(user, serverCacheKey, snapshot);
+      }
+
+      final saleCacheKey = 'sale-products:$branchId';
+      final cachedProducts = await vault.readCachedValue<List<dynamic>>(
+        user,
+        saleCacheKey,
+      );
+      if (cachedProducts == null) continue;
+      final rows = cachedProducts
+          .whereType<Map>()
+          .map(Map<String, dynamic>.from)
+          .toList();
+      await vault.cacheValue(
+        user,
+        saleCacheKey,
+        applyPendingProductCatalogActions(
+          rows,
+          pendingActions: [action],
+          cachedUnits: (options?['units'] as List? ?? const []),
+          branchId: branchId,
+        ),
+      );
+    }
+  }
+
+  Future<void> _updateCachedSaleProductAvailability(
+    RetivoxUser user,
+    String productId,
+    bool isActive,
+  ) async {
+    final cachedCatalog = SaleRepository(
+      database: vault.database,
+      vault: vault,
+      client: null,
+      backendHealthCheck: BackendHealthCheck(
+        supabaseUrl: '',
+        publishableKey: '',
+      ),
+    );
+    final productOptions = await vault.readCachedValue<List<dynamic>>(
+      user,
+      'dashboard:product-options',
+    );
+    final options = productOptions
+        ?.whereType<Map>()
+        .map(Map<String, dynamic>.from)
+        .firstOrNull;
+
+    for (final branch in user.branches) {
+      final branchId = branch.id;
+      final serverCacheKey = 'sale-products-server:$branchId';
+      final snapshot = await vault.readCachedValue<Map<String, dynamic>>(
+        user,
+        serverCacheKey,
+      );
+      if (snapshot != null) {
+        final inactiveProductIds =
+            (snapshot['inactive_product_ids'] as List? ?? const [])
+                .map((id) => id.toString())
+                .toSet();
+        if (isActive) {
+          inactiveProductIds.remove(productId);
+        } else {
+          inactiveProductIds.add(productId);
+        }
+        snapshot['inactive_product_ids'] = inactiveProductIds.toList();
+        await vault.cacheValue(user, serverCacheKey, snapshot);
+      }
+
+      final saleCacheKey = 'sale-products:$branchId';
+      final cachedProducts = await vault.readCachedValue<List<dynamic>>(
+        user,
+        saleCacheKey,
+      );
+      if (isActive) {
+        if (snapshot != null || cachedProducts != null) {
+          await cachedCatalog.loadProducts(user, branchId);
+        }
+        continue;
+      }
+
+      // Preserve every other cached row and its quantities. The encrypted
+      // server snapshot retains the inactive marker so this product cannot
+      // return when the derived POS cache is rebuilt offline.
+      final rows = (cachedProducts ?? const <dynamic>[])
+          .whereType<Map>()
+          .map(Map<String, dynamic>.from)
+          .where((row) => row['product_id']?.toString() != productId)
+          .toList();
+      if (cachedProducts != null) {
+        await vault.cacheValue(user, saleCacheKey, rows);
+      }
+      await cachedCatalog.refreshCachedBarcodeIndex(user, branchId, rows);
+    }
   }
 
   List<String> _stringList(Object? value) => value is List

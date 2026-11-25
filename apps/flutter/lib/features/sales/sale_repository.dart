@@ -404,6 +404,241 @@ List<Map<String, dynamic>> applyLocalSupplierReceipts(
   }).toList();
 }
 
+/// Applies queued edits to products already present in the branch-scoped POS
+/// catalog. A locally-created product is deliberately not added here: it has
+/// no server product ID or server branch-stock row until the existing create
+/// and stock workflows synchronize.
+List<Map<String, dynamic>> applyPendingProductCatalogActions(
+  List<Map<String, dynamic>> catalogRows, {
+  required List<dynamic> pendingActions,
+  required List<dynamic> cachedUnits,
+  required String branchId,
+}) {
+  var rows = catalogRows.map((row) => Map<String, dynamic>.from(row)).toList();
+  final unavailableOptions = <String>{};
+  final activeByProduct = <String, bool>{};
+  final unitsById = {
+    for (final raw in cachedUnits.whereType<Map>())
+      if (raw['id'] != null)
+        raw['id'].toString(): Map<String, dynamic>.from(raw),
+  };
+
+  for (final rawAction in pendingActions.whereType<Map>()) {
+    final action = Map<String, dynamic>.from(rawAction);
+    if ((action['error']?.toString().trim().isNotEmpty ?? false)) continue;
+    final type = action['type']?.toString();
+    final payload = Map<String, dynamic>.from(action['payload'] as Map? ?? {});
+    if (type == 'create_product') {
+      // The queued product still has a temporary local ID. Sale payloads and
+      // the existing server RPC require the server UUID, so keep it out of POS.
+      continue;
+    }
+    if (type == 'set_product_active') {
+      final productId = payload['product_id']?.toString();
+      if (productId != null) {
+        activeByProduct[productId] = payload['is_active'] == true;
+      }
+      continue;
+    }
+    if (type != 'update_product') continue;
+
+    final productId = payload['product_id']?.toString();
+    if (productId == null || productId.isEmpty) continue;
+    for (var index = 0; index < rows.length; index++) {
+      final row = rows[index];
+      if (row['product_id']?.toString() != productId) continue;
+      final optionId = row['option_id']?.toString();
+      if (row['recovery_item_id'] != null) {
+        // Recovery inventory keeps its batch price and UOM. Product identity
+        // and barcode metadata still follow the queued product edit.
+        rows[index] = {
+          ...row,
+          'name': payload['name']?.toString() ?? row['name'],
+          'sku': payload['sku']?.toString() ?? row['sku'],
+          'barcodes': _stringValues(payload['barcodes']),
+        };
+        continue;
+      }
+      final updated = _saleRowForPendingProductEdit(
+        row,
+        payload,
+        unitsById,
+        branchId,
+      );
+      if (updated == null) {
+        if (optionId != null) unavailableOptions.add(optionId);
+      } else {
+        rows[index] = updated;
+        if (optionId != null) unavailableOptions.remove(optionId);
+      }
+    }
+  }
+
+  return rows.where((row) {
+    final optionId = row['option_id']?.toString();
+    final productId = row['product_id']?.toString();
+    return (optionId == null || !unavailableOptions.contains(optionId)) &&
+        (productId == null || activeByProduct[productId] != false);
+  }).toList();
+}
+
+Map<String, dynamic>? _saleRowForPendingProductEdit(
+  Map<String, dynamic> current,
+  Map<String, dynamic> payload,
+  Map<String, Map<String, dynamic>> unitsById,
+  String branchId,
+) {
+  final scopedBranches = _stringValues(payload['pricing_branch_ids']);
+  if (scopedBranches.isNotEmpty && !scopedBranches.contains(branchId)) {
+    return null;
+  }
+
+  final saleUnitIds = _stringValues(payload['sale_unit_ids']);
+  final defaultSaleUnitId = payload['default_sale_unit_id']?.toString();
+  if (saleUnitIds.isEmpty ||
+      defaultSaleUnitId == null ||
+      !saleUnitIds.contains(defaultSaleUnitId)) {
+    return null;
+  }
+
+  final uomOptions = <Map<String, dynamic>>[];
+  final conversionByUnit = <String, double>{};
+  for (final id in saleUnitIds) {
+    final unit = unitsById[id];
+    final conversion = SaleProduct._number(unit?['conversion_factor']);
+    if (unit == null ||
+        unit['is_active'] == false ||
+        !conversion.isFinite ||
+        conversion <= 0) {
+      return null;
+    }
+    conversionByUnit[id] = conversion;
+    uomOptions.add({
+      'id': id,
+      'name': unit['name'],
+      'abbreviation': unit['abbreviation'],
+      'conversionFactor': conversion,
+      'isBaseUnit': unit['is_base_unit'] == true,
+      'isBaseUom': (conversion - 1).abs() < 0.0001,
+      'isDefaultSaleUom': id == defaultSaleUnitId,
+      'isDefaultPurchaseUom':
+          id == payload['default_purchase_unit_id']?.toString(),
+    });
+  }
+
+  final rawMethod = payload['pricing_method']?.toString() ?? 'fixed_price';
+  if (!const [
+    'fixed_price',
+    'assisted_pack',
+    'manual_quantity',
+  ].contains(rawMethod)) {
+    return null;
+  }
+  final usesAssistedPacks =
+      rawMethod == 'fixed_price' && saleUnitIds.length > 1;
+  final modelMethod = usesAssistedPacks ? 'assisted_pack' : rawMethod;
+  final modelRounding = usesAssistedPacks
+      ? 'none'
+      : (payload['rounding_rule']?.toString() ?? 'nearest_5');
+  final salePrices = payload['sale_prices'] as Map? ?? const {};
+  final rawPricePoints = (payload['price_points'] as List? ?? const [])
+      .whereType<Map>()
+      .map(Map<String, dynamic>.from)
+      .toList();
+  final pricePointsByKey = <String, Map<String, dynamic>>{};
+
+  for (final id in saleUnitIds) {
+    final priceValue = id == defaultSaleUnitId
+        ? payload['base_price']
+        : salePrices[id] ?? salePrices[id.toString()];
+    final hasExplicitPoint = rawPricePoints.any(
+      (point) => point['uom_id']?.toString() == id,
+    );
+    if (priceValue == null && hasExplicitPoint) continue;
+    final price = SaleProduct._number(priceValue, fallback: double.nan);
+    final conversion = conversionByUnit[id]!;
+    if (!price.isFinite || price <= 0) return null;
+    pricePointsByKey['$id:$conversion'] = {
+      'quantity': 1.0,
+      'baseQuantity': conversion,
+      'price': price,
+      'maxDiscountAmount': 0.0,
+      'uomId': id,
+    };
+  }
+
+  for (final point in rawPricePoints) {
+    final id = point['uom_id']?.toString();
+    final quantity = SaleProduct._number(
+      point['quantity'],
+      fallback: double.nan,
+    );
+    final price = SaleProduct._number(point['price'], fallback: double.nan);
+    final maxDiscount = SaleProduct._number(
+      point['max_discount_amount'],
+      fallback: double.nan,
+    );
+    final conversion = id == null ? null : conversionByUnit[id];
+    if (id == null ||
+        conversion == null ||
+        !quantity.isFinite ||
+        quantity <= 0 ||
+        !price.isFinite ||
+        price < 0 ||
+        !maxDiscount.isFinite ||
+        maxDiscount < 0) {
+      return null;
+    }
+    final baseQuantity = double.parse(
+      (quantity * conversion).toStringAsFixed(4),
+    );
+    pricePointsByKey['$id:$baseQuantity'] = {
+      'quantity': quantity,
+      'baseQuantity': baseQuantity,
+      'price': price,
+      'maxDiscountAmount': maxDiscount,
+      'uomId': id,
+    };
+  }
+
+  final points = pricePointsByKey.values.toList()
+    ..sort((first, second) {
+      final firstIsDefault = first['uomId'] == defaultSaleUnitId;
+      final secondIsDefault = second['uomId'] == defaultSaleUnitId;
+      if (firstIsDefault != secondIsDefault) return firstIsDefault ? -1 : 1;
+      return SaleProduct._number(first['baseQuantity'])
+          .compareTo(SaleProduct._number(second['baseQuantity']));
+    });
+  final serverMethod =
+      modelMethod == 'assisted_pack' &&
+          modelRounding == 'none' &&
+          !points.any((point) => SaleProduct._number(point['quantity']) != 1)
+      ? 'fixed_price'
+      : modelMethod;
+  final insertedPricePoints = modelMethod == 'fixed_price'
+      ? const <Map<String, dynamic>>[]
+      : points;
+  final sellingPrice = insertedPricePoints.isEmpty
+      ? SaleProduct._number(payload['base_price'])
+      : SaleProduct._number(insertedPricePoints.first['price']);
+  if (!sellingPrice.isFinite || sellingPrice <= 0) return null;
+
+  return {
+    ...current,
+    'name': payload['name']?.toString() ?? current['name'],
+    'sku': payload['sku']?.toString() ?? current['sku'],
+    'selling_price': sellingPrice,
+    'pricing_method': serverMethod,
+    'rounding_rule': modelRounding,
+    'pricing_options': insertedPricePoints,
+    'uom_options': uomOptions,
+    'barcodes': _stringValues(payload['barcodes']),
+  };
+}
+
+List<String> _stringValues(Object? value) =>
+    value is List ? value.map((item) => item.toString()).toList() : <String>[];
+
 class LocalSale {
   const LocalSale({
     required this.localId,
@@ -480,6 +715,10 @@ class SaleRepository {
   final BackendHealthCheck backendHealthCheck;
   final Map<String, Future<void>> _activeSyncs = {};
   final Map<String, String?> _indexedBarcodeCatalogVersions = {};
+  final Map<String, Future<List<SaleProduct>>> _activeCatalogLoads = {};
+  final Map<String, Future<List<SaleProduct>>> _latestCatalogLoadsByScope = {};
+  final Map<String, Future<void>> _catalogCacheWrites = {};
+  final Map<String, int> _catalogRequestGenerations = {};
   static final Sha256 _barcodeHasher = Sha256();
 
   Future<bool> isBackendReachable() =>
@@ -497,73 +736,252 @@ class SaleRepository {
     String branchId,
   ) async {
     final supabase = client;
-    if (supabase != null) {
-      try {
-        final response = await supabase.rpc(
-          'employee_available_products',
-          params: {'p_branch_id': branchId},
-        );
-        if (response is! List) {
-          throw const SaleRepositoryException(
-            'The server returned an invalid product list.',
-          );
-        }
-        final rawRows = response.whereType<Map<String, dynamic>>().toList();
-        final productIds = rawRows
-            .map((row) => row['product_id']?.toString())
-            .whereType<String>()
-            .toSet()
-            .toList();
-        final rawBarcodeRows = productIds.isEmpty
-            ? const <dynamic>[]
-            : await supabase
-                  .from('product_barcodes')
-                  .select('product_id, code')
-                  .eq('business_id', user.businessId)
-                  .eq('is_active', true)
-                  .inFilter('product_id', productIds);
-        final barcodeRows = rawBarcodeRows
-            .whereType<Map>()
-            .map(Map<String, dynamic>.from)
-            .toList();
-        final barcodesByProduct = <String, List<String>>{};
-        for (final barcode in barcodeRows) {
-          final productId = barcode['product_id']?.toString();
-          final code = barcode['code']?.toString();
-          if (productId != null && code != null) {
-            (barcodesByProduct[productId] ??= <String>[]).add(code);
-          }
-        }
-        final rows = rawRows
-            .map(
-              (row) => SaleProduct.fromJson({
-                ...row,
-                'barcodes':
-                    barcodesByProduct[row['product_id']?.toString()] ??
-                    const <String>[],
-              }),
-            )
-            .toList();
-        await _storeServerProductSnapshot(user, branchId, rows);
-        final available = await _productsWithPendingLocalSales(
+    if (supabase == null) return _cachedProducts(user, branchId);
+
+    final scope = _catalogScopeKey(user, branchId);
+    final permissionScope = _catalogPermissionSignature(user);
+    final localState = await _catalogLocalStateSignature(user, branchId);
+    final requestKey = '$scope|$permissionScope|$localState';
+    final existing = _activeCatalogLoads[requestKey];
+    if (existing != null) return existing;
+
+    final generation = (_catalogRequestGenerations[scope] ?? 0) + 1;
+    _catalogRequestGenerations[scope] = generation;
+    late final Future<List<SaleProduct>> request;
+    request =
+        _loadProductsForRequest(
           user,
           branchId,
-          rows.map((row) => row.toJson()).toList(),
-        );
-        await vault.cacheValue(user, 'sale-products:$branchId', available);
-        final products = available.map(SaleProduct.fromCachedJson).toList();
-        await _refreshBarcodeIndex(user, branchId, products);
-        return products;
-      } on SocketException {
-        return _cachedProducts(user, branchId);
-      } on TimeoutException {
-        return _cachedProducts(user, branchId);
-      } catch (error) {
-        if (_isNetworkError(error)) return _cachedProducts(user, branchId);
-        rethrow;
-      }
+          scope: scope,
+          localState: localState,
+          generation: generation,
+        ).whenComplete(() {
+          if (identical(_activeCatalogLoads[requestKey], request)) {
+            _activeCatalogLoads.remove(requestKey);
+          }
+          if (identical(_latestCatalogLoadsByScope[scope], request)) {
+            _latestCatalogLoadsByScope.remove(scope);
+          }
+        });
+    _activeCatalogLoads[requestKey] = request;
+    _latestCatalogLoadsByScope[scope] = request;
+    return request;
+  }
+
+  String _catalogScopeKey(RetivoxUser user, String branchId) {
+    return jsonEncode([user.id, user.businessId, branchId]);
+  }
+
+  String _catalogPermissionSignature(RetivoxUser user) {
+    final permissions =
+        user.branches.map((branch) => '${branch.id}:${branch.role}').toList()
+          ..sort();
+    return jsonEncode([user.role.name, permissions]);
+  }
+
+  Future<String> _catalogLocalStateSignature(
+    RetivoxUser user,
+    String branchId,
+  ) async {
+    final pendingActionsUpdatedAt = await vault.cachedValueUpdatedAt(
+      user,
+      'dashboard:pending_actions',
+    );
+    final pendingSales = await database.inventoryAffectingSales(
+      user.id,
+      branchId,
+    );
+    final pendingSalesSignature = pendingSales
+        .map(
+          (row) =>
+              '${row.read<String>('local_id')}:${row.read<String>('status')}:${row.read<String>('encrypted_payload')}',
+        )
+        .join(',');
+    return '${pendingActionsUpdatedAt?.toUtc().microsecondsSinceEpoch ?? '-'}|$pendingSalesSignature';
+  }
+
+  Future<bool> _catalogRequestIsCurrent({
+    required RetivoxUser user,
+    required String branchId,
+    required String scope,
+    required String localState,
+    required int generation,
+  }) async {
+    if (_catalogRequestGenerations[scope] != generation) return false;
+    return await _catalogLocalStateSignature(user, branchId) == localState;
+  }
+
+  Future<List<SaleProduct>> _newestCatalogResult({
+    required RetivoxUser user,
+    required String branchId,
+    required String scope,
+    required int generation,
+  }) {
+    final latest = _latestCatalogLoadsByScope[scope];
+    final currentGeneration = _catalogRequestGenerations[scope] ?? generation;
+    if (currentGeneration > generation) {
+      return latest ?? _cachedProducts(user, branchId);
     }
-    return _cachedProducts(user, branchId);
+    return loadProducts(user, branchId);
+  }
+
+  Future<List<SaleProduct>> _loadProductsForRequest(
+    RetivoxUser user,
+    String branchId, {
+    required String scope,
+    required String localState,
+    required int generation,
+  }) async {
+    final supabase = client;
+    if (supabase == null) return _cachedProducts(user, branchId);
+    try {
+      final response = await supabase.rpc(
+        'employee_available_products',
+        params: {'p_branch_id': branchId},
+      );
+      if (response is! List) {
+        throw const SaleRepositoryException(
+          'The server returned an invalid product list.',
+        );
+      }
+      final rawRows = response.whereType<Map<String, dynamic>>().toList();
+      final productIds = rawRows
+          .map((row) => row['product_id']?.toString())
+          .whereType<String>()
+          .toSet()
+          .toList();
+      final rawBarcodeRows = productIds.isEmpty
+          ? const <dynamic>[]
+          : await supabase
+                .from('product_barcodes')
+                .select('product_id, code')
+                .eq('business_id', user.businessId)
+                .eq('is_active', true)
+                .inFilter('product_id', productIds);
+      if (!await _catalogRequestIsCurrent(
+        user: user,
+        branchId: branchId,
+        scope: scope,
+        localState: localState,
+        generation: generation,
+      )) {
+        return await _newestCatalogResult(
+          user: user,
+          branchId: branchId,
+          scope: scope,
+          generation: generation,
+        );
+      }
+
+      final barcodeRows = rawBarcodeRows
+          .whereType<Map>()
+          .map(Map<String, dynamic>.from)
+          .toList();
+      final barcodesByProduct = <String, List<String>>{};
+      for (final barcode in barcodeRows) {
+        final productId = barcode['product_id']?.toString();
+        final code = barcode['code']?.toString();
+        if (productId != null && code != null) {
+          (barcodesByProduct[productId] ??= <String>[]).add(code);
+        }
+      }
+      final rows = rawRows
+          .map(
+            (row) => SaleProduct.fromJson({
+              ...row,
+              'barcodes':
+                  barcodesByProduct[row['product_id']?.toString()] ??
+                  const <String>[],
+            }),
+          )
+          .toList();
+      final available = await _productsWithPendingLocalSales(
+        user,
+        branchId,
+        rows.map((row) => row.toJson()).toList(),
+        appliedLocalSaleIds: const {},
+      );
+      if (!await _catalogRequestIsCurrent(
+        user: user,
+        branchId: branchId,
+        scope: scope,
+        localState: localState,
+        generation: generation,
+      )) {
+        return await _newestCatalogResult(
+          user: user,
+          branchId: branchId,
+          scope: scope,
+          generation: generation,
+        );
+      }
+      final products = available.map(SaleProduct.fromCachedJson).toList();
+      final previousWrite = _catalogCacheWrites[scope] ?? Future<void>.value();
+      late final Future<void> cacheWrite;
+      cacheWrite = previousWrite.catchError((Object _) {}).then((_) async {
+        if (!await _catalogRequestIsCurrent(
+          user: user,
+          branchId: branchId,
+          scope: scope,
+          localState: localState,
+          generation: generation,
+        )) {
+          return;
+        }
+        await _storeServerProductSnapshot(user, branchId, rows);
+        if (!await _catalogRequestIsCurrent(
+          user: user,
+          branchId: branchId,
+          scope: scope,
+          localState: localState,
+          generation: generation,
+        )) {
+          return;
+        }
+        await vault.cacheValue(user, 'sale-products:$branchId', available);
+        await _refreshBarcodeIndex(user, branchId, products);
+      });
+      _catalogCacheWrites[scope] = cacheWrite;
+      try {
+        await cacheWrite;
+      } finally {
+        if (identical(_catalogCacheWrites[scope], cacheWrite)) {
+          _catalogCacheWrites.remove(scope);
+        }
+      }
+      if (!await _catalogRequestIsCurrent(
+        user: user,
+        branchId: branchId,
+        scope: scope,
+        localState: localState,
+        generation: generation,
+      )) {
+        return await _newestCatalogResult(
+          user: user,
+          branchId: branchId,
+          scope: scope,
+          generation: generation,
+        );
+      }
+      return products;
+    } catch (error) {
+      if (!await _catalogRequestIsCurrent(
+        user: user,
+        branchId: branchId,
+        scope: scope,
+        localState: localState,
+        generation: generation,
+      )) {
+        return _newestCatalogResult(
+          user: user,
+          branchId: branchId,
+          scope: scope,
+          generation: generation,
+        );
+      }
+      if (_isNetworkError(error)) return _cachedProducts(user, branchId);
+      rethrow;
+    }
   }
 
   Future<List<SaleProduct>> _cachedProducts(
@@ -620,21 +1038,30 @@ class SaleRepository {
     RetivoxUser user,
     String branchId,
     List<SaleProduct> products,
-  ) => vault.cacheValue(user, 'sale-products-server:$branchId', {
-    'rows': products.map((row) => row.toJson()).toList(),
-    'applied_local_sale_ids': <String>[],
-  });
+  ) async {
+    final previous = await vault.readCachedValue<Map<String, dynamic>>(
+      user,
+      'sale-products-server:$branchId',
+    );
+    await vault.cacheValue(user, 'sale-products-server:$branchId', {
+      'rows': products.map((row) => row.toJson()).toList(),
+      'applied_local_sale_ids': <String>[],
+      'inactive_product_ids': previous?['inactive_product_ids'] ?? const [],
+    });
+  }
 
   Future<List<Map<String, dynamic>>> _productsWithPendingLocalSales(
     RetivoxUser user,
     String branchId,
-    List<Map<String, dynamic>> serverRows,
-  ) async {
+    List<Map<String, dynamic>> serverRows, {
+    Set<String>? appliedLocalSaleIds,
+  }) async {
     final snapshot = await vault.readCachedValue<Map<String, dynamic>>(
       user,
       'sale-products-server:$branchId',
     );
     final appliedIds =
+        appliedLocalSaleIds ??
         (snapshot?['applied_local_sale_ids'] as List? ?? const [])
             .map((id) => id.toString())
             .toSet();
@@ -675,11 +1102,12 @@ class SaleRepository {
       user,
       'dashboard:stock',
     );
-    final actions = await vault.readCachedValue<List<dynamic>>(
-      user,
-      'dashboard:pending_actions',
-    );
-    if (actions == null) return rows;
+    final actions =
+        await vault.readCachedValue<List<dynamic>>(
+          user,
+          'dashboard:pending_actions',
+        ) ??
+        const <dynamic>[];
     var updatedRows = stockRows == null
         ? rows
         : applyLocalStockAdjustments(
@@ -706,7 +1134,42 @@ class SaleRepository {
         ownerCanReceiveImmediately: user.role == RetivoxRole.owner,
       );
     }
-    return updatedRows;
+    final snapshot = await vault.readCachedValue<Map<String, dynamic>>(
+      user,
+      'sale-products-server:$branchId',
+    );
+    final inactiveProductIds =
+        (snapshot?['inactive_product_ids'] as List? ?? const [])
+            .map((id) => id.toString())
+            .toSet();
+    final productActions = <dynamic>[
+      for (final productId in inactiveProductIds)
+        {
+          'type': 'set_product_active',
+          'payload': {'product_id': productId, 'is_active': false},
+        },
+      ...actions,
+    ];
+    final hasPendingProductEdits = productActions.any((raw) {
+      if (raw is! Map) return false;
+      final type = raw['type']?.toString();
+      return type == 'update_product' || type == 'set_product_active';
+    });
+    if (!hasPendingProductEdits) return updatedRows;
+    final productOptions = await vault.readCachedValue<List<dynamic>>(
+      user,
+      'dashboard:product-options',
+    );
+    final options = productOptions
+        ?.whereType<Map>()
+        .map(Map<String, dynamic>.from)
+        .firstOrNull;
+    return applyPendingProductCatalogActions(
+      updatedRows,
+      pendingActions: productActions,
+      cachedUnits: (options?['units'] as List? ?? const []),
+      branchId: branchId,
+    );
   }
 
   Future<void> _recordConfirmedLocalSale(
@@ -825,6 +1288,16 @@ class SaleRepository {
     await database.replaceProductBarcodeIndex(user.id, branchId, entries);
     _indexedBarcodeCatalogVersions[versionKey] = catalogVersion;
   }
+
+  Future<void> refreshCachedBarcodeIndex(
+    RetivoxUser user,
+    String branchId,
+    Iterable<Map<String, dynamic>> rows,
+  ) => _refreshBarcodeIndex(
+    user,
+    branchId,
+    rows.map(SaleProduct.fromCachedJson),
+  );
 
   static Future<String> _barcodeHash(String normalizedBarcode) async {
     final digest = await _barcodeHasher.hash(utf8.encode(normalizedBarcode));

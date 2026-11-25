@@ -336,4 +336,154 @@ void main() {
       },
     );
   });
+
+  group('applyPendingProductCatalogActions', () {
+    final units = [
+      {
+        'id': 'unit-id',
+        'name': 'Each',
+        'abbreviation': 'ea',
+        'conversion_factor': 1,
+        'is_base_unit': true,
+        'is_active': true,
+      },
+      {
+        'id': 'case-id',
+        'name': 'Case',
+        'abbreviation': 'cs',
+        'conversion_factor': 12,
+        'is_base_unit': false,
+        'is_active': true,
+      },
+    ];
+
+    Map<String, dynamic> editPayload({
+      List<String> saleUnitIds = const ['unit-id'],
+      List<String> pricingBranchIds = const ['branch-1'],
+      List<String> barcodes = const ['NEW-123'],
+    }) => {
+      'product_id': 'product-id',
+      'name': 'Updated product',
+      'sku': 'UPDATED-1',
+      'barcodes': barcodes,
+      'base_unit_id': 'unit-id',
+      'sale_unit_ids': saleUnitIds,
+      'default_sale_unit_id': 'unit-id',
+      'default_purchase_unit_id': 'unit-id',
+      'pricing_branch_ids': pricingBranchIds,
+      'pricing_method': 'manual_quantity',
+      'rounding_rule': 'none',
+      'base_price': 15.0,
+      'sale_prices': <String, double>{'unit-id': 15},
+      'price_points': [
+        {
+          'uom_id': 'unit-id',
+          'quantity': 2,
+          'price': 28,
+          'max_discount_amount': 1,
+        },
+      ],
+    };
+
+    test(
+      'reflects queued name, price, UOM and barcode edits on the branch',
+      () {
+        final original = product(
+          method: 'fixed_price',
+          options: const [],
+          barcodes: const ['OLD-123'],
+        ).toJson();
+        original['base_quantity_on_hand'] = 17;
+        original['quantity_on_hand'] = 17;
+
+        final result = applyPendingProductCatalogActions(
+          [original],
+          pendingActions: [
+            {'type': 'update_product', 'payload': editPayload()},
+          ],
+          cachedUnits: units,
+          branchId: 'branch-1',
+        );
+
+        final updated = SaleProduct.fromCachedJson(result.single);
+        expect(updated.name, 'Updated product');
+        expect(updated.sku, 'UPDATED-1');
+        expect(updated.barcodes, ['NEW-123']);
+        expect(updated.sellingPrice, 15);
+        expect(updated.previewPrice(2, updated.uomOptions.first), 28);
+        expect(updated.baseQuantityOnHand, 17);
+        expect(updated.uomOptions.single['id'], 'unit-id');
+      },
+    );
+
+    test('removes normal item when new price scope excludes its branch', () {
+      final original = product(
+        method: 'fixed_price',
+        options: const [],
+      ).toJson();
+      final result = applyPendingProductCatalogActions(
+        [original],
+        pendingActions: [
+          {
+            'type': 'update_product',
+            'payload': editPayload(pricingBranchIds: const ['branch-2']),
+          },
+        ],
+        cachedUnits: units,
+        branchId: 'branch-1',
+      );
+
+      expect(result, isEmpty);
+    });
+
+    test(
+      'deactivation hides an existing item and local creation is not sellable',
+      () {
+        final original = product(
+          method: 'fixed_price',
+          options: const [],
+        ).toJson();
+        final result = applyPendingProductCatalogActions(
+          [original],
+          pendingActions: const [
+            {
+              'type': 'create_product',
+              'payload': {'local_product_id': 'local-product:pending'},
+            },
+            {
+              'type': 'set_product_active',
+              'payload': {'product_id': 'product-id', 'is_active': false},
+            },
+          ],
+          cachedUnits: units,
+          branchId: 'branch-1',
+        );
+
+        expect(result, isEmpty);
+      },
+    );
+
+    test('does not apply a rejected product edit', () {
+      final original = product(
+        method: 'fixed_price',
+        options: const [],
+        barcodes: const ['OLD-123'],
+      ).toJson();
+      final result = applyPendingProductCatalogActions(
+        [original],
+        pendingActions: [
+          {
+            'type': 'update_product',
+            'error': 'The update was rejected.',
+            'payload': editPayload(),
+          },
+        ],
+        cachedUnits: units,
+        branchId: 'branch-1',
+      );
+
+      expect(result.single['name'], 'Test product');
+      expect(result.single['barcodes'], ['OLD-123']);
+    });
+  });
 }
