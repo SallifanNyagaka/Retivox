@@ -3,20 +3,30 @@ import 'dart:io';
 /// Checks whether this installation can reach the configured Supabase Auth
 /// service. A connected Wi-Fi/Ethernet interface alone is not sufficient.
 class BackendHealthCheck {
-  const BackendHealthCheck({
-    required this.supabaseUrl,
-    required this.publishableKey,
-  });
+  BackendHealthCheck({required this.supabaseUrl, required this.publishableKey});
 
   final String supabaseUrl;
   final String publishableKey;
+  Future<bool>? _inFlightCheck;
 
   bool get isConfigured =>
       supabaseUrl.trim().isNotEmpty && publishableKey.trim().isNotEmpty;
 
-  Future<bool> isReachable() async {
-    if (!isConfigured) return false;
+  Future<bool> isReachable() {
+    if (!isConfigured) return Future.value(false);
 
+    final activeCheck = _inFlightCheck;
+    if (activeCheck != null) return activeCheck;
+
+    late final Future<bool> check;
+    check = _probe().whenComplete(() {
+      if (identical(_inFlightCheck, check)) _inFlightCheck = null;
+    });
+    _inFlightCheck = check;
+    return check;
+  }
+
+  Future<bool> _probe() async {
     final httpClient = HttpClient();
     if (Platform.isWindows) {
       // A stale local proxy can be present even when the Supabase host is

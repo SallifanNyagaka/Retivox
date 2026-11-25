@@ -394,11 +394,49 @@ class DashboardRepository {
         raw as Map<String, dynamic>,
       );
       if (user.role == RetivoxRole.owner) {
-        final receivables = await supabase
-            .from('receivable_account_balances')
-            .select('balance_due')
-            .eq('business_id', user.businessId)
-            .gt('balance_due', 0);
+        final now = DateTime.now();
+        final today = DateTime(now.year, now.month, now.day);
+        final dueThrough = today.add(const Duration(days: 2));
+        final localNow = DateTime.now();
+        final todayStart = DateTime(
+          localNow.year,
+          localNow.month,
+          localNow.day,
+        ).toUtc().toIso8601String();
+        final ownerOverviewReads = [
+          _settleOverviewRead(
+            supabase
+                .from('receivable_account_balances')
+                .select('balance_due')
+                .eq('business_id', user.businessId)
+                .gt('balance_due', 0),
+          ),
+          _settleOverviewRead(
+            supabase
+                .from('receivable_account_balances')
+                .select(
+                  'id, customer_name, customer_phone, due_date, balance_due, account_status, branch_name',
+                )
+                .eq('business_id', user.businessId)
+                .gt('balance_due', 0)
+                .lte('due_date', dueThrough.toIso8601String().substring(0, 10))
+                .order('due_date')
+                .range(0, 99),
+          ),
+          _settleOverviewRead(
+            supabase
+                .from('payments')
+                .select(
+                  'payment_method, amount, status, transactions!inner(branch_id, status)',
+                )
+                .eq('business_id', user.businessId)
+                .gte('payment_at', todayStart)
+                .neq('status', 'rejected'),
+          ),
+        ];
+        final receivablesResult = await ownerOverviewReads[0];
+        receivablesResult.throwIfFailed();
+        final receivables = receivablesResult.value;
         overviewData['totalLent'] = (receivables as List).fold<double>(
           0,
           (total, row) =>
@@ -406,34 +444,13 @@ class DashboardRepository {
               (double.tryParse((row as Map)['balance_due']?.toString() ?? '') ??
                   0),
         );
-        final now = DateTime.now();
-        final today = DateTime(now.year, now.month, now.day);
-        final dueThrough = today.add(const Duration(days: 2));
-        final creditDueAlerts = await supabase
-            .from('receivable_account_balances')
-            .select(
-              'id, customer_name, customer_phone, due_date, balance_due, account_status, branch_name',
-            )
-            .eq('business_id', user.businessId)
-            .gt('balance_due', 0)
-            .lte('due_date', dueThrough.toIso8601String().substring(0, 10))
-            .order('due_date')
-            .range(0, 99);
+        final creditAlertsResult = await ownerOverviewReads[1];
+        creditAlertsResult.throwIfFailed();
+        final creditDueAlerts = creditAlertsResult.value;
         overviewData['creditDueAlerts'] = creditDueAlerts;
-        final localNow = DateTime.now();
-        final todayStart = DateTime(
-          localNow.year,
-          localNow.month,
-          localNow.day,
-        ).toUtc().toIso8601String();
-        final payments = await supabase
-            .from('payments')
-            .select(
-              'payment_method, amount, status, transactions!inner(branch_id, status)',
-            )
-            .eq('business_id', user.businessId)
-            .gte('payment_at', todayStart)
-            .neq('status', 'rejected');
+        final paymentsResult = await ownerOverviewReads[2];
+        paymentsResult.throwIfFailed();
+        final payments = paymentsResult.value;
         final byMethod = <String, double>{};
         for (final payment in payments as List) {
           final transaction = payment['transactions'];
@@ -467,6 +484,14 @@ class DashboardRepository {
     return cached == null
         ? null
         : OverviewSnapshot.fromJson(cached).copyWith(isCached: true);
+  }
+
+  Future<_SettledOverviewRead> _settleOverviewRead(Future<dynamic> read) async {
+    try {
+      return _SettledOverviewRead.success(await read);
+    } catch (error, stackTrace) {
+      return _SettledOverviewRead.failure(error, stackTrace);
+    }
   }
 
   Future<List<Map<String, dynamic>>> loadAdminBranchOptions(
@@ -6166,6 +6191,26 @@ class DashboardRepository {
         message.contains('connection refused') ||
         message.contains('connection reset') ||
         message.contains('connection timed out');
+  }
+}
+
+class _SettledOverviewRead {
+  const _SettledOverviewRead.success(this.value)
+    : error = null,
+      stackTrace = null;
+
+  const _SettledOverviewRead.failure(this.error, this.stackTrace)
+    : value = null;
+
+  final dynamic value;
+  final Object? error;
+  final StackTrace? stackTrace;
+
+  void throwIfFailed() {
+    final readError = error;
+    if (readError != null) {
+      Error.throwWithStackTrace(readError, stackTrace!);
+    }
   }
 }
 
